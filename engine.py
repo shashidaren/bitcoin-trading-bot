@@ -419,7 +419,7 @@ class BitcoinEngine:
                     break
 
     def aggregate_tick(self, price: float):
-        minute_now = int(time.time() // 60)
+        minute_now = int(time.time() // 300)
         if self.current_minute is None: self.current_minute = minute_now
         if minute_now != self.current_minute:
             if self.tick_pool:
