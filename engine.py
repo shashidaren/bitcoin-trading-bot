@@ -28,7 +28,7 @@ SYMBOL_MT5 = "BTCUSD"  # Verify this in MT5! Might be "BTCUSDm" for micro lots.
 
 # --- STRATEGY PARAMETERS ---
 LOOKBACK_PERIOD = 20
-WICK_RATIO_TARGET = 0.35
+WICK_RATIO_TARGET = 0.15
 EMA_FAST = 50
 EMA_SLOW = 200
 RSI_PERIOD = 14
@@ -36,8 +36,8 @@ ATR_PERIOD = 14
 FLOOR_BUFFER_PCT = 0.0015
 
 # Optimized Risk Management
-ATR_SL_MULT = 1.5
-ATR_TP_MULT = 2.5
+ATR_SL_MULT = 2.0
+ATR_TP_MULT = 4.0
 
 # Filters
 REQUIRE_VOLUME_CONFIRM = False
@@ -45,7 +45,7 @@ VOLUME_SPIKE_MULTIPLIER = 0.9
 REQUIRE_TREND_CONFIRM = True
 RSI_MIN = 40.0          # NEW: Prevent catching falling knives
 RSI_MAX = 70.0          # NEW: Prevent buying overbought tops
-MIN_ATR = 100.0         # NEW: Prevent trading in low volatility chop (BTC moves fast)
+MIN_ATR = 0.0         # NEW: Prevent trading in low volatility chop (BTC moves fast)
 
 # Live Trading Parameters (Only used if TRADING_MODE == "LIVE")
 # ⚠️ WARNING: Verify XM's BTC contract size before going live!
@@ -94,6 +94,12 @@ class BitcoinEngine:
         self.stop_loss = 0.0
         self.take_profit = 0.0
         self.total_trades = 0
+        # Load previous trade count from CSV to prevent resetting to 1
+        if os.path.isfile(TRADES_LOG_PATH):
+            try:
+                with open(TRADES_LOG_PATH, "r") as f:
+                    self.total_trades = sum(1 for row in csv.reader(f)) - 1  # Subtract 1 for header
+            except Exception: pass
         self.wins = 0
         self.losses = 0
 
@@ -194,12 +200,17 @@ class BitcoinEngine:
 
     def save_status(self):
         win_rate = (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0.0
+        # Always include trade fields, even when no active trade
+        active_trade = self.trade_active or self.trade_active_live
         data = {"symbol": SYMBOL_MT5 if TRADING_MODE == "LIVE" else SYMBOL_TD,
                 "equity": round(self.balance, 2), "total_trades": self.total_trades, "wins": self.wins, "losses": self.losses,
-                "win_rate": round(win_rate, 1), "trade_active": self.trade_active or self.trade_active_live, 
+                "win_rate": round(win_rate, 1), "trade_active": active_trade, 
                 "last_update": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "rsi": round(self.rsi, 1) if self.rsi else None, "ema_fast": round(self.ema_fast, 2) if self.ema_fast else None,
                 "ema_slow": round(self.ema_slow, 2) if self.ema_slow else None, "atr": round(self.atr, 2) if self.atr else None,
+                "entry_price": round(self.entry_price, 2) if active_trade and self.entry_price else None,
+                "stop_loss": round(self.stop_loss, 2) if active_trade and self.stop_loss else None,
+                "take_profit": round(self.take_profit, 2) if active_trade and self.take_profit else None,
                 "funnel": {"candles_evaluated": self.candles_evaluated, "tested_floor": self.hit_tested_floor,
                            "valid_rejection": self.hit_valid_rejection, "held_support": self.hit_held_support,
                            "volume_confirmed": self.hit_volume_confirmed, "trend_confirmed": self.hit_trend_confirmed, "all_confirmed": self.hit_all}}
@@ -344,7 +355,7 @@ class BitcoinEngine:
             self.entry_ema_fast = self.ema_fast; self.entry_ema_slow = self.ema_slow
             
             # Log entry to trades.csv immediately
-            self.log_trade(tick.ask, "OPEN", 0.0) 
+            #self.log_trade(tick.ask, "OPEN", 0.0) 
             
             print(f"✅ ORDER SUCCESS! Ticket: {self.active_ticket}")
             self.send_telegram(f"🚨 *LIVE BTC BUY EXECUTED*\n🎫 Ticket: `{self.active_ticket}`\n💰 Entry: `${tick.ask:,.2f}`\n🛑 SL: `${sl_price:,.2f}`\n🎯 TP: `${tp_price:,.2f}`")

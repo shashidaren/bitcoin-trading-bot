@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight pre-trade filter - Medium-term version
+Lightweight pre-trade filter - Bitcoin Medium-term version
 Acts as the final gatekeeper for portfolio/state-level rules.
 (Strategy-level rules like RSI, Wick, and Trend are handled in engine.py)
 """
@@ -9,14 +9,18 @@ import csv
 import os
 from datetime import datetime, time, timedelta, timezone
 
-TRADES_LOG = "/opt/gold/trades.csv"
-SKIP_LOG   = "/opt/gold/skipped_trades.csv"
+# === FIXED: Paths now point to Bitcoin directory ===
+TRADES_LOG = "/opt/bitcoin/trades.csv"
+SKIP_LOG   = "/opt/bitcoin/skipped_trades.csv"
 LOOKBACK   = 15
 
 # === Settings (Medium-term) ===
 SL_COOLDOWN_MINUTES = 30          # Block new trades for 30 min after any SL
-MIN_ATR_TO_TRADE    = 100.0      # Do not trade when ATR is too low (Single source of truth)
-MAX_ATR_TO_TRADE    = 1500.0
+
+# === OPTION 2: Percentage-based ATR (Adaptive to BTC price) ===
+# At $80,000: MIN is 0.04% ($32) | MAX is 0.60% ($480)
+MIN_ATR_PERCENT = 0.0001  
+MAX_ATR_PERCENT = 0.0060  
 
 # === Simple time-based blackout (UTC) ===
 BLACKOUT_WINDOWS = [
@@ -61,7 +65,6 @@ def check_sl_cooldown(trades: list) -> tuple[bool, str]:
 
     try:
         exit_time = datetime.strptime(last["Exit_Time"], "%Y-%m-%d %H:%M:%S")
-        # Assume exit_time is UTC to match datetime.now(timezone.utc)
         exit_time = exit_time.replace(tzinfo=timezone.utc)
         cooldown_end = exit_time + timedelta(minutes=SL_COOLDOWN_MINUTES)
         now = datetime.now(timezone.utc)
@@ -79,20 +82,28 @@ def analyze_recent(trades: list) -> tuple[bool, str]:
     if len(trades) < 5:
         return False, ""
 
-    # Look at the last 10 trades for context
     recent = trades[-10:]
     sl_trades = [t for t in recent if t.get("Exit_Reason") == "SL"]
 
     # Circuit breaker: Recent SLs in elevated ATR
+    # Note: Changed from 1.6 (Gold value) to 0.005 (0.5% for BTC)
     try:
         high_atr_sl = 0
-        for t in sl_trades[-3:]:  # Check the last 3 SLs
-            atr = float(t.get("ATR_At_Entry", 0) or 0)
-            if atr >= 1.6:
-                high_atr_sl += 1
+        for t in sl_trades[-3:]:  
+            # Strip commas to prevent ValueError (e.g., "80,000.00" -> "80000.00")
+            atr_str = str(t.get("ATR_At_Entry", "0")).replace(",", "")
+            price_str = str(t.get("Entry_Price", "0")).replace(",", "")
+            
+            atr = float(atr_str or 0)
+            price = float(price_str or 0)
+            
+            if price > 0:
+                atr_pct = atr / price
+                if atr_pct >= 0.005: # 0.5%
+                    high_atr_sl += 1
         
         if high_atr_sl >= 2:
-            return True, "Recent SLs occurred in elevated ATR (≥1.6)"
+            return True, "Recent SLs occurred in elevated ATR (≥0.5%)"
     except Exception:
         pass
 
@@ -115,13 +126,12 @@ def log_skip(reason: str, price=None, atr=None):
                 "ATR": f"{atr:.2f}" if atr is not None else "",
             })
     except Exception as e:
-        print(f"⚠️ Failed to log skip: {e}")
+        print(f"️ Failed to log skip: {e}")
 
 
 def should_take_trade(current_atr=None, current_price=None, ema_fast=None, ema_slow=None) -> tuple[bool, str]:
     """
     Final gatekeeper for portfolio/state-level rules.
-    Note: RSI, Wick, and Trend direction are already validated in engine.py.
     """
 
     # 1. Time blackout
@@ -138,17 +148,21 @@ def should_take_trade(current_atr=None, current_price=None, ema_fast=None, ema_s
         log_skip(reason, current_price, current_atr)
         return False, reason
 
-    # 3. Minimum ATR (Single source of truth for volatility filter)
-    if current_atr is not None and current_atr < MIN_ATR_TO_TRADE:
-        reason = f"ATR too low ({current_atr:.2f} < {MIN_ATR_TO_TRADE})"
-        log_skip(reason, current_price, current_atr)
-        return False, reason
+    # 3. Percentage-based ATR Filter (Adaptive to BTC price)
+    if current_atr is not None and current_price is not None and current_price > 0:
+        atr_percent = current_atr / current_price
+        
+        # Minimum ATR
+        if atr_percent < MIN_ATR_PERCENT:
+            reason = f"ATR too low ({atr_percent*100:.3f}% < {MIN_ATR_PERCENT*100:.3f}%)"
+            log_skip(reason, current_price, current_atr)
+            return False, reason
 
-     # 3b. Maximum ATR (Block extreme news volatility)
-    if current_atr is not None and current_atr > MAX_ATR_TO_TRADE:
-        reason = f"ATR too high - News volatility ({current_atr:.2f} > {MAX_ATR_TO_TRADE})"
-        log_skip(reason, current_price, current_atr)
-        return False, reason
+        # Maximum ATR (Block extreme news volatility)
+        if atr_percent > MAX_ATR_PERCENT:
+            reason = f"ATR too high - News volatility ({atr_percent*100:.3f}% > {MAX_ATR_PERCENT*100:.3f}%)"
+            log_skip(reason, current_price, current_atr)
+            return False, reason
 
     # 4. Recent SL pattern (Circuit breaker)
     #skip, reason = analyze_recent(trades)
@@ -161,6 +175,11 @@ def should_take_trade(current_atr=None, current_price=None, ema_fast=None, ema_s
 
 
 if __name__ == "__main__":
-    # Test run with dummy data
-    allow, reason = should_take_trade(current_atr=1.50, current_price=3400.00, ema_fast=3405.00, ema_slow=3395.00)
+    # Test run with realistic Bitcoin dummy data
+    allow, reason = should_take_trade(
+        current_atr=35.00, 
+        current_price=80000.00, 
+        ema_fast=80005.00, 
+        ema_slow=79995.00
+    )
     print(f"Allow: {allow} | Reason: {reason}")
