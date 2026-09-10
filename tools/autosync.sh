@@ -153,7 +153,7 @@ if [ "$NEED_MERGE" = "1" ]; then
 
         SMOKE="not run (no code change)"
         if [ "$MERGE_RC" = "0" ] && [ "$SMOKE_GATE" = "1" ] && [ "$CODE_CHANGED" -gt 0 ]; then
-            if python3 tools/smoke_test.py >/tmp/autosync_smoke.log 2>&1; then
+            if python3 tools/smoke_test.py >/tmp/bitcoin_autosync_smoke.log 2>&1; then
                 SMOKE="ok"
             else
                 SMOKE="FAIL"
@@ -213,9 +213,9 @@ log "push: $PUSH_MSG"
 
 # --- phase 4: integrity + stats --------------------------------------------------
 CHECK_MSG="not run"
-python3 tools/check_data.py >/tmp/autosync_check.log 2>&1
+python3 tools/check_data.py >/tmp/bitcoin_autosync_check.log 2>&1
 CHECK_RC=$?
-CHECK_MSG=$(grep -E '^== result' /tmp/autosync_check.log | tail -n1 | sed 's/^== result: //')
+CHECK_MSG=$(grep -E '^== result' /tmp/bitcoin_autosync_check.log | tail -n1 | sed 's/^== result: //')
 if [ -z "$CHECK_MSG" ]; then
     CHECK_MSG="check_data FAILED to run (rc=$CHECK_RC)"
 fi
