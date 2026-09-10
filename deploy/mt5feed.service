@@ -1,0 +1,34 @@
+# Bitcoin MT5 feed sidecar (Wine Python -> /opt/bitcoin/mt5_last_candle.json)
+#
+# Same proven pattern as the mt5-balance / mt5-trades shell aliases:
+# WINEPREFIX=~/.mt5 + xvfb-run + wine C:/Python312/python.exe.
+#
+# Install (note the -btc suffix: the gold bot already owns mt5feed.service):
+#   sudo cp deploy/mt5feed.service /etc/systemd/system/mt5feed-btc.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mt5feed-btc
+#
+# The MT5 terminal must already be running and logged in in the SAME prefix.
+# The terminal must also have BTCUSD in Market Watch (check the exact symbol -
+# XM may list it as BTCUSDm; override with MT5_FEED_SYMBOL if so).
+#
+# Adjust WINEPREFIX / python path / symbol if your layout differs
+# (MT5_FEED_SYMBOL, MT5_FEED_FILE, MT5_FEED_POLL, MT5_FEED_TIMEFRAME
+# are env-overridable).
+
+[Unit]
+Description=Bitcoin MT5 feed sidecar (Wine Python -> mt5_last_candle.json)
+After=network.target
+
+[Service]
+User=root
+Environment=WINEPREFIX=/root/.mt5
+Environment=MT5_FEED_SYMBOL=BTCUSD
+Environment=MT5_FEED_TIMEFRAME=M5
+ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:\\Python312\\python.exe Z:\\opt\\bitcoin\\tools\\mt5_feed.py
+WorkingDirectory=/root
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

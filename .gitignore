@@ -13,9 +13,9 @@ env/
 dist/
 build/
 
-# === Trading Bot Runtime Data (DO NOT COMMIT) ===
-trades.csv
-skipped_trades.csv
+# === Trading Bot Runtime Data ===
+# trades.csv and skipped_trades.csv are intentionally tracked
+# so we can review results from the repo
 *.log
 *.txt
 *.sqlite
