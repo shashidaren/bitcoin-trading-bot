@@ -20,7 +20,8 @@ deliberately adapted for BTC).
 | `forward_test_log.csv` | M5 candle log with all indicator values per bar. |
 | `skipped_trades.csv` | Every full signal the risk layer blocked, with reason. |
 | `status.json` | Live engine state (equity, funnel counters, daily losses). |
-| `archive/PROJECT_LOG.md` | **Start here** — living changelog, current strategy rules, parameters, to-do list. |
+| `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
+| `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
 | `docs/REVIEW-*.md` | Per-cycle data reviews (none yet — first one after real trade data lands). |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
@@ -72,11 +73,13 @@ Trading stays simulated either way.
 ## 🆕 Starting a new session / handing off to a new agent
 
 Read, in this order:
-1. `archive/PROJECT_LOG.md` — changelog + current strategy state
-2. `docs/PORT-2026-09-10.md` — what the gold port changed and why
-3. the latest `docs/REVIEW-*.md` (once they exist) — most recent data findings
-4. `git log --oneline` — what changed recently
+1. **`docs/HANDOFF.md`** — the executive summary; paste it into the new session
+2. `archive/PROJECT_LOG.md` — changelog + current strategy state
+3. `docs/PORT-2026-09-10.md` — what the gold port changed and why
+4. the latest `docs/REVIEW-*.md` (once they exist) — most recent data findings
+5. `git log --oneline` — what changed recently
 
 Then run `python3 tools/check_data.py` before drawing any conclusion from the
-CSVs. Document each review cycle as a new `docs/REVIEW-YYYY-MM-DD.md` and add a
-changelog line to `archive/PROJECT_LOG.md`.
+CSVs. Document each review cycle as a new `docs/REVIEW-YYYY-MM-DD.md`, add a
+changelog line to `archive/PROJECT_LOG.md`, and **update `docs/HANDOFF.md`**
+(see its §10 — that's how changes stay tracked between sessions).
