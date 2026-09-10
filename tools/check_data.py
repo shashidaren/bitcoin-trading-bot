@@ -158,9 +158,12 @@ def check_trades():
     wins = sum(1 for t in trades if t["Exit_Reason"] == "TP")
     losses = len(trades) - wins
     drift = trades[-1]["bal"] - (STARTING_BALANCE + true_pnl) if trades else 0
-    print(f"  [info] {wins}W/{losses}L over {len(trades)} trades | true P&L from ${STARTING_BALANCE:.0f}: "
-          f"{true_pnl:+.2f} -> ${STARTING_BALANCE + true_pnl:.2f} | engine ledger: ${trades[-1]['bal']:.2f} "
-          f"(drift {drift:+.2f})")
+    if not trades:
+        print(f"  [info] fresh epoch - 0 closed trades (true P&L +0.00 -> ${STARTING_BALANCE:.2f})")
+    else:
+        print(f"  [info] {wins}W/{losses}L over {len(trades)} trades | true P&L from ${STARTING_BALANCE:.0f}: "
+              f"{true_pnl:+.2f} -> ${STARTING_BALANCE + true_pnl:.2f} | engine ledger: ${trades[-1]['bal']:.2f} "
+              f"(drift {drift:+.2f})")
     if abs(drift) > 0.02:
         warn("engine ledger disagrees with sum of profits (reset gap)")
     return trades

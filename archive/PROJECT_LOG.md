@@ -48,11 +48,13 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-10] Fresh-epoch ledger reset (Epoch 2 start)**: all 58 ledger trades predate the gold-lessons port (old gates, BUY-only), so none are comparable under the new stack - and the ledger carried pre-port reset artifacts (duplicate Trade_Nums, 9 balance breaks, +$391.83 equity drift vs -$389.07 true cumulative P&L). `trades.csv` + `skipped_trades.csv` archived to `archive/*_pre-reset_2026-09-10.csv` and reset to header-only; `status.json` re-baselined to $200/#1/0-0. `forward_test_log.csv` deliberately preserved (EMA200 warm-up + gate-replay substrate). Gate replay of the old epoch (validate_gates) showed the new gates would have blocked nearly all 58 entries. Every trade from #1 on is now new-code only - first `docs/REVIEW-*.md` will be a clean sample.
 - **[2026-09-10] Gold-lessons port** (see `docs/PORT-2026-09-10.md`): bidirectional SELL funnel; EMA-slope + near-EMA regime gates; daily-loss circuit breaker + escalating cooldowns; expanded blackouts; UTC timestamps everywhere (fixes local-time/cooldown mismatch); trade-stats reload + open-trade restore on restart; 16-field `trades.csv` with `Trade_Type` + self-healing migration + drift tripwire; plain (non-comma) price formatting for new rows; stale-feed guard with Telegram alerts (no quiet hours - BTC is 24/7); `DATA_SOURCE=MT5` broker-feed option (M5 sidecar); LIVE mode dedups MT5 candles + supports SELL orders; dual-funnel dashboard with daily-loss tracking; new `tools/` suite (`check_data`, `validate_gates`, `phantom_trades`, `smoke_test`, `mt5_feed`, `autosync`); data files now tracked in git for reviews; retired `generate_trades.py` to `archive/` (stale params, overwrote the ledger).
 - **[2026-09-07] Pre-port state**: BUY-only M5 engine, flat 30-min SL cooldown, narrow blackouts, %-based ATR filter, basic dashboard on port 6001. Strategy params (wick 0.15, RSI 40-70, RR 1:2) unchanged by the port.
 
 ## Forward Test Observations
-- No reviewed trade data yet under the new stack. First `docs/REVIEW-*.md` after real trades land.
+- Epoch boundary 2026-09-10: ledger reset to zero; trades #1-58 (Sep 3-9) live on only in `archive/*_pre-reset_2026-09-10.csv` and git history. Do NOT mix them with post-reset trades in stats.
+- No reviewed trade data yet under the new stack. First `docs/REVIEW-*.md` after ~20 new-epoch trades land.
 - `archive/forward_test_log_m1.csv` (8,537 rows, Sep 1) is M1-cadence data from an earlier setup - NOT comparable to the current M5 log. Do not mix the two in analysis.
 
 ## Future Tweaks / To-Do
