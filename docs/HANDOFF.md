@@ -35,10 +35,13 @@ code, params, or conclusions must update §1, §4/§5 and §7 before it ends
   `trade_filter.py`). Deploy = merge PR → `git pull` on the box → restart the
   engine. Restarts are safe mid-trade (open trade restores from `status.json`,
   stats reload from `trades.csv`, slope gate re-seeds from the log).
-- `tools/autosync.sh` (cron, root) does this automatically: commits live data,
-  deploys only if `smoke_test.py` passes (rolls back otherwise), runs the
-  integrity gate, sends a Telegram digest. It auto-detects the engine/dashboard
-  units by scanning systemd for units referencing `/opt/bitcoin`.
+- `tools/autosync.sh` (cron, root, every 15 min) does this automatically:
+  commits live data, deploys only if `smoke_test.py` passes (rolls back
+  otherwise), runs the integrity gate, sends a Telegram digest. It auto-detects
+  the engine/dashboard units by scanning systemd for units referencing
+  `/opt/bitcoin`. **It only ever pulls `origin/main`** - data flows up `main`,
+  code comes down `main`, so a work branch must be merged to `main` before the
+  box can see it. Install checklist + digest legend: `docs/AUTOSYNC.md`.
 - `docs/REVIEW-2026-09-15.md` is the first review (73 trades). Next milestone:
   re-cut it at 30+ live-era trades with the measured spread in hand.
 
@@ -316,7 +319,8 @@ Never enable `TRADING_MODE=LIVE` as part of an unrelated change.
 signals (+reason) · `status.json` live state · `tools/replay_lib.py` shared
 bar-walk core · `tools/` analysis + tests · `deploy/mt5feed.service` sidecar
 unit · `docs/PORT-2026-09-10.md` what came from gold and why ·
-`docs/REVIEW-2026-09-15.md` first data review ·
+`docs/REVIEW-2026-09-15.md` first data review · `docs/AUTOSYNC.md` the
+unattended deploy loop + digest guide ·
 `archive/PROJECT_LOG.md` full history · **this file** = executive summary.
 
 ## 12. Reading order for a brand-new agent
