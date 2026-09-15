@@ -9,11 +9,15 @@ from it (see gold docs/REVIEW-2026-09-09.md and REVIEW-2026-09-10.md).
 Checks:
   trades.csv        header/schema (16-field, Trade_Type column), row widths,
                     Trade_Type/Exit_Reason domains, numbering, time order,
-                    Balance_After ledger continuity, true P&L from $200
-  forward_test_log  header, timestamp ordering, gaps > 15 min (M5 cadence)
+                    Balance_After ledger continuity, true P&L from $200,
+                    exit GEOMETRY per era (SL/TP in ATR units - the ledger holds
+                    more than one rule), realized-R sanity (catches lot/size and
+                    schema drift; 09-03 was a 100x-lot pair)
+  forward_test_log  header, timestamp ordering, gaps > 15 min (M5 cadence),
+                    M5 bar census (missing slots, duplicate minutes)
   skipped_trades    header/row width
   cross-file        every trade entry exists in the price log (+-6 min),
-                    no open trade spans a price-log gap,
+                    no open trade spans a price-log gap (inclusive bounds),
                     status.json totals agree with trades.csv
 
 Exit code 0 = clean (warnings allowed), 1 = FAIL-level problems found.
@@ -25,7 +29,7 @@ import csv
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRADES = os.path.join(ROOT, "trades.csv")
@@ -239,7 +243,9 @@ def check_cross(trades, log_dts):
         if not t.get("entry_dt") or not t.get("exit_dt"):
             continue
         for a, b in zip(log_dts, log_dts[1:]):
-            if (b - a).total_seconds() > GAP_SECONDS and t["entry_dt"] < a and t["exit_dt"] > b:
+            # inclusive bounds: a trade that entered on the last bar before the gap
+            # or exited on the first bar after it is still exposed to the hole
+            if (b - a).total_seconds() > GAP_SECONDS and t["entry_dt"] <= a and t["exit_dt"] >= b:
                 spans += 1
     if spans:
         warn(f"{spans} trades were open across a price-log gap (exit prices may be unreliable)")
@@ -267,6 +273,104 @@ def check_cross(trades, log_dts):
             ok("status.json agrees with trades.csv")
 
 
+def check_geometry(trades):
+    """Exit geometry per era + realized-R sanity.
+
+    The ledger is not one strategy: rows before 2026-09-06 17:49 UTC ran
+    SL 1.5xATR / TP 2.5xATR (RR 1:1.67) and filled on candles, so their stops
+    overshoot the logged level and their R-multiples are not comparable with
+    today's. Pooling eras silently changes the breakeven win rate (37.5% vs
+    33.3%) - this check keeps that visible instead of letting it average away.
+    """
+    print("\n== trades.csv geometry / sizing ==")
+    eras = {}
+    for t in trades:
+        atr = fnum(t.get("ATR_At_Entry"))
+        entry, sl, tp = fnum(t.get("Entry_Price")), fnum(t.get("Stop_Loss")), fnum(t.get("Take_Profit"))
+        if not atr or None in (entry, sl, tp) or not t.get("entry_dt"):
+            continue
+        slm, tpm = abs(entry - sl) / atr, abs(tp - entry) / atr
+        key = (round(slm, 2), round(tpm, 2))
+        eras.setdefault(key, []).append(t)
+
+    for (slm, tpm), ts in sorted(eras.items(), key=lambda kv: kv[1][0]["entry_dt"]):
+        w = sum(1 for t in ts if t["Exit_Reason"] == "TP")
+        rr = tpm / slm if slm else 0
+        first, last = ts[0]["entry_dt"], ts[-1]["entry_dt"]
+        tag = "  <- LIVE RULE" if (slm, tpm) == (2.0, 4.0) else ""
+        print(f"  [info] SL {slm:.2f}xATR / TP {tpm:.2f}xATR (RR 1:{rr:.2f}, breakeven WR "
+              f"{1/(1+rr)*100:.1f}%): n={len(ts)} {w}W/{len(ts)-w}L  {first:%Y-%m-%d %H:%M} -> "
+              f"{last:%Y-%m-%d %H:%M}{tag}")
+    if len(eras) > 1:
+        warn(f"{len(eras)} different exit geometries in one ledger - R totals and breakeven "
+             f"WR are era-specific, never pool them (see docs/HANDOFF.md §9)")
+
+    # realized-R sanity on the live-rule era only (older rows fill on candles)
+    LIVE = parse_dt("2026-09-06 17:49:00")
+    drift = 0
+    for t in trades:
+        if not t.get("entry_dt") or t["entry_dt"] < LIVE:
+            continue
+        atr = fnum(t.get("ATR_At_Entry"))
+        entry, sl = fnum(t.get("Entry_Price")), fnum(t.get("Stop_Loss"))
+        profit = fnum(t.get("Profit"))
+        if not atr or None in (entry, sl, profit):
+            continue
+        risk_price = abs(entry - sl)
+        if risk_price <= 0:
+            continue
+        realized = profit / (risk_price * 0.01)
+        planned = -1.0 if t["Exit_Reason"] == "SL" else 2.0
+        if abs(realized - planned) > 0.25:
+            drift += 1
+            warn(f"trade #{t['num']} {t['entry_dt']:%m-%d %H:%M} {t['Exit_Reason']} realized "
+                 f"{realized:+.2f}R vs planned {planned:+.2f}R (lot/size or fill drift)")
+    if not drift:
+        ok("realized R matches the live 1:2 geometry on every post-09-06 row")
+
+
+def check_bar_census(dts):
+    """M5 bar census: the price log is the basis of every replay, so a hole in it
+    is a hole in every conclusion. check_log() only catches >15 min gaps; a single
+    missing bar leaves a 10-min gap and silently distorts a path walk."""
+    print("\n== forward_test_log.csv bar census ==")
+    if len(dts) < 2:
+        return
+    step = 300
+    start = dts[0].replace(second=0)
+    # rows are stamped at bar close (a :01/:02 second offset is normal); group by minute
+    have = {}
+    for d in dts:
+        key = d.replace(second=0)
+        have[key] = have.get(key, 0) + 1
+    dups = [k for k, v in have.items() if v > 1]
+    if dups:
+        warn(f"{len(dups)} minutes with more than one log row (restart re-evaluations?): "
+             + ", ".join(f"{k:%m-%d %H:%M}" for k in sorted(dups)[:6]))
+    else:
+        ok("no duplicate minutes in the log")
+    exp, missing = [], []
+    t = start
+    end = dts[-1]
+    while t <= end:
+        exp.append(t)
+        t = t + timedelta(seconds=step)
+    for x in exp:
+        if x not in have:
+            missing.append(x)
+    if missing:
+        runs = []
+        for m in missing:
+            if runs and (m - runs[-1][-1]).total_seconds() == step:
+                runs[-1].append(m)
+            else:
+                runs.append([m])
+        warn(f"{len(missing)} missing M5 slot(s) in {len(runs)} run(s): "
+             + ", ".join(f"{r[0]:%m-%d %H:%M}..{r[-1]:%H:%M} ({len(r)} bars)" for r in runs[:6]))
+    else:
+        ok(f"complete M5 grid ({len(exp)} slots) with no missing bars")
+
+
 def main():
     print(f"bitcoin-trading-bot data integrity check - {ROOT}")
     for path in (TRADES, LOG, SKIPS):
@@ -275,8 +379,10 @@ def main():
             sys.exit(1)
     trades = check_trades()
     log_dts = check_log()
+    check_bar_census(log_dts)
     check_skips()
     check_cross(trades, log_dts)
+    check_geometry(trades)
     print(f"\n== result: {len(FAILS)} fail, {len(WARNS)} warn ==")
     if FAILS:
         print("Fix FAIL items before analysing this data.")
