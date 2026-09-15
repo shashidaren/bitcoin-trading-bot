@@ -20,7 +20,11 @@ from datetime import datetime, time, timedelta, timezone
 
 TRADES_LOG = "/opt/bitcoin/trades.csv"
 SKIP_LOG   = "/opt/bitcoin/skipped_trades.csv"
-LOOKBACK   = 30
+LOOKBACK   = 30    # trailing rows used for the consecutive-SL streak
+DAY_WINDOW = 400   # rows read for the daily-loss count: the breaker must see every
+                   # SL of the UTC day, not just the last LOOKBACK rows. With a
+                   # 30-row window a busy day (>30 trades, gold hit 62) silently
+                   # under-counts and the halt never fires.
 
 # === Settings (Risk & Volatility Controls) ===
 SL_COOLDOWN_BASE_MINUTES      = 30    # Base cooldown after 1 SL
@@ -215,7 +219,9 @@ def should_take_trade(current_atr=None, current_price=None, ema_fast=None, ema_s
         log_skip(bo_reason, current_price, current_atr)
         return False, bo_reason
 
-    trades = load_recent_trades()
+    # Read a wide window: the daily count needs the whole UTC day, the cooldown
+    # only needs the tail (get_consecutive_sl_count stops at the first non-SL).
+    trades = load_recent_trades(n=DAY_WINDOW)
 
     # 2. Daily Loss Circuit Breaker
     halted, halt_reason = check_daily_loss_limit(trades, now)
