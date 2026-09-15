@@ -52,6 +52,15 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-15] Session & Push Protocol added to `docs/HANDOFF.md` §10** — the four permanent
+  workflow rules, so they no longer need to be restated at the start of every session:
+  (1) one session = one scope = one PR, merged only at the end;
+  (2) push after every logical step — zero local-only state, because the sandbox filesystem is
+  ephemeral and unpushed commits are unrecoverable;
+  (3) the PR stays open (draft) until tests pass and the user gives the green light;
+  (4) hand off via `HANDOFF.md` + this changelog, not chat.
+  Also fixed §10's duplicated item numbering (4/4b) and pointed §1 at the current work branch
+  (`arena/01a0a350-bitcoin-trading-bot`). Docs-only change — no code, params, or strategy touched.
 - **[2026-09-15] Deploy Record & Live Spread Measurement ($40.00/BTC)**.
   Measured from the live XM MT5 terminal (04:06 UTC, Asian session):
   `BTCUSD` exists with contract `1.0` / min lot `0.01` (`BTCUSDm` does not exist, so `SYMBOL_MT5=BTCUSD`).
