@@ -15,21 +15,24 @@ code, params, or conclusions must update §1, §4/§5 and §7 before it ends
 ## 1. Where things stand (as of 2026-09-15, 73 closed trades — first review written)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`.
-  Current work branch: `arena/01a0a313-bitcoin-trading-bot`.
+  Current work branch: `arena/01a0a345-bitcoin-trading-bot`.
 - **The gold→BTC port is live** (2026-09-10, see `docs/PORT-2026-09-10.md`):
   SELL funnel, EMA-slope + near-EMA regime gates, escalating SL cooldowns,
   daily-loss breaker, UTC everywhere, self-healing 16-field ledger, stale-feed
   guard, MT5 sidecar option, `tools/` suite.
-- **The first data review is written: `docs/REVIEW-2026-09-15.md`.** Headline:
-  the whole forward test has made **+$11.74 gross** in 71 trades (from 09-05,
-  excluding the two 09-03 outliers) — about **+$0.17/trade, which is inside the
-  published XM BTCUSD spread ($0.225–0.60/trade at 0.01 lot)**. The gross edge
-  is thinner than the broker spread; measuring the real spread is step 1.
-  The review also rejects the ATR-floor and RSI≥45 filters (day-proxy /
-  within-day reversal), keeps the BE ratchet unadopted, and finds the recent
-  09-11→09-14 collapse is regime, not parameters.
+- **The first data review is written: `docs/REVIEW-2026-09-15.md`.**
+  - **Live XM BTCUSD spread measured 2026-09-15 = $40.00/BTC = $0.40 per round trip at 0.01 lot.**
+    Symbol `BTCUSD` exists with contract `1.0` / min lot `0.01`; `BTCUSDm` does not exist (`SYMBOL_MT5=BTCUSD`).
+  - **Netting that cost**: 71 trades from 09-05 swing from **+$11.74 gross** to **−$16.66 net**.
+    Live era (n=19) is **+$1.13 net**, but **+$12.62** of that came from 09-10 alone (without 09-10 it is **−$10.29 net**).
+  - **Cause**: M5 ATR is too small vs a $40 spread — live-era median entry ATR $84 makes cost **23.9% of 1R**,
+    pushing breakeven win rate to **41.3%** vs an actual **36.8%**.
+  - **Timeframe re-cut (cost % of 1R)**: M5 24.0%, M15 11.9%, H1 5.4%, H4 2.6%.
+    The dominant open decision is the **bar timeframe**, not BE/TP parameters.
+  - Review also rejects the ATR-floor and RSI≥45 filters (day-proxy / within-day reversal),
+    keeps the BE ratchet unadopted, and finds the recent 09-11→09-14 collapse is regime, not parameters.
 - **Live-era sample = 19 trades** (from 2026-09-09 02:25 UTC, RR 1:2):
-  **7W/12L, +$8.73 gross**; last 10: 1W/9L, −$9.98. Open SELL #74.
+  **7W/12L, +$8.73 gross / +$1.13 net (@ $0.40)**; last 10: 1W/9L, −$9.98 gross / −$11.48 net. Open SELL #74.
   Still far below the n≥30 bar — **do not retune on it**.
 - Live bot runs from `/opt/bitcoin/` (paths hardcoded in `engine.py` /
   `trade_filter.py`). Deploy = merge PR → `git pull` on the box → restart the
@@ -43,7 +46,7 @@ code, params, or conclusions must update §1, §4/§5 and §7 before it ends
   code comes down `main`, so a work branch must be merged to `main` before the
   box can see it. Install checklist + digest legend: `docs/AUTOSYNC.md`.
 - `docs/REVIEW-2026-09-15.md` is the first review (73 trades). Next milestone:
-  re-cut it at 30+ live-era trades with the measured spread in hand.
+  re-cut it at 30+ live-era trades with the measured spread and bar timeframe decision.
 
 ## 2. Bot in one paragraph
 
@@ -218,35 +221,36 @@ direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
-1. **Measure the real XM BTCUSD spread** (MT5 symbol spec + a tick-log sample).
-   Published XM BTCUSD spreads run $22.50–60 per BTC ⇒ $0.225–0.60 per round
-   trip at 0.01 lot, against a gross measured edge of $0.17/trade. Nothing
-   cost-sensitive should be tuned before this number exists. If it is wide,
-   the options are a tighter-spread account, a cost-ratio ATR floor
-   (`ATR ≥ 333 × spread$` for ≤15% of 1R), or fewer/larger-ATR trades.
-2. **Collect to 30 live-era trades** (19 today). Then re-run §6's suite and
-   re-cut `docs/REVIEW-2026-09-15.md`; only then decide: the +1.0R BE ratchet
-   (currently ~2 trades of noise), the wick ≤0.40 and near-EMA ≤0.15 candidates
-   (own-day control holds, n too small), and whether the SELL/BUY conflict
-   resolves.
-3. **Instrument, don't gate**: log the wick/near-EMA feature per signal so the
+1. **Bar timeframe decision (M5 vs M15 vs H1 vs H4) — the primary blocker.**
+   The XM BTCUSD spread is now measured at **$40.00/BTC ($0.40/trade at 0.01 lot)**.
+   On M5, median entry ATR ($84) means cost consumes **23.9% of 1R**, pushing breakeven
+   win rate to 41.3% vs actual 36.8% (netting −$16.66 across 71 trades).
+   On higher timeframes, cost friction drops dramatically: M15 is 11.9% of 1R, H1 is 5.4%,
+   and H4 is 2.6%. The bar timeframe must be decided before tuning any other parameters.
+2. **Confirm spread profile across sessions.**
+   The $40.00 spread was sampled at 04:06 UTC (Asian session). Confirm whether London and New York
+   sessions experience narrower or wider spreads.
+3. **Collect to 30 live-era trades under the selected timeframe.**
+   Then re-run §6's suite and re-cut `docs/REVIEW-2026-09-15.md`; only then decide: the +1.0R BE ratchet
+   (BE/TP tuning deferred until timeframe settled), the wick ≤0.40 and near-EMA ≤0.15 candidates
+   (own-day control holds, n too small), and whether the SELL/BUY conflict resolves.
+4. **Instrument, don't gate**: log the wick/near-EMA feature per signal so the
    candidates can be re-read at 30+ samples without another archaeology pass.
-4. **Let the log cover the cooldown blocks.** 33 of 37 cooldown skips still
+5. **Let the log cover the cooldown blocks.** 33 of 37 cooldown skips still
    predate the 09-07 20:20 log start, so `phantom_trades.py` cannot score them.
    No cooldown change before that — and note the sequential estimate (+$16.82 on
    16 reconstructed trades) is an upper bound, not evidence.
-5. **Keep the daily halt** (phantom replay: −$4.93, protective) and the current
+6. **Keep the daily halt** (phantom replay: −$4.93, protective) and the current
    geometry (1:2). Do not raise `MIN_ATR_PERCENT` on win-rate grounds — that
    evidence is a day proxy (review §2).
-6. **Before any LIVE test**: confirm `SYMBOL_MT5` (`BTCUSD` vs `BTCUSDm`) and
-   XM's BTC contract size, add a live spread check before order dispatch, and
-   re-check that `MIN_ATR_PERCENT` is consistent with the measured spread.
-7. Longer-term: higher-timeframe (15m/1h) trend confirmation.
+7. **Before any LIVE test**: Symbol `BTCUSD` with contract 1.0 / min lot 0.01 is confirmed
+   (`BTCUSDm` absent); add a live spread check before order dispatch, and re-check that
+   `MIN_ATR_PERCENT` is consistent with the measured spread.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 
-- **BE ratchet adoption** — tight triggers lose on BTC in both views; +1.0R
-  edge is 2 trades. Re-open only at 30+ live trades with a measured spread.
+- **BE/TP parameter tuning on M5** — deferred until the bar timeframe decision is resolved.
+  Tight BE triggers lose on BTC in both views; +1.0R edge is noise within fees.
 - **RSI ≥ 45** — reverses within-day (review §3).
 - **ATR floor by win rate** — calendar proxy (review §2).
 - **Direction-aware London blackout / cooldown softening / trend-side breaker** —
@@ -289,8 +293,12 @@ Never enable `TRADING_MODE=LIVE` as part of an unrelated change.
 - Exit reasons are `{SL, TP}` only — no `BE` rows on BTC (unlike gold). If you
   ever add BE, R-multiple math must reconstruct the original 2×/4×ATR geometry
   from `ATR_At_Entry` (1R$ ≈ 2×ATR×lot), as gold's tools do.
-- Simulated P&L is scaled by `LOT_SIZE = 0.01`, no spread/slippage modelled.
+- Simulated P&L is scaled by `LOT_SIZE = 0.01`, no spread/slippage modelled in the raw ledger.
+  **Cost haircut**: The live terminal spread is measured at $40.00/BTC ($0.40/trade at 0.01 lot).
+  Always net $0.40/trade when assessing real profitability (e.g. gross +$11.74 is net −$16.66).
   Phantom P&L uses the same scaling — it is an upper bound.
+- **Symbol / Contract**: Symbol `BTCUSD` exists on XM MT5 with contract 1.0 / min lot 0.01.
+  `BTCUSDm` does not exist (`SYMBOL_MT5=BTCUSD`).
 - `status.json` equity ($215.39) is the **engine ledger**, not the sum of the
   Profit column. `check_data.py` reports the drift by design.
 

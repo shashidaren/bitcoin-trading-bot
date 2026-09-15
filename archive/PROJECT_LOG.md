@@ -52,6 +52,16 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-15] Deploy Record & Live Spread Measurement ($40.00/BTC)**.
+  Measured from the live XM MT5 terminal (04:06 UTC, Asian session):
+  `BTCUSD` exists with contract `1.0` / min lot `0.01` (`BTCUSDm` does not exist, so `SYMBOL_MT5=BTCUSD`).
+  Spread = **$40.00/BTC flat = $0.40 round-trip at 0.01 lot**.
+  Netting this cost turns the 71-trade test (09-05 on) from **+$11.74 gross to −$16.66 net**.
+  Live era (n=19) is **+$1.13 net**, but **+$12.62** of that is 09-10 alone (without 09-10 it is **−$10.29 net**).
+  Cause: M5 ATR ($84) is too small for a $40 spread (cost is **23.9% of 1R**, requiring 41.3% WR vs 36.8% actual).
+  Timeframe re-cut: M5 24.0% of 1R, M15 11.9%, H1 5.4%, H4 2.6%.
+  The dominant decision is **bar timeframe**, not BE/TP tuning (BE/TP tuning deferred).
+  Deploy path documented in `docs/AUTOSYNC.md` and verified live via `autosync.sh`.
 - **[2026-09-15] First data review + tooling cycle** (`docs/REVIEW-2026-09-15.md`).
   Written after reading gold's 2026-09-15 review (BE ratchet 0.30→0.75R) and
   re-testing every gold-derived queued item on BTC data. Findings: (1) the gross
@@ -90,10 +100,12 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 
 ## Future Tweaks / To-Do
 - [x] First data review (73 trades) -> `docs/REVIEW-2026-09-15.md`.
-- [ ] **Measure the real XM BTCUSD spread** (MT5 spec + tick sample) - blocks every cost-sensitive decision.
+- [x] **Measure real XM BTCUSD spread**: $40.00/BTC ($0.40/trade) measured 2026-09-15 live MT5 terminal.
+- [x] Confirm `SYMBOL_MT5` (`BTCUSD` vs `BTCUSDm`) and contract size: confirmed `BTCUSD` contract 1.0, min lot 0.01.
+- [ ] **Bar timeframe decision (M5 vs M15 vs H1 vs H4)** — primary blocker before tuning parameters.
+- [ ] Confirm spread profile across London and NY sessions.
 - [ ] Log the wick/near-EMA feature per signal (monitor-only) and re-read at 30+ live-era trades.
 - [ ] Validate regime-gate + SELL-mirror parameters against BTC data (currently inherited from gold's review, unproven on BTC).
 - [ ] Revisit `WICK_RATIO_TARGET` 0.15 (loose vs gold's 0.38) once the funnel counters show signal quality.
-- [ ] Confirm `SYMBOL_MT5` (`BTCUSD` vs `BTCUSDm`) and contract size on the XM terminal before any LIVE test.
 - [ ] Multi-Timeframe (15m/1h) higher-timeframe trend integration.
 - [ ] Live spread filter check before order dispatch.
