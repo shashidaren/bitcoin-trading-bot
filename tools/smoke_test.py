@@ -19,6 +19,11 @@ Scenarios:
   H) MT5 sidecar feed file (DATA_SOURCE=MT5) -> engine MUST read the sidecar's
      JSON file, evaluate each closed candle exactly once (no re-log after
      restart), and default to TWELVEDATA
+  I) replay_lib walk direction -> SELL bar extremes MUST mirror BUY (gold's
+     2026-09-15 review found its replay had them inverted, so shorts silently
+     fell back to their actual outcome and the tool validated itself), the BE
+     ratchet MUST arm only at/above its trigger, and a walk MUST NOT resolve to
+     TP when only the stop was touched inside its horizon
 
 Usage: python3 tools/smoke_test.py
 """
@@ -35,6 +40,7 @@ from datetime import datetime, timezone, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, HERE)      # replay_lib lives next to this file
 
 # Stub external dependencies
 for name in ("requests", "dotenv", "twelvedata"):
@@ -194,6 +200,22 @@ halted, halt_reason = trade_filter.check_daily_loss_limit(trades_sim, datetime(2
 check("D: daily SL count equals 3", sl_count == 3, f"count={sl_count}")
 check("D: circuit breaker triggered", halted and "Daily Loss Limit Reached" in halt_reason, f"reason={halt_reason}")
 
+# A busy UTC day must not fall out of the window the breaker reads: gold hit 62
+# trades/day, and with a 30-row window the day's SLs become invisible.
+busy_day = [{"Trade_Num": str(i), "Trade_Type": "BUY",
+             "Entry_Time": f"2026-09-10 00:{i:02d}:00", "Exit_Time": f"2026-09-10 01:{i:02d}:00",
+             "Exit_Reason": "SL", "Profit": "-1.00"}
+            for i in range(1, 41)]
+now_d = datetime(2026, 9, 10, 5, 0, tzinfo=timezone.utc)
+check("D: busy-day window is wider than the streak lookback",
+      trade_filter.DAY_WINDOW >= 100 and trade_filter.LOOKBACK == 30,
+      f"DAY_WINDOW={trade_filter.DAY_WINDOW} LOOKBACK={trade_filter.LOOKBACK}")
+check("D: a 40-SL day is fully visible to the breaker",
+      trade_filter.get_daily_sl_count(busy_day, now_d) == 40
+      and trade_filter.get_daily_sl_count(busy_day[-trade_filter.LOOKBACK:], now_d) >= 3,
+      f"wide={trade_filter.get_daily_sl_count(busy_day, now_d)} "
+      f"narrow={trade_filter.get_daily_sl_count(busy_day[-trade_filter.LOOKBACK:], now_d)}")
+
 
 # --- Scenario E ---
 print("\nScenario E: restart state persistence")
@@ -340,6 +362,73 @@ check("H: no rates -> None", engine.latest_closed_candle_ts(None) is None)
 check("H: empty rates -> None", engine.latest_closed_candle_ts([]) is None)
 shutil.rmtree(tmp_h, ignore_errors=True)
 
+# --- Scenario I ---
+print("\nScenario I: replay_lib walk direction, ratchet trigger and horizon")
+import replay_lib as R  # noqa: E402
+
+side_dt = datetime(2026, 9, 8, 0, 0)
+ENTRY, ATR = 80000.0, 100.0        # 1R = 200, TP = 80000 +- 400 at 2x/4x
+
+
+def bar(i, o, h, l, c):
+    return dict(dt=side_dt + timedelta(minutes=5 * i), o=o, h=h, l=l, c=c)
+
+
+# SELL: price falls 4xATR -> TP is hit and the stop (above entry) is not
+sell_tp = [bar(1, 79620, 79650, 79560, 79580), bar(2, 79580, 79600, 79550, 79560)]
+out, r, held, _ = R.walk(ENTRY, "SELL", ATR, sell_tp)
+check("I: SELL walk detects TP when price falls to the target", out == "TP", f"got {out}")
+check("I: SELL TP pays exactly the planned 2R", abs(r - 2.0) < 1e-9, f"R={r}")
+
+# SELL: price rises 2xATR -> SL is hit even though the bar's HIGH is the adverse side
+sell_sl = [bar(1, 80100, 80300, 80090, 80290)]
+out, r, held, _ = R.walk(ENTRY, "SELL", ATR, sell_sl)
+check("I: SELL walk detects SL on a rising bar (high is the adverse extreme)", out == "SL", f"got {out}")
+check("I: SELL SL costs exactly 1R", abs(r + 1.0) < 1e-9, f"R={r}")
+
+# mirror symmetry: BUY on the mirrored path must give the mirrored outcome
+buy_tp = [bar(1, 80380, 80440, 80350, 80420), bar(2, 80420, 80450, 80400, 80440)]
+out_b, r_b, _, _ = R.walk(ENTRY, "BUY", ATR, buy_tp)
+check("I: BUY walk mirrors the SELL walk (both hit TP)", out_b == "TP" and out == "SL",
+      f"buy={out_b} (sell mirror of the same bars was {out})")
+
+# a bar that touches BOTH levels resolves to the stop (conservative tie-break)
+both = [bar(1, 80000, 80450, 79750, 80300)]
+out, _, _, _ = R.walk(ENTRY, "BUY", ATR, both)
+check("I: bar spanning both levels resolves to the STOP (conservative)", out == "SL", f"got {out}")
+
+# BE ratchet: must NOT arm below the trigger, MUST arm at/above it
+quiet = [bar(1, 80000, 80120, 79990, 80050), bar(2, 80050, 80060, 79780, 79800)]
+out, r, _, _ = R.walk(ENTRY, "BUY", ATR, quiet, be_trigger=0.75)
+check("I: BE ratchet does NOT arm below its trigger (+0.60R < +0.75R)", out == "SL", f"got {out}")
+armed = [bar(1, 80150, 80260, 80100, 80250), bar(2, 80250, 80255, 79990, 80010)]
+out, r, _, _ = R.walk(ENTRY, "BUY", ATR, armed, be_trigger=0.75)
+check("I: BE ratchet arms at +0.75R and exits at breakeven", out == "BE" and abs(r) < 1e-9,
+      f"got {out} R={r}")
+
+# horizon: a trade that never reaches TP before the cap must not be scored as a win
+slow = [bar(i, 80000 + i * 5, 80010 + i * 5, 79990 + i * 5, 80000 + i * 5) for i in range(1, 40)]
+out, r, held, _ = R.walk(ENTRY, "BUY", ATR, slow, horizon_min=60, start_dt=side_dt)
+check("I: horizon ends flat -> TIME marked to market, never a fabricated TP",
+      out == "TIME" and held == 12, f"got {out} after {held} bars")
+
+# cascade: one position at a time + cooldown (two signals 10 min apart -> one taken)
+slow_tp = [bar(1, 79700, 79720, 79680, 79700), bar(2, 79700, 79710, 79650, 79680),
+           bar(3, 79680, 79690, 79500, 79520)]
+sigs = [dict(dt=side_dt, side="SELL", atr=ATR, entry=ENTRY),
+        dict(dt=side_dt + timedelta(minutes=7), side="SELL", atr=ATR, entry=ENTRY)]
+taken, skipped, results = R.cascade(sigs, slow_tp, horizon_min=240)
+check("I: cascade replay holds one position at a time", taken == 1 and skipped == 1,
+      f"taken={taken} skipped={skipped}")
+sigs = [dict(dt=side_dt, side="SELL", atr=ATR, entry=ENTRY),
+        dict(dt=side_dt + timedelta(minutes=20), side="SELL", atr=ATR, entry=ENTRY)]
+taken, skipped, _ = R.cascade(sigs, [sell_sl[0]] + [bar(4, 79900, 79910, 79790, 79800)],
+                              horizon_min=240)
+check("I: cascade applies the SL cooldown after a loss", taken == 1 and skipped == 1,
+      f"taken={taken} skipped={skipped}")
+
+# --- summary ---------------------------------------------------------------
+# autosync.sh gates every deploy on this exit code - never remove it.
 print()
 if FAILURES:
     print(f"SMOKE TEST FAILED: {FAILURES}")
