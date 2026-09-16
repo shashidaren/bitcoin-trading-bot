@@ -20,12 +20,14 @@ For a BUY signal to trigger, ALL of the following must be true:
 3. **Held Support**: Candle closes *above* the dynamic floor.
 4. **Trend Confirmed**: EMA 50 > EMA 200 (Uptrend only).
 5. **Slope Confirmed**: EMA 50 rising vs 30 M5 bars ago (regime gate).
-6. **Near Mean**: Close >= EMA50 - 0.3 x ATR (regime gate).
+6. **Near Mean**: Close >= EMA50 - 0.3 x ATR (regime gate). NOTE this is a **one-sided** cap on
+   adverse-side distance only (`MAX_BELOW_EMA_ATR`): a BUY may sit any distance *above* EMA50. It is
+   not a two-sided band, and the two quantities measure differently - see the 2026-09-16 entries.
 7. **RSI Filter**: RSI is between 40.0 and 70.0.
 8. **ATR Filter**: ATR > 0 (engine floor disabled; %-based bounds enforced in `trade_filter.py`).
 9. **Trade Filter**: Passes `trade_filter.py` checks (no blackouts, no SL cooldown, daily-loss breaker not tripped).
 
-SELL is the mirror: 20-bar ceiling test, upper-wick rejection >= 15%, close below ceiling, EMA50 < EMA200, EMA50 falling, close <= EMA50 + 0.3 x ATR, RSI between 30.0 and 60.0.
+SELL is the mirror: 20-bar ceiling test, upper-wick rejection >= 15%, close below ceiling, EMA50 < EMA200, EMA50 falling, close <= EMA50 + 0.3 x ATR (same one-sided cap), RSI between 30.0 and 60.0.
 
 Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, breakeven WR ~33%). Simulated PnL is scaled by LOT_SIZE (0.01).
 
@@ -52,6 +54,77 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-16] `docs/HANDOFF.md` reviewed, re-cut at 78 trades, and made machine-checkable.**
+  The handoff had drifted a day behind the box (autosync had taken it from 73 to 78 closed trades)
+  and carried four defects that would have misled the next session:
+  (1) every headline number was the 09-15 one; (2) §1 hard-coded a *previous* session's branch name
+  (`arena/01a0a350-…`) as "current work branch"; (3) §6's copy-paste command block still said
+  `--spread 0.25` while §1/§9 said the measured cost is $0.40, so following the doc reproduced
+  numbers that did not match the doc; (4) §5/§7 queued "entry within 0.15 ATR of EMA50
+  (candidate: tighten `MAX_BELOW_EMA_ATR`)" — a **two-sided** measurement labelled as a change to a
+  **one-sided** gate (see the next entry: acting on it would have cost money).
+  Structure changes: a machine-checked **snapshot block** at the top (the only part parsed by code),
+  a "what changed since the last review" delta list, a single slice table with gross **and** net
+  columns, an explicit numbers convention (everything is net of $0.40 unless marked gross), a
+  "four things this data has not settled" tension table, expected tool first-lines in §6 so a stale
+  doc is visible at a glance, and the era-boundary/pre-vs-post-update-EMA/funnel-counter gotchas in
+  §9. Section numbering (§1–§12) is unchanged because `check_data.py`, `win_rate_report.py` and
+  `pathwalk_sims.py` cite §7/§9 in their output.
+- **[2026-09-16] New `tools/handoff_check.py` + handoff line in the autosync digest** — the
+  mechanism behind "always update the handoff". It recomputes every snapshot key from
+  `status.json` / `trades.csv` / `forward_test_log.csv` / `skipped_trades.csv` (via `replay_lib`, so
+  it cannot disagree with the analysis suite), reports `HANDOFF FRESH` / `HANDOFF STALE` with
+  per-key deltas, refuses a doc whose command blocks quote a different `--spread` than the snapshot's
+  cost assumption, verifies that every referenced `docs/`/`tools/`/`archive/` path exists, and
+  rewrites the block in place with `--update` (prose is never touched). Tolerances: 5 trades /
+  60 log rows / 48 h, so a doc that is one trade behind does not cry wolf. Exit 0/1/2.
+  `tools/autosync.sh` gained phase 4b, which runs it `--quiet` and adds `📝 handoff: …` to the
+  Telegram digest — **advisory only**: it never blocks a deploy, never rolls back, and never touches
+  the 🚨/⚠️ paths (a doc 6 trades behind is not an incident, and nagging 4×/h would get the digest
+  muted). Documented in `docs/AUTOSYNC.md` §1–§3. §8/§10 of the handoff now require
+  `HANDOFF FRESH` before a push.
+- **[2026-09-16] Data re-cut at 78 trades → `docs/REVIEW-2026-09-15.md` §12** (the question did not
+  change, so the review was re-cut in place per the §10 ritual). Findings: from-09-05 slice is now
+  **+$20.45 gross / −$9.95 net** (was +$11.74 / −$16.66) and the live era **+$17.44 gross /
+  +$7.84 net** (n=24, was +$1.13 net at n=19); at the live-era median ATR of **$87.85** the $0.40
+  round trip is **22.8% of 1R**, so breakeven decisive WR is **40.9%** vs an actual **41.7%** — the
+  book has crossed from below its cost-adjusted breakeven to *at* it (still n=24, Wilson 24.5–61.2,
+  and the M5-vs-higher-timeframe decision is unchanged). The last-10 collapse reversed (1W/9L →
+  4W/6L). The **cooldown's measured sign flipped**: 7 of 40 blocks are now scorable and read
+  **+$3.92 net**, i.e. it is throwing away winners on the slice the log can finally see (33 still
+  predate the log; no change). Blackouts likewise read costly (+$5.87 net on 6 scorable) while the
+  daily halt stays protective (−$12.13 net on 18/18). Exits moved: **wider TP (5–6×ATR) now beats
+  the live 4×ATR in both cascade-aware views**, and **BE +1.0R is still the only ratchet row positive
+  in all three views** (+0.50R wins the 24-trade view but loses the cascade census → noise); both
+  stay deferred behind the timeframe decision. The **wick ≤0.40 candidate was demoted to unresolved**
+  (census and ledger now disagree on the *sign*). A **third** stop-overshoot row appeared (#65,
+  −1.22R, alongside #40/#52 at −1.38R).
+- **[2026-09-16] Era-boundary fix + entry-gate conformance check.** Evidence that the ported regime
+  gates went live on **09-10**, not 09-09: the ledger's first SELL is 09-10 09:05, and two of the
+  four 09-09 BUY rows sit on the adverse side of the near-EMA gate (#57 at **3.11 ATR**, #58 at
+  **0.57 ATR** vs `MAX_BELOW_EMA_ATR = 0.30`). Added `replay_lib.GATES_DEPLOY` (09-10 00:00) for
+  anything that **re-applies an entry rule** to ledger rows, keeping `PORT_DEPLOY` (09-09 02:25) for
+  era *slices* so already-published numbers stay comparable; the strictly-post-gate slice is n=20,
+  8W/12L, +$14.68 gross / +$6.68 net. `tools/check_data.py` gained an **entry-gate conformance**
+  block (trend / RSI window / near-EMA, from ledger fields alone, rows ≥ `GATES_LIVE`): **all 20
+  pass, 0 fail, 61 warn unchanged**. That is the check that catches an unrecorded parameter change or
+  a silently-skipped gate — neither was visible before.
+- **[2026-09-16] `win_rate_report.py` §7: the two EMA50-distance quantities are no longer
+  conflated.** The old row measured a **two-sided** band |entry−EMA50| ≤ 0.15 ATR under a label that
+  said "tighten `MAX_BELOW_EMA_ATR`", which is **one-sided** (it caps only adverse-side distance).
+  Both are now printed separately, on the census *and* on the post-gate ledger rows. Measured:
+  **tightening the live gate hurts in both views** (census −8.66 → −11.20 at 0.15 → −18.23 at 0.00;
+  post-gate ledger +6.68 → +5.49, blocking 2 winners worth +$1.19; in the live era a 0.15 gate would
+  have blocked 5 trades worth **+$4.57 net**) — so it moved to the handoff's "Explicitly NOT queued".
+  The **two-sided band ≤ 0.50 ATR** is the strongest surviving candidate: census keep 25 at 44.0%
+  **+10.46 net** vs skip 67 at 28.4% −19.11 with a within-day control that drops **zero** signals
+  (the only candidate in the lab that cannot be a calendar proxy), post-gate ledger keep 5 at 80.0%
+  **+11.97 net**, live era keep 6 (5W/1L) **+16.45 net** vs skip 18 −8.61. n is far too small to
+  gate on, and it needs no engine change to keep scoring (`EMA50_At_Entry`/`ATR_At_Entry`/
+  `Entry_Price` are already in every row) → instrument-and-watch. Also: the one-sided rows suppress
+  the within-day control (a near-universal gate makes it pure composition noise — it printed a
+  +22.81 "own-day keep" for a split whose pooled keep was −11.20), and the hard-coded
+  "the same candidates on the 71 real trades" label is now computed.
 - **[2026-09-15] Session & Push Protocol added to `docs/HANDOFF.md` §10** — the four permanent
   workflow rules, so they no longer need to be restated at the start of every session:
   (1) one session = one scope = one PR, merged only at the end;
