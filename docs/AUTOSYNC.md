@@ -24,7 +24,8 @@ assumes all of this is already true:
 | `tools/autosync.sh` is executable | cron needs the +x bit | `ls -l /opt/bitcoin/tools/autosync.sh` |
 | git can **push** to `origin/main` unattended | data commits are pushed every run | `cd /opt/bitcoin && git push --dry-run origin main` |
 | cron user is **root** | `systemctl stop/start` the engine | `crontab -l` (root's crontab) |
-| `python3` works from that cwd | smoke gate + `check_data.py` | `cd /opt/bitcoin && python3 tools/check_data.py` |
+| `python3` works from that cwd | smoke gate + `check_data.py` + `handoff_check.py` | `cd /opt/bitcoin && python3 tools/check_data.py` |
+| `docs/HANDOFF.md` exists | the advisory freshness check reads its snapshot block | `cd /opt/bitcoin && python3 tools/handoff_check.py --quiet` |
 | No **uncommitted hand-edits** in `engine.py` / `trade_filter.py` / `dashboard.py` / `tools/` | the script refuses to deploy over them | `cd /opt/bitcoin && git status --short` |
 
 `.env` is read for the Telegram token/chat id but is never committed or
@@ -42,7 +43,9 @@ required — without it the script still runs, it just stays silent.
    merges (data-file conflicts = server wins, everything else = remote wins),
    runs the smoke gate, rolls back on failure, restarts the engine and checks
    `status.json` is fresh;
-3. runs `tools/check_data.py`;
+3. runs `tools/check_data.py`, then `tools/handoff_check.py --quiet` (advisory:
+   does `docs/HANDOFF.md`'s snapshot block still match the data it just
+   committed? it never blocks a deploy and never touches `$EXTRA`);
 4. sends one Telegram digest.
 
 So a commit sitting on any other branch (e.g. an `arena/*` work branch) will
@@ -61,11 +64,12 @@ the ledger as-is, and a force-push can drop a trading day's log.
 ## 3. Reading the Telegram digest
 
 ```
-🤖 bitcoin autosync — 09-15 12:22 UTC
-📦 data: committed 1 new trade rows -> 'data collection 467' (push: ok)
-🚀 deploy: deployed 730bced (code files: 9, smoke: ok)
+🤖 bitcoin autosync — 09-16 12:22 UTC
+📦 data: committed 1 new trade rows -> 'data collection 601' (push: ok)
+🚀 deploy: deployed 6b1808b (code files: 9, smoke: ok)
 🩺 integrity: 0 fail, 61 warn
-💰 equity 208.74 | 31W/43L | daily SLs 0/3 | open trade: no | updated 2026-09-15 12:20 UTC
+📝 handoff: fresh (snapshot matches the live data)
+💰 equity 217.45 | 33W/45L | daily SLs 1/3 | open trade: no | updated 2026-09-16 12:10 UTC
 ```
 
 - **📦 data** — `no new data` is the normal quiet case.
@@ -73,6 +77,17 @@ the ledger as-is, and a force-push can drop a trading day's log.
   the states below appears.
 - **🩺 integrity** — the `check_data.py` verdict. `0 fail` is required;
   warnings are informational.
+- **📝 handoff** — `tools/handoff_check.py --quiet`: does `docs/HANDOFF.md`'s
+  machine-checked snapshot block still describe the data on the box?
+  | Text | Meaning | Action |
+  |---|---|---|
+  | `fresh (snapshot matches the live data)` | the doc and the CSVs agree | none |
+  | `fresh, N advisory drift (data moved since the snapshot)` | counts moved inside tolerance (5 trades / 48 h) | none, or refresh at the next session |
+  | `STALE (N problem(s)): <first problem>` | the doc is behind the data, or contradicts itself (e.g. a command block passes a different `--spread` than the snapshot's cost assumption) | next session starts with `python3 tools/handoff_check.py --update`, then updates the prose (§10 ritual) |
+  | `not run` | `tools/handoff_check.py` or `docs/HANDOFF.md` missing on the box | `git pull` the branch that added them |
+  Advisory by design: it never blocks a deploy, never rolls anything back, and
+  never triggers the 🚨/⚠️ lines — a doc that is 6 trades behind is not an
+  incident, and nagging four times an hour would get the digest muted.
 - **💰 stats** — straight from `status.json`.
 
 ### Deploy states and what they mean
@@ -89,7 +104,8 @@ the ledger as-is, and a force-push can drop a trading day's log.
 | `engine active but status.json looks STALE` | the service is up but has not written state for 3+ minutes | check the engine log |
 
 Machine-readable history: `/var/log/bitcoin_autosync.log`. Per-run detail:
-`/tmp/bitcoin_autosync_smoke.log` and `/tmp/bitcoin_autosync_check.log`.
+`/tmp/bitcoin_autosync_smoke.log`, `/tmp/bitcoin_autosync_check.log` and
+`/tmp/bitcoin_autosync_handoff.log`.
 
 ---
 
