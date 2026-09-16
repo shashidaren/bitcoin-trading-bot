@@ -5,7 +5,11 @@ win_rate_report.py, adapted to M5 / RR 1:2 / exit domain {SL, TP}).
 
 Read-only. Run after every data drop, next to the other tools:
 
-    python3 tools/win_rate_report.py [--root DIR] [--spread 0.25]
+    python3 tools/win_rate_report.py [--root DIR] [--spread 0.40]
+
+    --spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40
+    per trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9). Every P/L column below is
+    net of it, and docs/HANDOFF.md quotes these numbers net unless marked gross.
 
 Sections
   1. Baseline: W/L, decisive win rate with a Wilson 95% CI, P&L, expectancy in
@@ -287,30 +291,94 @@ def main():
     lab("momentum-aligned (BUY 5h mom >= 0, SELL <= 0)",
         lambda s: s["mom5h"] is not None and
         ((s["side"] == "BUY" and s["mom5h"] >= 0) or (s["side"] == "SELL" and s["mom5h"] <= 0)))
-    lab("entry within 0.15 ATR of EMA50 (candidate: tighten MAX_BELOW_EMA_ATR)",
-        lambda s: abs(s["entry"] - bars_full[s["i"]]["post_ema50"]) <= 0.15 * s["atr"]
-        if bars_full[s["i"]].get("post_ema50") else False)
+    # --- EMA50 distance: TWO different quantities, do not confuse them --------
+    # The live gate (engine.MAX_BELOW_EMA_ATR = 0.30) is ONE-SIDED: it only caps
+    # how far the entry may sit on the ADVERSE side of EMA50 (below for a BUY,
+    # above for a SELL). A two-sided |distance| band is a DIFFERENT, new gate.
+    # This block used to print a two-sided 0.15 band under a label that said
+    # "tighten MAX_BELOW_EMA_ATR", which reads as an instruction to change a
+    # parameter that the numbers do not support - both are now printed, labelled
+    # with the quantity they actually measure (docs/HANDOFF.md §5).
+    def prox_two(s):
+        """|entry - EMA50| in ATR (two-sided band; NOT what the engine gates)."""
+        e = bars_full[s["i"]].get("post_ema50")
+        return abs(s["entry"] - e) / s["atr"] if e else None
 
-    print("   --- the same candidates on the 71 real trades (from 09-05, ledger features) ---")
+    def prox_adverse(s):
+        """Adverse-side distance in ATR - the quantity MAX_BELOW_EMA_ATR caps."""
+        e = bars_full[s["i"]].get("post_ema50")
+        if not e:
+            return None
+        return ((e - s["entry"]) if s["side"] == "BUY" else (s["entry"] - e)) / s["atr"]
+
+    for k in (0.15, 0.50, 1.00):
+        lab(f"TWO-SIDED EMA50 band |entry-EMA50| <= {k:.2f} ATR (a NEW gate, not live)",
+            lambda s, k=k: prox_two(s) is not None and prox_two(s) <= k)
+    # control=False on purpose: a one-sided gate at 0.30 already keeps ~all of
+    # the stream, so tightening it drops 7-12 signals and the within-day control
+    # just re-slices which days are left (it printed a +22.81 "own-day keep" for
+    # a split whose pooled keep is -11.20). Read the pooled row here and the
+    # post-gate ledger rows below.
+    for k in (0.15, 0.00):
+        lab(f"ONE-SIDED tighten MAX_BELOW_EMA_ATR {R.MAX_BELOW_EMA_ATR:.2f} -> {k:.2f} (live gate)",
+            lambda s, k=k: prox_adverse(s) is not None and prox_adverse(s) <= k,
+            control=False)
+
+    def cell2(sel):
+        w = sum(1 for t in sel if t["reason"] == "TP")
+        l = sum(1 for t in sel if t["reason"] == "SL")
+        p = sum(t["profit"] for t in sel) - args.spread * len(sel)
+        lo, hi = R.wilson(w, w + l) if w + l else (0, 0)
+        return (f"n={len(sel):3d} WR {w/(w+l)*100 if w+l else float('nan'):5.1f}% "
+                f"[{lo:4.1f},{hi:4.1f}] P/L {p:+7.2f}")
+
+    def ledger_lab(label, pool, keep_fn):
+        kept = [t for t in pool if keep_fn(t)]
+        skip = [t for t in pool if not keep_fn(t)]
+        if not kept and not skip:
+            return
+        if not skip:
+            # a gate that every ledger row already satisfies says something real
+            # (the engine enforced it) - print it instead of hiding the row.
+            print(f"   {label:52s} keep {cell2(kept)}")
+            print(f"   {'':52s} skip n=  0  (nothing in the ledger violates it)")
+            return
+        if not kept:
+            print(f"   {label:52s} keep n=  0  (no ledger row satisfies it)")
+            print(f"   {'':52s} skip {cell2(skip)}")
+            return
+        print(f"   {label:52s} keep {cell2(kept)}")
+        print(f"   {'':52s} skip {cell2(skip)}")
+
+    print(f"   --- the same candidates on the {len(clean)} real trades (from 09-05, ledger features) ---")
     for label, keep_fn in (
         ("ATR% >= 0.06", lambda t: t["atr"] / t["entry"] >= 0.0006),
         ("RSI >= 45", lambda t: t["rsi"] >= 45),
         ("wick <= 0.40", lambda t: t["wick"] <= 40.0),   # ledger stores the ratio in %
         ("side = SELL (trades)", lambda t: t["side"] == "SELL"),
     ):
-        kept = [t for t in clean if keep_fn(t)]
-        skip = [t for t in clean if not keep_fn(t)]
-        if not kept or not skip:
-            continue
-        def cell2(sel):
-            w = sum(1 for t in sel if t["reason"] == "TP")
-            l = sum(1 for t in sel if t["reason"] == "SL")
-            p = sum(t["profit"] for t in sel) - args.spread * len(sel)
-            lo, hi = R.wilson(w, w + l) if w + l else (0, 0)
-            return (f"n={len(sel):3d} WR {w/(w+l)*100 if w+l else float('nan'):5.1f}% "
-                    f"[{lo:4.1f},{hi:4.1f}] P/L {p:+7.2f}")
-        print(f"   {label:52s} keep {cell2(kept)}")
-        print(f"   {'':52s} skip {cell2(skip)}")
+        ledger_lab(label, clean, keep_fn)
+
+    # The EMA50-distance candidates are re-read on POST-GATE trades only: the
+    # near-EMA gate went live with the 09-10 deploy, so earlier rows were taken
+    # by code that had no such gate and would only blur the split (two 09-09 BUY
+    # rows sit 0.57 and 3.11 ATR on the adverse side - tools/check_data.py's
+    # entry-gate conformance block reports exactly this).
+    post = [t for t in clean if t["et"] >= R.GATES_DEPLOY]
+    def t_two(t):
+        return abs(t["entry"] - t["ema50"]) / t["atr"] if t.get("ema50") else None
+    def t_adv(t):
+        if not t.get("ema50"):
+            return None
+        return ((t["ema50"] - t["entry"]) if t["side"] == "BUY"
+                else (t["entry"] - t["ema50"])) / t["atr"]
+    print(f"   --- EMA50 distance on the {len(post)} post-gate trades (>= {R.GATES_DEPLOY:%m-%d}, ledger features) ---")
+    for k in (0.50, 1.00):
+        ledger_lab(f"TWO-SIDED band <= {k:.2f} ATR (a NEW gate, not live)", post,
+                   lambda t, k=k: t_two(t) is not None and t_two(t) <= k)
+    for k in (0.30, 0.15):
+        ledger_lab(f"ONE-SIDED adverse <= {k:.2f} ATR" + ("  <- LIVE gate" if k == R.MAX_BELOW_EMA_ATR else "  (tighter)"),
+                   post, lambda t, k=k: t_adv(t) is not None and t_adv(t) <= k)
     print()
 
     # ------------------------------------------------------- cost sensitivity
@@ -319,13 +387,17 @@ def main():
           f"{R.ATR_SL_MULT:.0f}xATR x LOT_SIZE")
     print("   live book WR (from 09-05) = "
           f"{sum(t['reason']=='TP' for t in clean)/dec_all*100:.1f}%")
-    header = "   " + "ATR$".rjust(7) + "".join(f"  s=${s:.2f}" for s in (0.10, 0.25, 0.50))
+    grid = (0.10, 0.25, 0.40, 0.50)   # 0.40 = measured XM BTCUSD round trip
+    header = "   " + "ATR$".rjust(7) + "".join(f"  s=${s:.2f}" for s in grid)
     print(header)
     for atr in (10, 15, 20, 30, 50, 70, 100, 150, 220):
         a = R.r_money(atr)
-        cells = "".join(f"  {(1+s/a)/3*100:6.0f}%" for s in (0.10, 0.25, 0.50))
-        print(f"   {atr:7.0f}{cells}")
-    print("   Read: a signal whose ATR is $15 needs a 61% win rate to survive a $0.25 spread.")
+        cells = "".join(f"  {(1+s/a)/3*100:6.0f}%" for s in grid)
+        mark = "  <- near the live-era median ATR" if atr == 100 else ""
+        print(f"   {atr:7.0f}{cells}{mark}")
+    print("   Read: s=$0.40 is the measured XM BTCUSD round trip at LOT_SIZE 0.01. At the")
+    print("   live-era median entry ATR (~$88) it needs a 40.9% decisive win rate; a $15-ATR")
+    print("   signal needs 75%.")
     print("   Trade flow that small is not a strategy, it is a fee stream - measure the real")
     print("   XM BTCUSD spread before LIVE (docs/HANDOFF.md §7).")
     print("\n   Legend: 'WR' is decisive (SL/TP only - BTC has no scratch outcome).")

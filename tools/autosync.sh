@@ -9,7 +9,8 @@
 #        stops the engine -> merges (conflicts: data files = server wins,
 #        everything else = remote wins) -> runs the smoke test -> rolls back
 #        on failure -> restarts the engine -> verifies status.json is fresh
-#   3. Runs tools/check_data.py (integrity gate)
+#   3. Runs tools/check_data.py (integrity gate) and tools/handoff_check.py
+#      (docs/HANDOFF.md freshness - advisory only, never blocks a deploy)
 #   4. Sends a one-message digest to the Telegram chat configured in .env
 #
 # Safety model:
@@ -224,6 +225,24 @@ if [ "$CHECK_RC" != "0" ]; then
 🚨 check_data: $CHECK_MSG - start a review session"
 fi
 
+# --- phase 4b: handoff freshness (ADVISORY - never blocks a deploy) -------------
+# docs/HANDOFF.md carries a machine-checked snapshot block; tools/handoff_check.py
+# recomputes it from the data files this script just committed. A stale handoff
+# is how a new session ends up retuning on three-day-old numbers, so the verdict
+# rides along in the digest. It deliberately does NOT touch $EXTRA: at four runs
+# an hour that would nag the same unfixed doc all day, and quiet mode would never
+# settle. Fix it with: python3 tools/handoff_check.py --update
+HANDOFF_MSG="not run"
+if [ -f tools/handoff_check.py ] && [ -f docs/HANDOFF.md ]; then
+    if python3 tools/handoff_check.py --quiet >/tmp/bitcoin_autosync_handoff.log 2>&1; then
+        HANDOFF_MSG=$(tail -n1 /tmp/bitcoin_autosync_handoff.log)
+    else
+        HANDOFF_MSG=$(tail -n1 /tmp/bitcoin_autosync_handoff.log)
+        [ -z "$HANDOFF_MSG" ] && HANDOFF_MSG="handoff_check failed to run"
+    fi
+    log "handoff: $HANDOFF_MSG"
+fi
+
 STATS=$(python3 - <<'PYEOF' 2>/dev/null
 import json
 try:
@@ -237,7 +256,7 @@ except Exception as e:
 PYEOF
 )
 
-log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG]"
+log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HANDOFF_MSG]"
 
 QUIET_SKIP=0
 if [ "$NOTIFY" = "quiet" ] && [ "$DATA_MSG" = "no new data" ] && [ "$DEPLOY_MSG" = "none" ] \
@@ -249,5 +268,6 @@ if [ "$QUIET_SKIP" = "0" ]; then
 📦 data: $DATA_MSG (push: $PUSH_MSG)
 🚀 deploy: $DEPLOY_MSG
 🩺 integrity: $CHECK_MSG
+📝 handoff: $HANDOFF_MSG
 💰 $STATS$EXTRA"
 fi

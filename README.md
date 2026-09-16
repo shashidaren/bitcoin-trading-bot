@@ -23,19 +23,30 @@ deliberately adapted for BTC).
 | `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
 | `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
-| `docs/REVIEW-*.md` | Per-cycle data reviews (none yet — first one after real trade data lands). |
+| `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). **§12 is the 2026-09-16 re-cut at 78 trades** — read that first; the body is the provenance behind it. |
+| `docs/AUTOSYNC.md` | The unattended sync/deploy loop: cron assumptions, branch rule, Telegram digest legend, what a deploy does to a running trade. |
+| `tools/handoff_check.py` | Freshness gate for `docs/HANDOFF.md`: recomputes its snapshot block from the live CSVs, says `HANDOFF FRESH`/`STALE`, and rewrites the block with `--update`. |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
 
 ## 🧰 Tools (run in this order on every new data drop)
 
 ```bash
-python3 tools/check_data.py       # 1. integrity gate — run FIRST, trust nothing before it passes
-python3 tools/validate_gates.py   # 2. replay entry gates against all historical trades
-python3 tools/phantom_trades.py   # 3. what did the blocked (skipped) signals actually do?
-python3 tools/smoke_test.py       # 4. engine regression tests (gates, SELL, drift auto-fix, stale feed)
+python3 tools/handoff_check.py                        # 0. is docs/HANDOFF.md still true?
+python3 tools/check_data.py                           # 1. integrity gate — FIRST, trust nothing before it passes
+python3 tools/win_rate_report.py --spread 0.40        # 2. baseline/eras/slices/filter candidates/cost
+python3 tools/pathwalk_sims.py --spread 0.40 --census # 3. exit-rule replay (prints its agreement rate first)
+python3 tools/analyze_losers.py --spread 0.40         # 4. winner/loser feature drift, MAE/MFE, stop grid
+python3 tools/validate_gates.py                       # 5. replay entry gates vs all historical trades (gross)
+python3 tools/phantom_trades.py --spread 0.40         # 6. what did the blocked (skipped) signals actually do?
+python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–I)
 ```
 
-All tools are read-only except the engine's own self-healing migration.
+`--spread 0.40` is the measured XM BTCUSD round trip at `LOT_SIZE = 0.01`; the tools default to
+`--spread 0` (gross), so a command copied without the flag prints numbers $0.40/trade more
+optimistic than the docs. `tools/handoff_check.py` fails the handoff if its command blocks disagree
+with its own cost assumption. All tools are read-only except the engine's self-healing migration and
+`handoff_check.py --update` (which rewrites only the marked snapshot block in `docs/HANDOFF.md`).
+Every walk comes from one implementation, `tools/replay_lib.py` — never hand-roll a bar walk.
 
 ## 🚀 Deploying to production
 
@@ -79,7 +90,10 @@ Read, in this order:
 4. the latest `docs/REVIEW-*.md` (once they exist) — most recent data findings
 5. `git log --oneline` — what changed recently
 
-Then run `python3 tools/check_data.py` before drawing any conclusion from the
-CSVs. Document each review cycle as a new `docs/REVIEW-YYYY-MM-DD.md`, add a
-changelog line to `archive/PROJECT_LOG.md`, and **update `docs/HANDOFF.md`**
-(see its §10 — that's how changes stay tracked between sessions).
+Then run `python3 tools/handoff_check.py` and `python3 tools/check_data.py`
+before drawing any conclusion from the CSVs. Document each review cycle in
+`docs/REVIEW-YYYY-MM-DD.md` (or re-cut the current one if the question did not
+change), add a changelog line to `archive/PROJECT_LOG.md`, and **update
+`docs/HANDOFF.md`** — snapshot block via `python3 tools/handoff_check.py
+--update`, then the prose per its §10 ritual. `tools/autosync.sh` reports the
+handoff verdict in its Telegram digest, so a drifting doc announces itself.

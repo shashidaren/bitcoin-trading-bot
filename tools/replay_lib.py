@@ -47,7 +47,18 @@ SL_COOLDOWN_ESCALATED_MINUTES = 60
 MAX_DAILY_LOSSES = 3
 
 # The port that installed the regime gates / SELL funnel (first post-port trade).
+# Era slices ("new regime") start here so that historical numbers stay
+# comparable with every review already written.
 PORT_DEPLOY = datetime(2026, 9, 9, 2, 25)
+
+# When those gates were ACTUALLY taking trades - use this, not PORT_DEPLOY, for
+# anything that re-applies an entry gate to ledger rows. Evidence that the gated
+# code went live a day after PORT_DEPLOY: the ledger's first SELL is 09-10 09:05
+# (the SELL funnel arrived with the port), and two of the four 09-09 BUY rows sit
+# on the adverse side of the near-EMA gate (0.57 and 3.11 ATR) that would have
+# blocked them. tools/check_data.py's entry-gate conformance block polices the
+# boundary and carries a copy of this date (keep the two in sync).
+GATES_DEPLOY = datetime(2026, 9, 10, 0, 0)
 
 # The ledger's second geometry change: rows before this ran SL 1.5xATR / TP
 # 2.5xATR (RR 1:1.67) with candle-era fills that overshoot the logged stop; rows

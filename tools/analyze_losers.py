@@ -20,7 +20,11 @@ trade inside the window its actual exit left open cannot see a looser exit
 rate" against a real 19.4%). Use tools/pathwalk_sims.py or the grids in
 tools/win_rate_report.py, which walk with an explicit horizon.
 
-Usage: python3 tools/analyze_losers.py [--root DIR] [--spread 0.25]
+Usage: python3 tools/analyze_losers.py [--root DIR] [--spread 0.40]
+
+--spread is the round-trip cost in $ per trade at LOT_SIZE. The default is 0.0
+(gross) - pass the measured XM BTCUSD cost, $0.40 at 0.01 lot (2026-09-15
+terminal measurement; docs/HANDOFF.md §9), or the P/L columns are optimistic.
 Read-only - writes nothing.
 """
 import argparse
