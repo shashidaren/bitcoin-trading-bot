@@ -23,8 +23,11 @@ candidate measurement only), LOT_SIZE 0.01 => money = price distance x 0.01.
 Legacy ledger rows are comma-grouped and are parsed comma-tolerantly.
 
 Usage:
-  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.25] [--horizon 240]
+  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.40] [--horizon 240]
                                  [--census]
+
+--spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40 per
+trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9).
 
 Grids:  A) real trades, TP multiple sweep      B) real trades, BE ratchet sweep
         C) cascade-aware real trades           D) raw signal census (entry stream)

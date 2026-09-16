@@ -12,7 +12,10 @@ Checks:
                     Balance_After ledger continuity, true P&L from $200,
                     exit GEOMETRY per era (SL/TP in ATR units - the ledger holds
                     more than one rule), realized-R sanity (catches lot/size and
-                    schema drift; 09-03 was a 100x-lot pair)
+                    schema drift; 09-03 was a 100x-lot pair), entry-gate
+                    conformance (could this row have been taken under TODAY's
+                    trend / RSI / near-EMA rules? catches unrecorded era
+                    boundaries and silently-skipped gates)
   forward_test_log  header, timestamp ordering, gaps > 15 min (M5 cadence),
                     M5 bar census (missing slots, duplicate minutes)
   skipped_trades    header/row width
@@ -40,6 +43,14 @@ STATUS = os.path.join(ROOT, "status.json")
 STARTING_BALANCE = 200.00
 GAP_SECONDS = 15 * 60   # M5 log: normal spacing is 5 min, flag > 15 min
 ENTRY_MATCH_SECONDS = 6 * 60  # trade entry must have a log row within +-6 min
+
+# --- engine entry rules, for check_gate_conformance() (keep in sync with engine.py)
+RSI_MIN, RSI_MAX = 40.0, 70.0     # SELL mirrors to 100-RSI_MAX .. 100-RSI_MIN
+MAX_BELOW_EMA_ATR = 0.30          # engine.MAX_BELOW_EMA_ATR (ONE-SIDED adverse distance)
+# When the ported regime gates + SELL funnel were actually taking trades. NOT
+# replay_lib.PORT_DEPLOY (2026-09-09 02:25): the first SELL is 09-10 09:05 and
+# two 09-09 BUY rows violate the near-EMA gate, so 09-09 rows ran older code.
+GATES_LIVE = datetime(2026, 9, 10, 0, 0)   # == replay_lib.GATES_DEPLOY (keep in sync)
 
 TRADES_FIELDS = [
     "Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
@@ -371,6 +382,57 @@ def check_bar_census(dts):
         ok(f"complete M5 grid ({len(exp)} slots) with no missing bars")
 
 
+def check_gate_conformance(trades):
+    """Could this row have been taken under the rules the engine runs TODAY?
+
+    Every entry gate that only needs ledger fields is re-applied to the row's
+    own `*_At_Entry` values: trend (EMA50 vs EMA200), the RSI window, and the
+    near-EMA proximity gate. A row that violates one of them means the engine
+    that took it was running DIFFERENT code or DIFFERENT parameters than the
+    ones in the working tree - i.e. an era boundary that no doc recorded, a
+    param that was changed and reverted, or a gate that is silently skipped on
+    some path. All three have happened here (see docs/HANDOFF.md §9).
+
+    GATES_LIVE is deliberately NOT replay_lib.PORT_DEPLOY (2026-09-09 02:25).
+    Evidence the gates went live on 09-10, not 09-09: the first SELL in the
+    ledger is 09-10 09:05 (the SELL funnel arrived with the port), and two of
+    the four 09-09 BUY rows sit 0.57 and 3.11 ATR on the adverse side of a
+    proximity gate that would have blocked them. Rows before GATES_LIVE are
+    counted, not flagged.
+    """
+    print("\n== trades.csv entry-gate conformance (today's rules) ==")
+    trend_bad, rsi_bad, prox_bad, pre_era = [], [], [], 0
+    for t in trades:
+        side = t.get("Trade_Type")
+        e50, e200 = fnum(t.get("EMA50_At_Entry")), fnum(t.get("EMA200_At_Entry"))
+        rsi, atr, entry = fnum(t.get("RSI_At_Entry")), fnum(t.get("ATR_At_Entry")), fnum(t.get("Entry_Price"))
+        if None in (e50, e200, rsi, atr, entry) or side not in ("BUY", "SELL"):
+            continue
+        if not t.get("entry_dt") or t["entry_dt"] < GATES_LIVE:
+            pre_era += 1
+            continue
+        tag = f"#{t.get('num')} {side} {t['entry_dt']:%m-%d %H:%M}"
+        if (side == "BUY") != (e50 > e200):
+            trend_bad.append(f"{tag} EMA50 {e50:.2f} vs EMA200 {e200:.2f}")
+        lo, hi = (RSI_MIN, RSI_MAX) if side == "BUY" else (100 - RSI_MAX, 100 - RSI_MIN)
+        if not lo < rsi < hi:
+            rsi_bad.append(f"{tag} RSI {rsi:.1f} outside {lo:.0f}-{hi:.0f}")
+        adverse = (e50 - entry) if side == "BUY" else (entry - e50)
+        if adverse > MAX_BELOW_EMA_ATR * atr + 1e-9:
+            prox_bad.append(f"{tag} entry {adverse / atr:+.2f} ATR on the adverse side of "
+                            f"EMA50 (gate allows {MAX_BELOW_EMA_ATR:.2f})")
+    for label, hits in (("trend gate (EMA50 vs EMA200)", trend_bad),
+                        ("RSI window", rsi_bad),
+                        (f"near-EMA gate ({MAX_BELOW_EMA_ATR:.2f} ATR adverse)", prox_bad)):
+        if hits:
+            warn(f"{len(hits)} post-{GATES_LIVE:%m-%d} row(s) violate the {label}: " + "; ".join(hits[:4])
+                 + (" ..." if len(hits) > 4 else ""))
+        else:
+            ok(f"every row from {GATES_LIVE:%m-%d} on satisfies the {label}")
+    print(f"  [info] {pre_era} row(s) predate {GATES_LIVE:%Y-%m-%d %H:%M} UTC and ran older code -"
+          f" not judged (see docs/HANDOFF.md §9 on the era boundary)")
+
+
 def main():
     print(f"bitcoin-trading-bot data integrity check - {ROOT}")
     for path in (TRADES, LOG, SKIPS):
@@ -383,6 +445,7 @@ def main():
     check_skips()
     check_cross(trades, log_dts)
     check_geometry(trades)
+    check_gate_conformance(trades)
     print(f"\n== result: {len(FAILS)} fail, {len(WARNS)} warn ==")
     if FAILS:
         print("Fix FAIL items before analysing this data.")
