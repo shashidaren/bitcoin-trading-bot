@@ -58,7 +58,9 @@ open trade.
 
 `tools/autosync.sh` (cron, root) automates this: commits live data, deploys
 merged PRs only if the smoke test passes (rolls back otherwise), runs the
-integrity gate, and sends a Telegram digest.
+integrity gate, and notifies Telegram per its `NOTIFY` policy (`alerts` by
+default: deploys, incidents, and one daily summary — not a digest every run;
+see `docs/AUTOSYNC.md` §5).
 
 ## 📡 Forward-test data source
 

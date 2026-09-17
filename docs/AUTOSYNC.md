@@ -46,7 +46,7 @@ required — without it the script still runs, it just stays silent.
 3. runs `tools/check_data.py`, then `tools/handoff_check.py --quiet` (advisory:
    does `docs/HANDOFF.md`'s snapshot block still match the data it just
    committed? it never blocks a deploy and never touches `$EXTRA`);
-4. sends one Telegram digest.
+4. notifies Telegram per the `NOTIFY` policy (§5).
 
 So a commit sitting on any other branch (e.g. an `arena/*` work branch) will
 never reach the bot. **Merging to `main` is the deploy trigger** — that is the
@@ -127,7 +127,7 @@ deploy gate, not just a dev tool: `autosync.sh` reads only the exit code.
 ## 5. Tuning (environment variables, set in the crontab line)
 
 ```cron
-7-52/15 * * * * AUTO_DEPLOY=1 SMOKE_GATE=1 NOTIFY=quiet /opt/bitcoin/tools/autosync.sh >> /var/log/bitcoin_autosync.log 2>&1
+7-52/15 * * * * AUTO_DEPLOY=1 SMOKE_GATE=1 NOTIFY=alerts /opt/bitcoin/tools/autosync.sh >> /var/log/bitcoin_autosync.log 2>&1
 ```
 
 | Var | Default | Effect |
@@ -136,9 +136,18 @@ deploy gate, not just a dev tool: `autosync.sh` reads only the exit code.
 | `REMOTE` / `BRANCH` | `origin` / `main` | what to sync against |
 | `AUTO_DEPLOY` | `1` | `0` = commit/push data only, never pull or restart |
 | `SMOKE_GATE` | `1` | `0` = deploy without the smoke test (**not recommended**) |
-| `NOTIFY` | `always` | `quiet` = only message when something happened (data, deploy, failure) |
+| `NOTIFY` | `alerts` | `alerts` = deploys, incident/state changes, one `(daily)` summary per UTC day; `always` = every run; `quiet` = only when something changed; `off` = never message (the log file still records every run) |
+| `DAILY_STAMP` | `/tmp/bitcoin_autosync_daily_digest` | `alerts`: date of the last daily summary. Lives in `/tmp`, so a reboot can repeat one daily digest at worst |
+| `ALERT_STAMP` | `/tmp/bitcoin_autosync_last_alert` | `alerts`: last alerted state — identical repeats are suppressed (dead push credentials etc. cannot re-flood every 15 min); a clean run removes it, re-arming the next incident |
 | `ENGINE_SERVICE` / `DASHBOARD_SERVICE` | auto-detect | pin the systemd unit names if detection fails |
 | `LOCK_FILE` | `/var/lock/bitcoin-autosync.lock` | `flock` guard; overlapping runs exit 0 |
 
-At four runs an hour, `NOTIFY=always` is ~96 messages/day. `NOTIFY=quiet` keeps
-the digest for the runs that actually changed something.
+At four runs an hour, `NOTIFY=always` is ~96 messages/day — and on BTC even
+`quiet` barely helps: a new M5 bar lands every 5 minutes, so "data changed" is
+the normal case, not an event, and `quiet` still fires almost every run. The
+default `alerts` sends ~1 message/day (the `(daily)` summary) plus deploys and
+incidents; the two 🚨/⚠️ `EXTRA` paths and the early FATAL exits (missing
+`BTC_DIR`, repo mid-merge) are `alert_once`-guarded, so a *persistent* failure
+messages once until it changes — the daily summary keeps it visible until
+fixed. `off` is total silence: everything still lands in
+`/var/log/bitcoin_autosync.log`.
