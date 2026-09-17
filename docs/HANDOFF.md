@@ -20,19 +20,19 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-09-16 12:10 |
-| data_collection | 601 |
-| closed_trades | 78 |
-| wins_losses | 33W/45L |
-| win_rate_pct | 42.3 |
-| engine_ledger_usd | 217.45 |
-| true_equity_usd | -174.39 |
-| live_era_trades | 24 |
-| live_era_net_usd | +7.84 |
-| log_covered_trades | 24 |
-| log_bars | 2494 |
-| log_last_bar_utc | 2026-09-16 12:10 |
-| skip_rows | 73 |
+| as_of_utc | 2026-09-17 04:05 |
+| data_collection | 665 |
+| closed_trades | 80 |
+| wins_losses | 33W/47L |
+| win_rate_pct | 41.2 |
+| engine_ledger_usd | 211.84 |
+| true_equity_usd | -180.00 |
+| live_era_trades | 26 |
+| live_era_net_usd | +1.43 |
+| log_covered_trades | 26 |
+| log_bars | 2685 |
+| log_last_bar_utc | 2026-09-17 04:05 |
+| skip_rows | 74 |
 | open_trade | none |
 | spread_usd_per_trade | 0.40 |
 <!-- /HANDOFF-SNAPSHOT -->
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (snapshot above; prose last reviewed 2026-09-16)
+## 1. Where things stand (snapshot above, refreshed 2026-09-17; data prose last re-cut 2026-09-16 at 78 trades — the snapshot has since moved to 80, unreviewed, next re-cut at the 30-live-era-trade milestone)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -112,10 +112,13 @@ True equity from the $200 start is **−$174.39**; the engine ledger reads
   reload from `trades.csv`, slope gate re-seeds from the log).
 - `tools/autosync.sh` (cron, root, every 15 min) commits live data, deploys only
   if `smoke_test.py` passes (rolls back otherwise), runs the integrity gate and
-  the handoff freshness check, and sends a Telegram digest. It auto-detects the
-  engine/dashboard units by scanning systemd for units referencing `/opt/bitcoin`,
-  and **it only ever pulls `origin/main`**. Install checklist + digest legend:
-  `docs/AUTOSYNC.md`.
+  the handoff freshness check, and notifies Telegram per its `NOTIFY` policy —
+  **`alerts` by default since 2026-09-17** (deploys, incident/state changes,
+  and one `(daily)` summary digest per UTC day, replacing the old digest-every-
+  15-min flood; `off` = silent, `always`/`quiet` = old behaviour). It
+  auto-detects the engine/dashboard units by scanning systemd for units
+  referencing `/opt/bitcoin`, and **it only ever pulls `origin/main`**. Install
+  checklist + digest legend: `docs/AUTOSYNC.md`.
 - Feed health: 2494 M5 bars since 09-07 20:20 UTC, **no gap >15 min anywhere**
   (`check_data.py`'s stale-feed proxy) and only three single-bar holes (09-14
   08:45, 09-15 03:45, 09-15 13:00) — the feed has been continuous. At the

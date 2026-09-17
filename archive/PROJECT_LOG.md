@@ -54,6 +54,20 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-17] autosync Telegram flood fixed: `NOTIFY=alerts` (new default) + `off`, one daily summary digest.**
+  At the 15-min cron the old default (`always`) sent ~96 digests/day, and `quiet` did not help on
+  BTC: a new M5 bar lands every 5 minutes, so "data changed" is the normal case and quiet still
+  fired almost every run. `tools/autosync.sh` phase 5 now has four policies — `alerts` (default:
+  deploys, incident/state *changes*, and ONE `(daily)` summary digest per UTC day), `off` (never
+  message, including the early FATAL paths), `always`/`quiet` (unchanged old behaviour). Repeat
+  suppression: a persistent failure (dead push credentials, wedged merge, missing dir) messages
+  once via `alert_once`/`ALERT_STAMP` until the state changes — a clean run re-arms it — so a
+  stuck incident cannot re-flood every 15 min but stays visible in the daily summary. Stamps live
+  in `/tmp` (`DAILY_STAMP`/`ALERT_STAMP`), so a reboot can repeat one digest at worst. The 15-min
+  sync cadence itself was kept deliberately: 24/7 M5 feed → 3-bar data-loss window (vs 36 bars at
+  the gold bot's 3-hour cadence) and ≤15-min deploy latency after a merge. Decision log + tuning
+  table: `docs/AUTOSYNC.md` §5; HANDOFF §1 Operations updated, snapshot refreshed to 80 trades.
+
 - **[2026-09-16] `docs/HANDOFF.md` reviewed, re-cut at 78 trades, and made machine-checkable.**
   The handoff had drifted a day behind the box (autosync had taken it from 73 to 78 closed trades)
   and carried four defects that would have misled the next session:
