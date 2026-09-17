@@ -30,7 +30,9 @@ AUTO_DEPLOY="${AUTO_DEPLOY:-1}"       # 0 = data-only mode (never pull/restart)
 SMOKE_GATE="${SMOKE_GATE:-1}"         # 0 = deploy without the smoke test
 ENGINE_SERVICE="${ENGINE_SERVICE:-}" # empty = auto-detect the unit running engine.py
 DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}" # empty = auto-detect the unit running dashboard.py
-NOTIFY="${NOTIFY:-always}"            # always | quiet (quiet = only on events)
+NOTIFY="${NOTIFY:-alerts}"            # alerts | always | quiet | off (phase 5 below)
+DAILY_STAMP="${DAILY_STAMP:-/tmp/bitcoin_autosync_daily_digest}"  # alerts: last daily summary date
+ALERT_STAMP="${ALERT_STAMP:-/tmp/bitcoin_autosync_last_alert}"    # alerts: last alerted state (dedupe)
 DATA_FILES=(trades.csv forward_test_log.csv skipped_trades.csv status.json)
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"; }
@@ -47,6 +49,18 @@ tg() {
     curl -s -m 10 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TG_CHAT}" \
         --data-urlencode "text=${1}" >/dev/null 2>&1 || true
+}
+
+# alert_once: message only when this state differs from the last alerted one,
+# so a persistent failure (dead push credentials, wedged merge, missing dir)
+# cannot re-flood the chat every 15 minutes. NOTIFY=off stays fully silent.
+# The stamp lives in /tmp: a reboot re-arms it (worst case: one repeat), and a
+# clean routine run removes it (phase 5), so the same incident re-alerts later.
+alert_once() {
+    [ "$NOTIFY" = "off" ] && return 0
+    if [ "$1" = "$(cat "$ALERT_STAMP" 2>/dev/null)" ]; then return 0; fi
+    tg "$2"
+    printf '%s' "$1" > "$ALERT_STAMP" 2>/dev/null || true
 }
 
 detect_service() {
@@ -71,11 +85,11 @@ detect_service() {
 exec 9>"$LOCK_FILE" || { log "FATAL: cannot open lock file"; exit 1; }
 if ! flock -n 9; then log "another autosync run is active - skipping"; exit 0; fi
 
-cd "$BTC_DIR" || { log "FATAL: cannot cd to $BTC_DIR"; tg "bitcoin autosync: FATAL - cannot cd to $BTC_DIR"; exit 1; }
+cd "$BTC_DIR" || { log "FATAL: cannot cd to $BTC_DIR"; alert_once "fatal-cd|$BTC_DIR" "bitcoin autosync: FATAL - cannot cd to $BTC_DIR"; exit 1; }
 
 if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD ]; then
     log "repo is mid rebase/merge - manual attention required"
-    tg "bitcoin autosync: /opt/bitcoin is mid rebase/merge. Fix manually; autosync paused."
+    alert_once "mid-rebase-merge" "bitcoin autosync: /opt/bitcoin is mid rebase/merge. Fix manually; autosync paused."
     exit 1
 fi
 
@@ -258,13 +272,48 @@ PYEOF
 
 log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HANDOFF_MSG]"
 
-QUIET_SKIP=0
-if [ "$NOTIFY" = "quiet" ] && [ "$DATA_MSG" = "no new data" ] && [ "$DEPLOY_MSG" = "none" ] \
-   && [ "$PUSH_MSG" = "ok" ] && [ -z "$EXTRA" ]; then
-    QUIET_SKIP=1
+# --- phase 5: notification policy ----------------------------------------------
+# always  : digest every run (~96/day at the 15-min cron) - the original flood
+# quiet   : only when something changed. Barely helps on BTC: a new M5 bar
+#           lands every 5 minutes, so "data changed" is the normal case, not
+#           an event - quiet still fires almost every run.
+# alerts  : DEFAULT. Sends only (a) a deploy or an incident / non-routine state
+#           CHANGE - identical repeats are deduped via ALERT_STAMP so a stuck
+#           failure cannot re-flood, and a clean run re-arms it - and (b) ONE
+#           "(daily)" summary digest per UTC day so the bot keeps a heartbeat.
+# off     : never message. Everything still lands in the log file.
+# Stamp files live in /tmp, so a reboot can repeat one digest at worst.
+# Unknown values fall back to "always" behaviour.
+SEND=1
+DAILY_TAG=""
+if [ "$NOTIFY" = "off" ]; then
+    SEND=0
+elif [ "$NOTIFY" = "quiet" ]; then
+    if [ "$DATA_MSG" = "no new data" ] && [ "$DEPLOY_MSG" = "none" ] \
+       && [ "$PUSH_MSG" = "ok" ] && [ -z "$EXTRA" ]; then
+        SEND=0
+    fi
+elif [ "$NOTIFY" = "alerts" ]; then
+    SEND=0
+    if [ "$DEPLOY_MSG" != "none" ] || [ -n "$EXTRA" ]; then
+        CUR_STATE="${DEPLOY_MSG}|${EXTRA}"
+        if [ "$CUR_STATE" != "$(cat "$ALERT_STAMP" 2>/dev/null)" ]; then
+            SEND=1
+            printf '%s' "$CUR_STATE" > "$ALERT_STAMP" 2>/dev/null || true
+        fi
+    else
+        rm -f "$ALERT_STAMP" 2>/dev/null || true    # routine again - re-arm
+    fi
+    if [ "$SEND" = "0" ] && [ "$(cat "$DAILY_STAMP" 2>/dev/null)" != "$(date -u '+%Y-%m-%d')" ]; then
+        SEND=1
+        DAILY_TAG=" (daily)"
+        date -u '+%Y-%m-%d' > "$DAILY_STAMP" 2>/dev/null || true
+    fi
 fi
-if [ "$QUIET_SKIP" = "0" ]; then
-    tg "🤖 bitcoin autosync — $(date -u '+%m-%d %H:%M') UTC
+log "notify: policy=$NOTIFY send=$SEND"
+
+if [ "$SEND" = "1" ]; then
+    tg "🤖 bitcoin autosync${DAILY_TAG} — $(date -u '+%m-%d %H:%M') UTC
 📦 data: $DATA_MSG (push: $PUSH_MSG)
 🚀 deploy: $DEPLOY_MSG
 🩺 integrity: $CHECK_MSG
