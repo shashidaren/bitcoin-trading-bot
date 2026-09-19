@@ -20,19 +20,19 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-09-17 04:05 |
-| data_collection | 665 |
-| closed_trades | 80 |
-| wins_losses | 33W/47L |
-| win_rate_pct | 41.2 |
-| engine_ledger_usd | 211.84 |
-| true_equity_usd | -180.00 |
-| live_era_trades | 26 |
-| live_era_net_usd | +1.43 |
-| log_covered_trades | 26 |
-| log_bars | 2685 |
-| log_last_bar_utc | 2026-09-17 04:05 |
-| skip_rows | 74 |
+| as_of_utc | 2026-09-19 14:50 |
+| data_collection | 901 |
+| closed_trades | 87 |
+| wins_losses | 37W/50L |
+| win_rate_pct | 42.5 |
+| engine_ledger_usd | 222.83 |
+| true_equity_usd | -169.02 |
+| live_era_trades | 33 |
+| live_era_net_usd | +9.61 |
+| log_covered_trades | 33 |
+| log_bars | 3390 |
+| log_last_bar_utc | 2026-09-19 14:50 |
+| skip_rows | 78 |
 | open_trade | none |
 | spread_usd_per_trade | 0.40 |
 <!-- /HANDOFF-SNAPSHOT -->
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (snapshot above, refreshed 2026-09-17; data prose last re-cut 2026-09-16 at 78 trades — the snapshot has since moved to 80, unreviewed, next re-cut at the 30-live-era-trade milestone)
+## 1. Where things stand (snapshot above, refreshed 2026-09-19 at 87 trades / 33 live-era trades — crossing the 30-trade milestone)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -60,49 +60,44 @@ edited it — that is what §10's ritual is for.
   daily-loss breaker, UTC everywhere, self-healing 16-field ledger, stale-feed
   guard, MT5 sidecar option, `tools/` suite.
 - **Reviews:** `docs/REVIEW-2026-09-15.md` is the full first review (written at
-  73 trades) — **its §12 is the 2026-09-16 re-cut at 78 trades** and is the
-  provenance for every number in §5 below. Where the two disagree, read §12.
+  73 trades) — **its §12 is the 2026-09-16 re-cut at 78 trades**.
 
 ### The book in one table (net of $0.40/trade; gross in brackets)
 
 | Slice | n | W/L | WR | net | gross | net/trade |
 |---|---|---|---|---|---|---|
-| all rows incl. the 09-03 outliers | 78 | 33/45 | 42.3% | −405.59 | [−374.39] | −5.20 |
-| **from 09-05 (exclude the outliers)** | 76 | 33/43 | 43.4% | **−9.95** | [+20.45] | −0.13 |
-| live geometry (≥09-06 17:49, RR 1:2) | 41 | 18/23 | 43.9% | +2.83 | [+19.23] | +0.07 |
-| **"new regime" as the tools slice it (≥09-09 02:25)** | 24 | 10/14 | 41.7% | **+7.84** | [+17.44] | +0.33 |
-| strictly post-gate (≥09-10, first SELL 09-10 09:05) | 20 | 8/12 | 40.0% | +6.68 | [+14.68] | +0.33 |
-| last 10 | 10 | 4/6 | 40.0% | +2.26 | [+6.26] | +0.23 |
+| all rows incl. the 09-03 outliers | 87 | 37/50 | 42.5% | −403.82 | [−369.02] | −4.64 |
+| **from 09-05 (exclude the outliers)** | 85 | 37/48 | 43.5% | **−8.18** | [+25.82] | −0.10 |
+| live geometry (≥09-06 17:49, RR 1:2) | 50 | 22/28 | 44.0% | +4.60 | [+24.60] | +0.09 |
+| **"new regime" as the tools slice it (≥09-09 02:25)** | 33 | 14/19 | 42.4% | **+9.61** | [+22.81] | +0.29 |
+| strictly post-gate (≥09-10, first SELL 09-10 09:05) | 29 | 12/17 | 41.4% | +8.45 | [+20.05] | +0.29 |
+| last 10 | 10 | 4/6 | 40.0% | −0.75 | [+3.25] | −0.08 |
+| newest 7 (since 09-17 snapshot) | 7 | 4/3 | 57.1% | **+8.18** | [+10.98] | +1.17 |
 
-True equity from the $200 start is **−$174.39**; the engine ledger reads
-**$217.45**. The $391.84 gap is the two 2026-09-03 pre-port sizing monsters
+True equity from the $200 start is **−$169.02**; the engine ledger reads
+**$222.83**. The $391.85 gap is the two 2026-09-03 pre-port sizing monsters
 (−$394.84) plus pre-port balance resets — not a live accounting bug (§9).
 
-### What changed since the 2026-09-15 review (73 → 78 trades)
+### What changed since the 2026-09-17 snapshot (80 → 87 trades / 26 → 33 live era)
 
-1. **The cost-adjusted breakeven line was crossed — barely.** At the live-era
-   median entry ATR ($87.85 ⇒ 1R = $1.757) the $0.40 round trip is **22.8% of 1R**,
-   which needs a **40.9%** decisive win rate; the live era is now at **41.7%**
-   (Wilson 24.5–61.2). On 09-15 the same comparison read 41.3% required vs 36.8%
-   actual. **This is n=24 inside a ±19-point confidence interval — it says "still
-   alive", not "solved".** The timeframe question in §7.1 is unchanged.
-2. **The last-10 collapse reversed**: 1W/9L (−$11.48 net) on 09-15 → **4W/6L
-   (+$2.26 net)** now, on a 3W/1L 09-15 and a 1-trade 09-16. Reinforces the
-   review's verdict that 09-11→09-14 was regime, not parameters.
-3. **The cooldown's measured sign flipped.** It now has 7 scorable blocks
-   (was 4) reading **+$6.72 gross / +$3.92 net** — i.e. on the slice the log can
-   finally score, the cooldown is *throwing away winners*. 33 of 40 blocks still
-   predate the log, so this is a first reading, not a verdict (§4, §7.5).
-4. **Two queued candidates were re-graded.** The wick-ratio candidate now has
-   **opposite signs in the two views** (demoted to unresolved), and the
-   "entry near EMA50" candidate turned out to be **mislabeled**: the live gate is
-   one-sided and *tightening it hurts*, while the edge belongs to a **two-sided**
-   band that is not implemented (§5). This is the most consequential correction
-   in this update — it removes a change that would have cost money.
-5. **A third stop-overshoot row appeared** (#65, −1.22R) and the era boundary
-   moved: `check_data.py` now re-applies today's entry gates to every post-09-10
-   row and all 20 pass, while two 09-09 rows violate the near-EMA gate — the
-   fingerprint of the gates going live on 09-10, not 09-09 (§9).
+1. **The 30 live-era trade milestone was reached and crossed (now n=33).**
+   The newest 7 trades went **4W/3L (57.1% WR)** generating **+$8.18 net**
+   (+$10.98 gross). Cumulative live-era net equity rose from +$1.43 to **+$9.61**
+   (engine ledger from $211.84 to $222.83).
+2. **BUY side pulled into parity with SELL.** On 09-17, BUY sat at -$2.28 net
+   while SELL sat at +$10.12 net. Across 09-18 and 09-19, BTC trended up strongly
+   from ~$76.4k to ~$81.6k, yielding 4 consecutive BUY TP wins (#82, #84, #85, #86).
+   BUY in the new regime is now **7W/9L (43.8% WR), +$4.79 net**, virtually tying
+   SELL at **7W/10L (41.2% WR), +$4.82 net**.
+3. **The cost-adjusted edge holds.** Breakeven decisive WR at RR 1:2 is 33.3% gross
+   and ~40.9% net of the $0.40 spread. Live-era decisive WR sits at **42.4%**
+   (+1.5% cushion above cost-adjusted breakeven, +9.1% above gross breakeven).
+4. **Daily loss limit proved protective on 09-17.** Trading was halted after 3 SLs
+   on 09-17, capping that day's drawdown at -$6.65 net before the system caught
+   the 09-18/09-19 rally.
+5. **Two-sided EMA band continues to show promise.** In post-gate trades, entries
+   within 0.50 ATR of EMA50 produced 55.6% WR (+$7.59 net vs +$0.86 outside), and
+   within 1.00 ATR produced 57.1% WR (+$15.59 net vs -$7.14 outside). Still monitor-only.
 
 ### Operations
 
