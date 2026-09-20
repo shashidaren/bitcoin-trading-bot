@@ -77,3 +77,4 @@ Timestamp,Reason,Price,ATR
 2026-09-17 08:45:00,Blackout: London Open & Early Session Kill-Zone,76494.00,61.94
 2026-09-17 08:50:00,Blackout: London Open & Early Session Kill-Zone,76486.03,61.66
 2026-09-18 12:35:44,Blackout: NY Early Pre-Market,78084.67,82.64
+2026-09-20 18:00:01,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,81147.95,124.82
