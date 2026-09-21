@@ -20,19 +20,19 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-09-17 04:05 |
-| data_collection | 665 |
-| closed_trades | 80 |
-| wins_losses | 33W/47L |
-| win_rate_pct | 41.2 |
-| engine_ledger_usd | 211.84 |
-| true_equity_usd | -180.00 |
-| live_era_trades | 26 |
-| live_era_net_usd | +1.43 |
-| log_covered_trades | 26 |
-| log_bars | 2685 |
-| log_last_bar_utc | 2026-09-17 04:05 |
-| skip_rows | 74 |
+| as_of_utc | 2026-09-21 08:30 |
+| data_collection | 1068 |
+| closed_trades | 92 |
+| wins_losses | 39W/53L |
+| win_rate_pct | 42.4 |
+| engine_ledger_usd | 228.45 |
+| true_equity_usd | -163.40 |
+| live_era_trades | 38 |
+| live_era_net_usd | +13.23 |
+| log_covered_trades | 38 |
+| log_bars | 3890 |
+| log_last_bar_utc | 2026-09-21 08:30 |
+| skip_rows | 84 |
 | open_trade | none |
 | spread_usd_per_trade | 0.40 |
 <!-- /HANDOFF-SNAPSHOT -->
