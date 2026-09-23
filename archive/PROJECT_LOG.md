@@ -54,6 +54,16 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-09-24] 99-trade forward-test re-cut; documentation only**
+  (`docs/REVIEW-2026-09-15.md` §13, `docs/HANDOFF.md`). Autosync snapshot
+  `data collection 1301` is through 2026-09-23 20:35 UTC: 99 closed rows,
+  44W/55L, 45 post-port / 41 strictly post-gate, and an open simulated SELL #99.
+  Clean 09-05-on results are +$52.43 gross / +$13.63 net at the measured $0.40
+  cost; strict post-gate is 19W/22L, +$30.26 net, still too uncertain to
+  establish an edge. The 30-trade review milestone is met. TP5/TP6 replay
+  results are stronger but counterfactual; no code, strategy, or parameters
+  changed. `check_data.py` reports 0 fail / 62 warn; daily halt phantoms remain
+  protective, while cooldown/blackout reads are small and incomplete.
 - **[2026-09-17] autosync Telegram flood fixed: `NOTIFY=alerts` (new default) + `off`, one daily summary digest.**
   At the 15-min cron the old default (`always`) sent ~96 digests/day, and `quiet` did not help on
   BTC: a new M5 bar lands every 5 minutes, so "data changed" is the normal case and quiet still
@@ -184,23 +194,50 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **[2026-09-07] Pre-port state**: BUY-only M5 engine, flat 30-min SL cooldown, narrow blackouts, %-based ATR filter, basic dashboard on port 6001. Strategy params (wick 0.15, RSI 40-70, RR 1:2) unchanged by the port.
 
 ## Forward Test Observations
-- **73 closed trades total (30W/43L); ledger $208.74, true equity -$183.10.** The two 2026-09-03 trades (-197.63, -197.21) ran under a broken pre-port sizing setup - exclude them from every statistic. From 09-05 on: 71 trades, 30W/41L, **+$11.74 gross**; the ledger has **no cost model**, so every figure is gross.
-- **Ledger geometry changed 09-06 17:49 UTC** (1.5x/2.5x -> 2x/4x ATR). Pre: n=37, 40.5%, -$393.62 (-199.6R). Post: n=36, 41.7%, +$10.52 (+8.3R). Never pool R totals or breakeven WRs across that line.
-- **Live-era sample = 19 trades (from 09-09 02:25 UTC): 7W/12L, +$8.73 gross.** Last 10: 1W/9L, -$9.98. R-multiples clean (+2R / -1R; the two -1.38R rows are fast-move tick timing). Far below the n>=30 bar - do not retune on it.
-- **Cost is the dominant term**: +$0.17/trade gross (n=71) vs published XM BTCUSD spread $0.225-0.60/trade at 0.01 lot = 0.13-0.35R at live ATR. Reducing cost (tighter-spread account) or trading only large-ATR signals beats any filter found so far. See `win_rate_report.py` §8.
-- **Filters tested and closed**: ATR%>=0.06 rejected (calendar proxy; own-day control n=4, sign flips; churn bucket is pre-era only). RSI>=45 rejected (own-day 22.0% vs 29.4%). Two candidates survive the own-day control but need n>=30: wick <=0.40 (own-day keep 37.0% +$13.40 vs skip 20.0% -$17.23) and near-EMA <=0.15 ATR (own-day keep 62.5% +$13.18, n=8).
-- **BE ratchet not adopted**: tight triggers lose; best row +1.0R beats "off" by $2.71 on 29 cascade trades. Gold's 0.75R is BTC's worst row. Re-open at 30+ live trades.
-- Cooldown blocks 37 of 70 skipped signals but its cost is **still unmeasured** (only 4 scorable; the log starts 09-07 20:20 UTC). Daily-halt phantoms (18, all scorable) are 3W/15L = -$4.93 -> the breaker is protective. Biggest open question unchanged.
-- No reviewed trade data yet under the new stack. First `docs/REVIEW-*.md` after real trades land.
-- `archive/forward_test_log_m1.csv` (8,537 rows, Sep 1) is M1-cadence data from an earlier setup - NOT comparable to the current M5 log. Do not mix the two in analysis.
+
+Current data/review snapshot: see `docs/HANDOFF.md` and the reproducible
+2026-09-24 re-cut in `docs/REVIEW-2026-09-15.md` §13. Data is through
+2026-09-23 20:35 UTC (`data collection 1301`); `status.json` has 99 closed rows
+and an open simulated SELL #99. These are forward-test simulation results, not
+realized brokerage P/L.
+
+- **Exclude the two 09-03 sizing outliers** (−$197.63 and −$197.21) from every
+  strategy statistic. From 09-05 onward: 97 trades, 44W/53L, +$52.43 gross /
+  +$13.63 net at the measured $0.40 round trip.
+- **Current gates have 41 strictly post-gate trades** (09-10 onward): 19W/22L,
+  46.3%, +$46.66 gross / +$30.26 net. The 95% Wilson interval is 32.1–61.3%;
+  the approximate cost-adjusted breakeven WR is 40.8%. Positive point estimate,
+  not an established edge. The 30-trade review milestone has been reached.
+- **The 19 newer rows since the prior snapshot** are 11W/8L, +$37.59 gross /
+  +$29.99 net. The last 10 are 7W/3L and +$24.45 net, but have higher median
+  ATR ($131.80) than the full post-gate sample ($89.58); volatility and lower
+  cost/R contribute to the larger recent dollar result.
+- **Accounting remains split by design/history:** raw Profit across all 99 rows
+  is −$342.41 gross, or −$142.41 from $200 before spread costs; engine ledger
+  says $249.43, gap +$391.84 from the old oversizing and balance resets. Do not
+  use the engine balance as cumulative true P/L.
+- **Direction:** strict post-gate BUY is 11W/10L, +$25.72 net (n=21); SELL is
+  8W/12L, +$4.54 net (n=20). The unfiltered signal census also favors BUY, but
+  it ignores cascade/risk-gate selection. Keep both sides active.
+- **Counterfactual exits:** TP5/TP6 beat live TP4 in the 45-path and gated
+  cascade replay, while BE +1.0R is only slightly ahead; no exit change is
+  adoption-grade. Keep TP4 and no BE ratchet pending a prospective sample and
+  the M5-vs-higher-timeframe decision.
+- **Risk gates:** daily-halt phantoms are 3W/21L, −$25.68 net (protective).
+  Blackouts and cooldown phantoms read +$13.75 and +$9.03 net on only 14 and 8
+  scorable rows; 42 of 88 skips remain unscorable. Do not relax them yet.
+- **Integrity:** 0 fail / 62 warnings, no M5 gap >15 minutes, six missing slots,
+  one repeated 10:50 bar; all 41 post-gate rows pass current gate conformance.
+  Log coverage is 45/99; never blend the archive M1 log with the current M5 log.
 
 ## Future Tweaks / To-Do
 - [x] First data review (73 trades) -> `docs/REVIEW-2026-09-15.md`.
+- [x] 30-trade review milestone; re-cut at 99 closed rows -> `docs/REVIEW-2026-09-15.md` §13 (2026-09-24).
 - [x] **Measure real XM BTCUSD spread**: $40.00/BTC ($0.40/trade) measured 2026-09-15 live MT5 terminal.
 - [x] Confirm `SYMBOL_MT5` (`BTCUSD` vs `BTCUSDm`) and contract size: confirmed `BTCUSD` contract 1.0, min lot 0.01.
 - [ ] **Bar timeframe decision (M5 vs M15 vs H1 vs H4)** — primary blocker before tuning parameters.
 - [ ] Confirm spread profile across London and NY sessions.
-- [ ] Log the wick/near-EMA feature per signal (monitor-only) and re-read at 30+ live-era trades.
+- [ ] Log the wick/near-EMA feature per signal (monitor-only) and re-read on a larger post-gate sample.
 - [ ] Validate regime-gate + SELL-mirror parameters against BTC data (currently inherited from gold's review, unproven on BTC).
 - [ ] Revisit `WICK_RATIO_TARGET` 0.15 (loose vs gold's 0.38) once the funnel counters show signal quality.
 - [ ] Multi-Timeframe (15m/1h) higher-timeframe trend integration.
