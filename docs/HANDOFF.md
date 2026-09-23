@@ -20,20 +20,20 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-09-17 04:05 |
-| data_collection | 665 |
-| closed_trades | 80 |
-| wins_losses | 33W/47L |
-| win_rate_pct | 41.2 |
-| engine_ledger_usd | 211.84 |
-| true_equity_usd | -180.00 |
-| live_era_trades | 26 |
-| live_era_net_usd | +1.43 |
-| log_covered_trades | 26 |
-| log_bars | 2685 |
-| log_last_bar_utc | 2026-09-17 04:05 |
-| skip_rows | 74 |
-| open_trade | none |
+| as_of_utc | 2026-09-23 20:35 |
+| data_collection | 1301 |
+| closed_trades | 99 |
+| wins_losses | 44W/55L |
+| win_rate_pct | 44.4 |
+| engine_ledger_usd | 249.43 |
+| true_equity_usd | -142.41 |
+| live_era_trades | 45 |
+| live_era_net_usd | +31.42 |
+| log_covered_trades | 45 |
+| log_bars | 4611 |
+| log_last_bar_utc | 2026-09-23 20:35 |
+| skip_rows | 88 |
+| open_trade | SELL #99 @ 84301.75 |
 | spread_usd_per_trade | 0.40 |
 <!-- /HANDOFF-SNAPSHOT -->
 
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (snapshot above, refreshed 2026-09-17; data prose last re-cut 2026-09-16 at 78 trades — the snapshot has since moved to 80, unreviewed, next re-cut at the 30-live-era-trade milestone)
+## 1. Where things stand (data as of 2026-09-23 20:35 UTC; review re-cut 2026-09-24 at 99 closed trades)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -59,50 +59,66 @@ edited it — that is what §10's ritual is for.
   SELL funnel, EMA-slope + near-EMA regime gates, escalating SL cooldowns,
   daily-loss breaker, UTC everywhere, self-healing 16-field ledger, stale-feed
   guard, MT5 sidecar option, `tools/` suite.
-- **Reviews:** `docs/REVIEW-2026-09-15.md` is the full first review (written at
-  73 trades) — **its §12 is the 2026-09-16 re-cut at 78 trades** and is the
-  provenance for every number in §5 below. Where the two disagree, read §12.
+- **Reviews:** `docs/REVIEW-2026-09-15.md` §13 is the 2026-09-24 re-cut at 99
+  closed trades and is the provenance for the current evidence in §5 below. §12
+  remains the historical 78-trade re-cut.
 
 ### The book in one table (net of $0.40/trade; gross in brackets)
 
 | Slice | n | W/L | WR | net | gross | net/trade |
-|---|---|---|---|---|---|---|
-| all rows incl. the 09-03 outliers | 78 | 33/45 | 42.3% | −405.59 | [−374.39] | −5.20 |
-| **from 09-05 (exclude the outliers)** | 76 | 33/43 | 43.4% | **−9.95** | [+20.45] | −0.13 |
-| live geometry (≥09-06 17:49, RR 1:2) | 41 | 18/23 | 43.9% | +2.83 | [+19.23] | +0.07 |
-| **"new regime" as the tools slice it (≥09-09 02:25)** | 24 | 10/14 | 41.7% | **+7.84** | [+17.44] | +0.33 |
-| strictly post-gate (≥09-10, first SELL 09-10 09:05) | 20 | 8/12 | 40.0% | +6.68 | [+14.68] | +0.33 |
-| last 10 | 10 | 4/6 | 40.0% | +2.26 | [+6.26] | +0.23 |
+|---|---:|---:|---:|---:|---:|---:|
+| from 09-05 (exclude the 09-03 sizing outliers) | 97 | 44/53 | 45.4% | **+13.63** | [+52.43] | +0.14 |
+| live geometry (≥09-06 17:49, RR 1:2) | 62 | 29/33 | 46.8% | +26.41 | [+51.21] | +0.43 |
+| "new regime" (≥09-09 02:25, tool boundary) | 45 | 21/24 | 46.7% | **+31.42** | [+49.42] | +0.70 |
+| **strictly post-gate (≥09-10)** | 41 | 19/22 | 46.3% | **+30.26** | [+46.66] | +0.74 |
+| 19 entries since prior snapshot (≥09-17 04:05) | 19 | 11/8 | 57.9% | +29.99 | [+37.59] | +1.58 |
+| last 10 | 10 | 7/3 | 70.0% | +24.45 | [+28.45] | +2.45 |
 
-True equity from the $200 start is **−$174.39**; the engine ledger reads
-**$217.45**. The $391.84 gap is the two 2026-09-03 pre-port sizing monsters
-(−$394.84) plus pre-port balance resets — not a live accounting bug (§9).
+The slices overlap. The 45-trade post-port slice includes four 09-09 rows before
+the gates actually went live; use the 41-trade ≥09-10 slice when judging today's
+gates. Do not use a pooled R total or one pooled breakeven rate across the
+09-06 17:49 geometry change.
 
-### What changed since the 2026-09-15 review (73 → 78 trades)
+The raw Profit column sums to **−$342.41 gross** across all 99 rows, giving a
+ledger reconstruction of **−$142.41 from the $200 start before spread costs**.
+The engine ledger reads **$249.43**; the **$391.84** gap is the known 09-03
+sizing monsters (−$197.63 and −$197.21) plus pre-port balance resets, not a new
+live accounting failure. Exclude the two outliers from every strategy P/L
+statistic. The ledger models no cost; the clean 09-05-on book is +$52.43 gross /
+**+$13.63 net** at the measured $0.40 round trip.
 
-1. **The cost-adjusted breakeven line was crossed — barely.** At the live-era
-   median entry ATR ($87.85 ⇒ 1R = $1.757) the $0.40 round trip is **22.8% of 1R**,
-   which needs a **40.9%** decisive win rate; the live era is now at **41.7%**
-   (Wilson 24.5–61.2). On 09-15 the same comparison read 41.3% required vs 36.8%
-   actual. **This is n=24 inside a ±19-point confidence interval — it says "still
-   alive", not "solved".** The timeframe question in §7.1 is unchanged.
-2. **The last-10 collapse reversed**: 1W/9L (−$11.48 net) on 09-15 → **4W/6L
-   (+$2.26 net)** now, on a 3W/1L 09-15 and a 1-trade 09-16. Reinforces the
-   review's verdict that 09-11→09-14 was regime, not parameters.
-3. **The cooldown's measured sign flipped.** It now has 7 scorable blocks
-   (was 4) reading **+$6.72 gross / +$3.92 net** — i.e. on the slice the log can
-   finally score, the cooldown is *throwing away winners*. 33 of 40 blocks still
-   predate the log, so this is a first reading, not a verdict (§4, §7.5).
-4. **Two queued candidates were re-graded.** The wick-ratio candidate now has
-   **opposite signs in the two views** (demoted to unresolved), and the
-   "entry near EMA50" candidate turned out to be **mislabeled**: the live gate is
-   one-sided and *tightening it hurts*, while the edge belongs to a **two-sided**
-   band that is not implemented (§5). This is the most consequential correction
-   in this update — it removes a change that would have cost money.
-5. **A third stop-overshoot row appeared** (#65, −1.22R) and the era boundary
-   moved: `check_data.py` now re-applies today's entry gates to every post-09-10
-   row and all 20 pass, while two 09-09 rows violate the near-EMA gate — the
-   fingerprint of the gates going live on 09-10, not 09-09 (§9).
+### What changed since the 2026-09-16 re-cut (78 → 99 trades)
+
+1. **The 30-trade review milestone is past.** There are 45 rows in the tools'
+   post-port slice and 41 strictly post-gate rows. The latter are 19W/22L,
+   **46.3% (Wilson 32.1–61.3), +$30.26 net**. This is encouraging, not
+   conclusive: its interval still includes the cost-adjusted breakeven line.
+2. **The 19 newer closed rows account for +$29.99 net** (+$37.59 gross): 11W/8L
+   since the previous snapshot timestamp. The last 10 are 7W/3L, +$24.45 net,
+   but their median entry ATR ($131.80) is higher than the 41-trade post-gate
+   median ($89.58), so larger dollar outcomes and a lower spread/R share
+   contribute to the short-window result.
+3. **The cost problem has not gone away.** At the post-gate median ATR of $89.58,
+   1R is about $1.79; $0.40 is **22.3% of 1R**, implying an approximate
+   cost-adjusted breakeven decisive WR of **40.8%**. The observed 46.3% is above
+   it, but the 95% interval is wide. Timeframe and session-spread measurement
+   remain ahead of parameter tuning (§7).
+4. **The book now leans BUY, but don't switch off SELL.** Strict post-gate BUYs
+   are 11W/10L, +$25.72 net (n=21); SELLs are 8W/12L, +$4.54 net (n=20).
+   The unfiltered signal census also favours BUY, but is cascade-ignorant and
+   includes signals the live stack cannot take (§5).
+5. **Wider TP remains a counterfactual candidate, not a change.** On the
+   45 log-covered trade paths and in the risk-gated cascade census, 5×–6×ATR
+   outscore the live 4×ATR; a +1.0R ratchet is only slightly better than off.
+   The 240-minute horizon, small sample and cascade effects keep these findings
+   below adoption grade (§5).
+6. **Risk-gate evidence is mixed.** The daily halt's blocked signals remain
+   strongly losing. The scorable cooldown and blackout phantoms are net winners,
+   but 42 of 88 skips remain unscorable; do not relax gates on these small slices.
+7. **Data remains usable with visible anomalies.** `check_data.py` reports 0
+   failures / 62 warnings, no M5 gap over 15 minutes, six missing M5 slots, and
+   one repeated 10:50 minute (same OHLC, one second apart). All 41 post-gate
+   ledger rows pass current trend/RSI/near-EMA conformance.
 
 ### Operations
 
@@ -119,12 +135,15 @@ True equity from the $200 start is **−$174.39**; the engine ledger reads
   auto-detects the engine/dashboard units by scanning systemd for units
   referencing `/opt/bitcoin`, and **it only ever pulls `origin/main`**. Install
   checklist + digest legend: `docs/AUTOSYNC.md`.
-- Feed health: 2494 M5 bars since 09-07 20:20 UTC, **no gap >15 min anywhere**
-  (`check_data.py`'s stale-feed proxy) and only three single-bar holes (09-14
-  08:45, 09-15 03:45, 09-15 13:00) — the feed has been continuous. At the
-  snapshot there is **no open trade** and the daily-loss counter reads 1/3.
-- Next milestone: **30 live-era trades**, then re-run §6 and re-cut the review.
-  At 24 (or 20 strictly post-gate) nothing below may be retuned.
+- Feed health at this snapshot: 4611 M5 bars since 09-07 20:20 UTC, **no gap
+  >15 min**, six missing M5 slots in five runs, and the repeated 09-23 10:50 bar
+  noted above. `status.json` is updated through 20:35 UTC. The forward-test
+  simulator has an open SELL #99 at 84301.75 (entered 17:55 UTC; SL 84638.45,
+  TP 83628.34); the daily-loss counter reads 1/3. The open trade is not in the
+  closed-trade statistics.
+- **The 30-trade milestone has been met and this review has been re-cut.** Keep
+  collecting; it is not a signal to retune. The timeframe decision, session
+  spread profile, and stronger per-signal skip logging remain open.
 
 ## 2. Bot in one paragraph
 
@@ -144,7 +163,7 @@ spread check in §7.7 is in place.
 (gold 1:1.5), wick 0.15 (gold 0.38), %-based ATR bounds (gold absolute $),
 24/7 with no rollover blackout and no quiet hours, and **no breakeven (BE)
 ratchet** — gold's BE stop is *not* ported (`docs/REVIEW-2026-09-15.md` §5
-re-tested it; §5 below has the 78-trade re-read).
+re-tested it; §5 below has the 99-trade re-read).
 
 ## 3. Data feed: Twelve Data (default) / MT5 sidecar (option)
 
@@ -182,159 +201,140 @@ re-tested it; §5 below has the 78-trade re-read).
 ## 4. Current risk gates (trade_filter.py)
 
 - **SL cooldown**: 30 min after 1 SL, escalating to **60 min after 2
-  consecutive SLs**. Still the most-triggered gate — **40 of 73 logged skips** —
-  and its cost is *finally* measurable on a slice: 7 scorable blocks read
-  **+$6.72 gross / +$3.92 net**, i.e. the blocked signals were net winners.
-  Do not act on 7; 33 of the 40 still predate the log (§7.5).
+  consecutive SLs**. It is still the most-triggered gate: **41 of 88 skips**.
+  The price log can score only 8 of them; those are 5W/3L, **+$12.23 gross /
+  +$9.03 net**. The other 33 predate the log or cannot be reconstructed.
+  This is a costly-looking small slice, not grounds to soften the cooldown.
 - **Daily breaker**: `MAX_DAILY_LOSSES = 3` SLs per UTC day → hard halt for the
-  rest of the day. (Gold uses 10 + a trend-side-only mode; BTC keeps the hard
-  halt.) It has engaged on 18 blocked signals, all scorable: **3W/15L,
-  −$4.93 gross / −$12.13 net → the halt is protective, keep it.** The counter
-  reads a **400-row window** (`DAY_WINDOW`) because a 30-row window silently
-  under-counts busy days. The pre-port days (09-05/06/07, 13/10/6 SLs) are
-  before the breaker existed.
-- **Blackouts (UTC)**: London 07:55–09:00, NY pre-market 12:25–12:45,
-  NY open & US macro 13:25–15:15. All block **both** directions (gold's
-  direction-aware London carve-out is *not* ported — no BTC evidence). 9 skips
-  logged, 6 scorable: **3W/3L, +$8.27 gross / +$5.87 net** — the blocked
-  signals were net winners, so the blackouts currently read as *costly*, on n=6.
-  **No rollover blackout** (BTC has none) and no weekend pause.
+  rest of the day. It has 24 scorable blocked signals: **3W/21L, −$16.08 gross /
+  −$25.68 net**. This remains protective; keep the hard halt. The counter reads
+  a **400-row window** (`DAY_WINDOW`) because a 30-row window silently
+  under-counts busy days. Pre-port loss days predate the breaker.
+- **Blackouts (UTC)**: London 07:55–09:00, NY pre-market 12:25–12:45, NY open &
+  US macro 13:25–15:15. They block both directions; there is no BTC evidence for
+  gold's direction-aware carve-out. Of 17 logged blackout skips, 14 are
+  scorable: **8W/6L, +$19.35 gross / +$13.75 net**; 3 remain unscorable. This
+  currently looks costly on a small sample, so keep the schedule pending more
+  coverage. No rollover blackout and no weekend pause.
 - **ATR bounds (% of price)**: `MIN_ATR_PERCENT = 0.0001` (0.01%),
-  `MAX_ATR_PERCENT = 0.0060` (0.60%). 6 skips logged, **none scorable** (all
-  pre-log). Observed ATR% at entry runs 0.006%–0.275% across the 76 post-outlier
-  trades (live era only: 0.030%–0.275%), so the **upper bound has never
-  bound**. The floor is **not** a cost control: 0.01% is $7.70 at $77k,
-  ~10× below the level the spread implies (keep the round trip ≤15% of 1R ⇒
-  `ATR ≥ 333 × spread$`, review §1).
+  `MAX_ATR_PERCENT = 0.0060` (0.60%). Six ATR skips are logged; none is
+  scorable from the current price log. The floor is not a cost control: keep the
+  measured-spread/timeframe decision separate from a win-rate filter.
 - **Near-EMA gate is ONE-SIDED**: `MAX_BELOW_EMA_ATR = 0.30` caps how far the
   entry may sit on the *adverse* side of EMA50 (below for BUY, above for SELL).
-  It does **not** cap distance on the favourable side, so it is not a "band".
-  Tightening it makes both measured views worse; the candidate that looks
-  interesting is a two-sided band, which is a **new** gate (§5, §7.4).
+  It does **not** cap favourable-side distance and is not a two-sided band.
+  Tightening it remains measured-negative; the two-sided band is a separate,
+  monitor-only candidate (§5, §7).
 - **Slope gate**: EMA50 vs 30 bars ago, both directions; `ema50_history`
   re-seeds from the log on restart so the gate is live immediately.
 
 Engine-side there is **no BE ratchet and no time stop** — a BTC trade only ends
 at SL or TP. Exit-reason domain is therefore `{SL, TP}` only; every tool assumes
-that.
+that. Phantom scores are horizon-marked counterfactuals, not realized trades.
 
-## 5. Evidence base (78 trades, 2026-09-03 → 09-16) — don't re-derive
+## 5. Evidence base (99 closed trades, 2026-09-03 → 09-23) — see review §13
 
-Headline: **33W/45L (42.3%), engine ledger $217.45, true equity −$174.39.**
-The raw Profit column sums to −$374.39, dominated by **two pre-port trades on
-09-03 that ran with a broken lot/size setup (−$197.63 and −$197.21)**. Excluding
-them (09-05 on): **76 trades, 33W/43L, 43.4%, +$20.45 gross / −$9.95 net.**
-Always say which slice and whether it is gross or net.
+Headline: **99 rows, 44W/55L (44.4%)** including two 09-03 pre-port sizing
+monsters. The raw ledger sums to **−$342.41 gross** (−$142.41 from the $200
+start before costs) while `status.json` shows $249.43; the $391.84 discrepancy
+is the known sizing/reset history, not a current engine accounting failure.
+Exclude the 09-03 pair from every strategy statistic. From 09-05 on: **97 rows,
+44W/53L, +$52.43 gross / +$13.63 net** at the measured $0.40 round trip.
+Always name the slice and say gross or net.
 
-**Ledger geometry changed on 09-06 17:49 UTC** (SL 1.5×ATR / TP 2.5×ATR →
-2×/4×, i.e. RR 1:1.67 → 1:2). Pooled R totals across that line are invalid;
-`check_data.py` and `replay_lib` enforce the era split. Era-correct:
-pre-09-06 17:49 n=37 40.5% −$393.62 gross (−199.6R) · from 09-06 17:49 n=41
-43.9% +$19.23 gross (+12.3R).
+**Do not pool across geometry.** On 09-06 17:49 UTC the ledger moved from SL
+1.5×ATR / TP 2.5×ATR to 2×/4× (RR 1:1.67 → 1:2). The pre-change slice is
+n=37, 15W/22L, −$393.62 gross; from the change onward it is n=62, 29W/33L,
++$51.21 gross (+$26.41 net). These are separate rule eras; never quote pooled
+R totals or breakeven rates across the boundary.
 
-- `check_data.py` reports **0 fail, 61 warn**, all known: 21 duplicate
-  `Trade_Num` values, 9 `Balance_After` continuity breaks (pre-port ledger
-  resets), the +$391.84 ledger-vs-sum drift explained above, three missing M5
-  slots, the geometry-era warnings, and two realized-R overshoot rows (#40/#52;
-  `analyze_losers.py` flags a third, #65, at a tighter threshold — see below).
-  Its new **entry-gate conformance** block re-applies today's trend / RSI /
-  near-EMA rules to every post-09-10 row: **all 20 pass** (§9 on the boundary).
-- **Cost is the dominant term, and it is now roughly break-even.** Live-era
-  median entry ATR **$87.85** ⇒ 1R = **$1.757** ⇒ $0.40 = **22.8% of 1R** ⇒
-  breakeven decisive WR **40.9%** vs actual **41.7%** (n=24). Timeframe re-cut
-  from the review (cost as % of 1R): M5 24.0%, M15 11.9%, H1 5.4%, H4 2.6% —
-  the bar timeframe, not BE/TP tuning, is still the dominant open decision.
-- **Sides disagree between the book and the census — the biggest open tension.**
-  Live era: SELL n=15 **7W/8L, +$16.12 gross / +$10.12 net** vs BUY n=9
-  **3W/6L, +$1.32 gross / −$2.28 net**. The reconstructed signal census says the
-  *opposite*: at the live geometry BUY 10W/15L (40.0%) **+$3.55 net** vs SELL
-  22W/51L (30.1%) **−$12.20 net**, and the reconstructed census contains 75 SELL
-  vs 25 BUY signals. The book is gated and cascade-limited, the census is
-  neither — but nobody has reconciled them (§7.3).
-- **Regime, not parameters**: since the last restart the funnel has evaluated 382
-  candles with **BUY `trend_confirmed` = 0** (EMA50 below EMA200 the whole time)
-  and 7 full SELL signals — the engine has been short-only, which is why the
-  recent ledger is all SELL. The review's 09-11→09-14 diagnosis stands: 09-12 was
-  a 15×ATR range day with median ATR $29 where all 21 census signals stopped;
-  09-14 was a 26×ATR day that went 7 TP/7 SL on 14 BUY signals while the
-  cascade/halt let only 4 through.
-- **Gate replay** (`validate_gates.py`, gross, log-covered trades only — the log
-  starts 09-07 20:20, so these all score the recent tail):
-  `SLOPE30` 23 kept 9W/14L +$13.15 · `ABV50s` 22 kept 9W/13L +$17.74 ·
-  `RISE120` 19 kept 8W/11L +$14.73 · `PROX1.0` 17 kept 10W/7L +$24.82 ·
-  `PROX0.5` 7 kept 5W/2L +$13.75 · adopted combo (SLOPE30+ABV50s+NOH8) 22 kept
-  9W/13L +$17.74. Every adopted gate is still positive on the sample it can
-  score; none of these n's is large enough to tighten anything.
-- **Phantom (blocked) signals** (`phantom_trades.py --spread 0.40`, 73 skips,
-  24 h horizon + TIME mark-to-market): daily-halt 18/18 scorable → **3W/15L,
-  −$4.93 gross / −$12.13 net (protective)** · blackout 6/9 → **+$8.27 / +$5.87
-  (costly)** · cooldown 7/40 → **+$6.72 / +$3.92 (costly)** · ATR floor 0/6.
-  Totals: 31 scorable, 10W/21L, **+$10.06 gross / −$2.34 net**. Sequential view
-  (in-trade + cooldown dedup): 17 taken, 8W/9L, +$14.94 gross / +$8.14 net — an
-  estimate, not a fact. **Net read: the halt pays for the blackouts and the
-  cooldown; the gate stack as a whole is cost-neutral-to-negative on the slice
-  that can be scored, and 42 of 73 blocks still cannot be scored at all.**
-- **Exit geometry** (`pathwalk_sims.py --spread 0.40 --census`, 24 log-covered
-  trades, replay agreement **24/24** vs the engine's actual outcomes):
+- **Integrity:** `check_data.py` reports 0 fail / 62 warn. Warnings include 21
+  duplicate `Trade_Num` values, 9 `Balance_After` continuity breaks, the known
+  +$391.84 engine-ledger/raw-profit drift, six missing M5 slots, the geometry
+  boundary, the 10:50 duplicate-minute re-evaluation, and the existing SL
+  overshoots. Every ledger row from the actual gate boundary (09-10) passes
+  today's trend, RSI and near-EMA checks: **41/41**.
+- **Cost remains material.** The strict post-gate slice (≥09-10) is n=41,
+  19W/22L, 46.3% (Wilson 32.1–61.3), **+$46.66 gross / +$30.26 net**. Median
+  entry ATR is $89.58 ⇒ median 1R ≈ $1.79 ⇒ $0.40 is **22.3% of 1R** ⇒
+  approximate cost-adjusted breakeven decisive WR **40.8%**. The observed rate is
+  above the point threshold but its interval spans it. Last 10: 7W/3L,
+  +$28.45 gross / +$24.45 net; median ATR $131.80, so do not read the dollar
+  surge as a parameter effect. M5/M15/H1/H4 timeframe comparison is still the
+  dominant unresolved economics question.
+- **Book by direction (strictly post-gate):** BUY n=21, 11W/10L, +$34.12 gross /
+  +$25.72 net (Wilson 32.4–71.7); SELL n=20, 8W/12L, +$12.54 gross /
+  +$4.54 net (Wilson 21.9–61.3). The book favours BUY, but both samples are
+  small. The reconstructed, unfiltered 4× signal census also favours BUY:
+  +$22.00 net vs SELL −$37.60; it includes signals before cascade/risk gates,
+  so it does not justify switching SELL off.
+- **Signal census and cascade:** 4611 logged M5 bars reconstruct 216 full signals
+  (100 BUY, 116 SELL); 26 occur in blackouts, leaving 190 takeable. At live
+  geometry the unfiltered, cascade-ignorant 216-signal stream is 68W/126L/22T,
+  −$15.60 net. With one-position-at-a-time, cooldown, daily halt and blackout
+  replay, the takeable census selects 52 trades at TP 4×: 19W/28L/5T,
+  +$16.69 net. This is a modelled stream, not 52 additional real trades.
+  Indicator reconstruction matches logged values: floor 4591/4591; ATR and RSI
+  4596/4596.
+- **Exit geometry** (`pathwalk_sims.py --spread 0.40 --census`): actual-outcome
+  replay agrees **45/45** for the log-covered trades. In the 240-minute
+  counterfactual walk and the risk-gated cascade census (all net of $0.40):
 
-  | Rule | 24 real trades (net) | cascade census, 92 takeable (net) | all 100 signals, cascade-ignorant (net) |
-  |---|---|---|---|
-  | TP 3×ATR | +6.79 (12W/12L) | +2.89 | −9.59 |
-  | **TP 4×ATR (live)** | **+3.97** (9W/14L/1T) | **+7.26** (11W/18L) | −8.65 |
-  | TP 5×ATR | +12.50 | +12.65 | −1.05 |
-  | TP 6×ATR | +16.60 | +19.43 | — |
-  | BE off (live) | +3.97 | +7.26 | −8.65 |
-  | BE +0.50R | +10.90 (8W/8L/8BE) | +4.09 | −7.94 |
-  | BE +0.75R | +4.49 | +4.11 | −3.77 |
-  | **BE +1.00R** | +7.10 | **+11.46** | **+6.00** |
-  | BE +1.25R | +6.36 | +9.63 | — |
+  | Rule | 45 trade paths | gated census |
+  |---|---:|---:|
+  | TP 4×ATR (live) | +$17.05 | +$16.69 (52 taken) |
+  | TP 5×ATR | +$34.73 | +$31.24 (49 taken) |
+  | TP 6×ATR | +$38.62 | +$37.81 (48 taken) |
+  | BE +0.50R | +$12.68 | −$2.98 (63 taken) |
+  | BE +0.75R | +$5.84 | +$8.28 (59 taken) |
+  | BE +1.00R | +$17.52 | +$18.23 (56 taken) |
 
-  ("BE off" is the same rule as TP 4×ATR — it is repeated so every BE row sits
-  next to its own baseline; the three columns are not additive, they are three
-  different samples of the same rule.)
-
-  Two honest readings: **(a)** *wider TP (5–6×ATR) now beats the live 4×ATR in
-  both the real-trade and cascade-census views* — a direction that did not exist
-  at 73 trades, still worth a few dollars on n≈24–30, and not adoption-grade;
-  **(b)** **+1.0R is the only BE row positive in all three views** (gold's
-  adopted +0.75R is the *worst or near-worst* row here, and +0.50R wins the
-  24-trade view but loses the cascade census). If a ratchet is ever armed, arm
-  +1.0R — and measure it first, all tools are BE-aware.
-- **Excursion profile** (`analyze_losers.py`, 24 covered): winners MFE median
-  **+2.32R** / MAE median **−0.31R**; losers MFE median **+0.38R** / MAE
-  **−1.14R**. 6 of 14 eventual losers (43%) were **+0.50R** in profit first, and
-  a +0.50R ratchet would arm on those 6 **and on 10/10 eventual winners** — that
-  trade-off is exactly why the grid above, not this stat, decides it.
-- **Fills**: on live-geometry rows, SL slips median **−5.0%** of 1R (worst
-  −37.9%) and TP overshoots median **+2.2%** (worst +12.2%). Three rows exceed
-  the planned −1.00R: **#40 and #52 at −1.38R** (tick timing in fast moves) and
-  **#65 at −1.22R**. The two tools use different thresholds, which is why the
-  counts differ: `check_data.py` warns past **0.25R** of deviation (#40/#52,
-  inside its 61 warnings), `analyze_losers.py` past **20%** (#40/#52/#65).
-  Not sizing drift — but they are why a replay must use the SL-first tie-break.
-- **Filter candidates, re-graded at 78 trades** (`win_rate_report.py` §7 prints
-  each with its within-day control):
-
-  | Candidate | Verdict now | Numbers (net @$0.40) |
-  |---|---|---|
-  | ATR% ≥ 0.06 | **rejected — day proxy** (unchanged) | pooled keep 66 43.9% +17.87 vs skip 26 3.8% −26.53, but own-day collapses to n=4 (0.0%, −7.48) and flips sign |
-  | RSI ≥ 45 (gold's filter) | **rejected — reverses within-day** (unchanged) | pooled keep 75 33.3% −4.80 vs skip 17 29.4% −3.86; own-day keep 50 22.0% **−35.82** |
-  | momentum-aligned (5 h) | **rejected** | own-day keep 41 19.5% −27.26 vs skip 5 40.0% +3.47 |
-  | wick ratio ≤ 0.40 | **demoted → unresolved (sign conflict)** | census keep 56 35.7% **+2.46** vs skip 36 27.8% −11.11 (own-day identical, drops 0) **but** ledger keep 26 42.3% **−6.42** vs skip 50 44.0% −3.53, and winners' wick median is 62.1% vs losers' 47.4% — two views, opposite signs |
-  | side = SELL | **unresolved** (book vs census, above) | census keep 71 31.0% −12.06 vs skip 21 38.1% +3.40 |
-  | **two-sided EMA50 band ≤ 0.50 ATR** (NEW gate) | **strongest survivor — monitor/log-only** | census keep 25 44.0% **+10.46** vs skip 67 28.4% −19.11, own-day **drops 0** (cleanest control in the list); post-gate ledger keep 5 **80.0% +11.97** vs skip 15 26.7% −5.29; live era keep 6 5W/1L **+16.45** vs skip 18 −8.61. Tiny n's — three views agreeing is the reason to instrument it, not to gate on it |
-  | tighten `MAX_BELOW_EMA_ATR` 0.30 → 0.15 / 0.00 | **rejected — hurts** | census −8.66 → **−11.20** → **−18.23**; post-gate ledger +6.68 → +5.49 (blocks 2 winners worth +1.19); live era would have blocked 5 trades worth **+$4.57 net** |
-- **Hour-of-day** is noise at this n (00:00 1W/5L, 01:00 3W/0L, 05:00 2W/8L).
-  Do not build session filters on it yet.
+  `TIME` is marked to market at 240 minutes; target changes also alter holding
+  time and the cascade. Wider TP merits another review, but this is a
+  counterfactual on 45 covered trades, not adoption evidence. +1.0R beats live
+  only slightly; +0.50R/+0.75R do not agree across views. **Keep live 4× TP and
+  no BE ratchet for now.**
+- **Excursions and fills:** on the 45 covered trades, TP winners have median MFE
+  +2.25R / MAE −0.40R; SL losers median MFE +0.23R / MAE −1.14R. A +0.50R
+  ratchet would arm on 10/24 eventual losers and all 21/21 winners. On 2×/4×
+  geometry, SL slippage median is −3.8% of 1R (worst −37.9%); TP overshoot
+  median +2.4% (worst +12.2%). Three SLs exceed 20% of planned risk: #40/#52
+  at −1.38R and #65 at −1.22R. This remains consistent with fast-move fills,
+  not a new sizing drift.
+- **Filter candidates (net at $0.40):** ATR% ≥0.06 remains a day-confounded
+  split (census own-day keep −$23.82 vs skip −$14.50, despite the 97-trade
+  ledger-feature split keeping +$36.67); RSI ≥45 remains unsupported by the census/within-day view. Wick
+  ratio ≤0.40 is unresolved because census keep 108 is +$3.74 vs skip 82
+  −$36.68, while ledger keep 39 is −$3.09 vs skip 58 +$16.72. The two-sided
+  EMA50 band remains monitor-only: census ≤0.15 ATR keep 22 is +$15.41 vs skip
+  168 −$48.35, while the post-gate ledger's ≤0.50 ATR split is 15 trades
+  (10W/5L, +$27.88) vs 26 (9W/17L, +$2.38). Different cuts, small samples;
+  log/monitor, do not gate. Tightening the live one-sided
+  `MAX_BELOW_EMA_ATR` 0.30→0.15 blocks two positive post-gate rows (+$1.19 net)
+  and lowers keep P/L; 0.00 is no better. Do not conflate these tests.
+- **Blocked-signal phantoms** (`phantom_trades.py --spread 0.40`, 88 skips):
+  daily halt 24 scorable → 3W/21L, −$16.08 gross / −$25.68 net (protective);
+  blackout 14/17 scorable → 8W/6L, +$19.35 / +$13.75 net (costly-looking);
+  cooldown 8/41 scorable → 5W/3L, +$12.23 / +$9.03 net (costly-looking);
+  ATR 0/6 scorable. Overall 46 scorable, 16W/30L, +$15.50 gross / −$2.90
+  net; **42/88 remain unscorable**. Sequential dedup is 28 estimated trades,
+  +$17.88 gross / +$6.68 net—not a factual counterfactual. Keep the halt and
+  do not loosen cooldown/blackouts on these samples.
+- **Cost and real-world constraints:** $0.40 is one XM Asian-session sample
+  (09-15 04:06 UTC), not a London/NY spread profile. The M5 cost burden is still
+  large; measure session spreads and compare the same rules on M15/H1 before
+  tuning exits or filters. BTC remains forward-test simulated; do not enable
+  `TRADING_MODE=LIVE` without the spread/commission safeguards in §7.
 
 ### Four things this data has not settled
 
-| Tension | The two numbers | What would settle it |
+| Question | Current evidence | What would settle it |
 |---|---|---|
-| Bar timeframe | M5 cost = 22.8% of 1R; M15/H1/H4 = 11.9/5.4/2.6% | an M15 or H1 replay of the same rules, or a lower-spread account (§7.1) |
-| SELL vs BUY | book: SELL +10.12 / BUY −2.28 · census: SELL −12.20 / BUY +3.55 | 30+ live-era trades *and* a gated cascade replay per side (§7.3) |
-| Cooldown & blackouts | cooldown +3.92, blackouts +5.87 (both = blocked winners) on 7 and 6 scorable blocks | log coverage of the remaining 33 + 3 blocks (§7.5) |
-| Wider TP / BE +1.0R | TP 5–6×ATR beats live in 2 views; BE +1.0R positive in 3 views | n≥30 live-era trades, then `pathwalk_sims.py --census` re-cut (§7.3) |
+| Bar timeframe / execution cost | M5 cost ≈22.3% of median post-gate 1R; $0.40 is one Asian-session sample | M15/H1 replay of the same rules and spread samples across sessions |
+| BUY vs SELL | post-gate book BUY +$25.72 / SELL +$4.54 net; raw census BUY +$22.00 / SELL −$37.60 | Larger gated cascade sample per side; do not use unfiltered census alone |
+| Cooldown and blackouts | +$9.03 / +$13.75 net on 8 / 14 scorable skips; 42 of 88 total skips unscorable | More log coverage before changing either gate |
+| TP / BE | TP 5–6× beats live in two replay views; BE +1.0R is only slightly ahead | Prospective collection and re-cut beyond this 45-path counterfactual |
+| EMA50 band / wick | band results vary by cutoff/view; wick signs conflict | Continue monitor-only logging; no gate change |
 
 ## 6. Tooling (run in this order on every data drop)
 
@@ -360,10 +360,10 @@ Expected first lines at the snapshot (a mismatch means the data moved — refres
 the block, then re-read the prose):
 
 ```
-win_rate_report - 78 trades, 2494 M5 bars (2026-09-07 20:20:00 -> 2026-09-16 12:10:01), spread $0.40/trade
-pathwalk_sims  - 78 trades, 2494 M5 bars (...), horizon 240 min, spread $0.40/trade
-analyze_losers - 78 trades (76 from 09-05), 24 log-covered, 2494 M5 bars
-== result: 0 fail, 61 warn ==
+win_rate_report - 99 trades, 4611 M5 bars (2026-09-07 20:20:00 -> 2026-09-23 20:35:00), spread $0.40/trade
+pathwalk_sims  - 99 trades, 4611 M5 bars (...), horizon 240 min, spread $0.40/trade
+analyze_losers - 99 trades (97 from 09-05), 45 log-covered, 4611 M5 bars
+== result: 0 fail, 62 warn ==
 ```
 
 All read-only except the engine's own self-healing migration and
@@ -373,63 +373,56 @@ All read-only except the engine's own self-healing migration and
 replay) that every tool imports. **Never hand-roll a bar walk**: gold's
 equivalent tool shipped with a SELL excursion inversion that made it validate
 itself against its own bug. `pathwalk_sims.py` prints its agreement rate with the
-engine *first* (24/24 for the log-covered trades) and `smoke_test.py` Scenario I
+engine *first* (45/45 for the log-covered trades) and `smoke_test.py` Scenario I
 locks the direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
-1. **Bar timeframe decision (M5 vs M15 vs H1 vs H4) — the primary blocker.**
-   Cost is 22.8% of 1R on M5 at the measured $40.00/BTC spread ($0.40/trade at
-   0.01 lot), vs 11.9% on M15, 5.4% on H1, 2.6% on H4. The live era now sits
-   *at* its cost-adjusted breakeven (41.7% actual vs 40.9% required) on n=24,
-   which is an argument for measuring the higher timeframes, not for relaxing.
-   Nothing else should be tuned before this is settled — every parameter below
-   is a function of what 1R is worth.
-2. **Confirm the spread profile across sessions.** The $40.00 figure was sampled
-   at 04:06 UTC (Asian session). London/NY may be narrower or wider; if the
-   round trip is materially lower in some sessions, a session-aware cost model
-   beats a global timeframe change.
-3. **Collect to 30 live-era trades, then re-cut.** Re-run §6 and update
-   `docs/REVIEW-2026-09-15.md` §12 (or start a new review if the question
-   changed). Only then decide: wider TP (5–6×ATR), the +1.0R BE ratchet, the
-   two-sided EMA50 band, and whether the SELL/BUY conflict resolves.
-4. **Instrument the two-sided EMA50 distance, don't gate on it.** The band is
-   the only candidate that survives every control in three views, and it is
-   *already* reconstructable from the ledger (`EMA50_At_Entry`, `ATR_At_Entry`,
-   `Entry_Price`) — `win_rate_report.py` §7 prints it. Add it to the per-signal
-   log/skip rows so future blocks are scorable, and **do not** touch
-   `MAX_BELOW_EMA_ATR`: tightening the live one-sided gate is measured-negative.
-5. **Let the log cover the cooldown and blackout blocks.** 33 of 40 cooldown
-   skips and 3 of 9 blackout skips still predate the 09-07 20:20 log start, and
-   both currently read as *costly* (+$3.92 and +$5.87 net on 7 and 6 scorable
-   blocks). No cooldown or blackout change before those n's are meaningful — and
-   note the sequential estimate (+$8.14 net on 17 reconstructed trades) is an
-   upper bound, not evidence.
-6. **Keep the daily halt** (18/18 scorable, −$12.13 net → protective) and the
-   current geometry (1:2). Do not raise `MIN_ATR_PERCENT` on win-rate grounds —
-   that evidence is a day proxy (review §2). Fix `replay_lib.PORT_DEPLOY` vs
-   `GATES_DEPLOY` only with a review re-cut in the same PR (§9).
-7. **Before any LIVE test**: symbol `BTCUSD` with contract 1.0 / min lot 0.01 is
+1. **Bar timeframe decision (M5 vs M15 vs H1 vs H4) — still the primary
+   blocker.** On the 41-trade post-gate slice, the $0.40 round trip is 22.3% of
+   median 1R (about $1.79), with a 40.8% approximate cost-adjusted breakeven
+   rate versus 46.3% observed (Wilson 32.1–61.3). That interval is not proof of
+   an edge. Measure the same rules on a higher timeframe before tuning M5.
+2. **Confirm spread profile across sessions.** The $40/BTC figure was sampled
+   at 04:06 UTC in the Asian session. London/NY may differ; measure the actual
+   spread and any commission/swap before using a session-aware cost model.
+3. **The 30-trade milestone is met; keep collecting rather than retuning.** The
+   review is re-cut at 99 total rows, 45 post-port and 41 strictly post-gate.
+   The evidence improves the live-era reading but is still noisy; no exit or
+   entry parameter change is justified by the current sample alone.
+4. **Keep the two-sided EMA50 distance monitor-only.** It is reconstructable
+   from the ledger and should be logged on signal/skip rows when a code change
+   is next in scope. The old one-sided gate is different; do not tighten
+   `MAX_BELOW_EMA_ATR`.
+5. **Grow log coverage for blocked signals.** 33 of 41 cooldown skips and 3 of
+   17 blackout skips remain unscorable; overall 42 of 88 skips cannot be scored.
+   The currently scorable cooldown/blackout slices look costly, but are too
+   small to justify changing their rules.
+6. **Keep the daily halt and current 1:2 geometry.** The halt's 24/24 scorable
+   phantoms are 3W/21L, −$25.68 net. Do not raise `MIN_ATR_PERCENT` on win-rate
+   grounds; the evidence is confounded by day selection. Leave TP4 and BE off
+   until the timeframe/cost question is better measured.
+7. **Before any LIVE test:** symbol `BTCUSD` with contract 1.0 / min lot 0.01 is
    confirmed (`BTCUSDm` absent); add a live spread check before order dispatch,
-   re-check that `MIN_ATR_PERCENT` is consistent with the measured spread, and
-   confirm the account's commission/swap so the $0.40 model is not optimistic.
+   re-check `MIN_ATR_PERCENT` against measured costs, and confirm
+   commission/swap so the $0.40 model is not optimistic.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 
-- **Tightening `MAX_BELOW_EMA_ATR` (0.30 → 0.15 / 0.00)** — measured-negative in
-  both views; it would have blocked +$4.57 net of live-era winners (§5). This
-  replaces the previous handoff's "entry within 0.15 ATR of EMA50 (candidate:
-  tighten `MAX_BELOW_EMA_ATR`)", which conflated a two-sided band with the
-  one-sided live gate.
-- **RSI ≥ 45** — reverses within-day (review §3; unchanged at 78 trades).
-- **ATR floor by win rate** — calendar proxy (review §2; own-day n=4).
-- **Wick-ratio gate (either direction)** — census and ledger disagree on the
-  *sign*; monitor only (§5).
-- **BE/TP parameter changes on M5** — deferred until the timeframe decision.
-  The evidence moved (wider TP and BE +1.0R both read better than at 73 trades)
-  but n=24 and the grids are a few dollars apart.
-- **Direction-aware London blackout / cooldown softening / trend-side breaker** —
-  still no BTC evidence (review §6); the hard halt is protective.
+- **Tightening `MAX_BELOW_EMA_ATR` (0.30 → 0.15 / 0.00)** — one-sided and
+  measured-negative. At 0.15 it blocks two positive post-gate trades worth
+  +$1.19 net; the two-sided band is a different monitor-only hypothesis.
+- **RSI ≥45** — still unsupported by the census/within-day control; no transfer
+  from gold.
+- **ATR floor by win rate** — still day-confounded; do not treat it as spread
+  control.
+- **Wick-ratio gate (either direction)** — census and ledger disagree on sign;
+  monitor only.
+- **TP/BE changes on M5** — wider TP and BE +1.0R look better in counterfactual
+  paths, but are not adoption-grade; live remains TP4 with no ratchet.
+- **Direction-aware London blackout / cooldown softening / trend-side breaker**
+  — no sufficient BTC evidence. Keep current hard daily halt and schedules for
+  now.
 
 ## 8. How to verify code changes (always)
 
@@ -448,45 +441,45 @@ is where stale numbers actually hide.
 ## 9. Data gotchas (hard-won — read before analyzing)
 
 - **The two 09-03 trades (−$197.63, −$197.21) are not comparable to anything
-  else** — pre-port sizing (~100× lot). Exclude them from every P&L statistic
-  and say so.
+  else** — pre-port sizing (~100× lot). Exclude them from every strategy P/L
+  statistic and say so. The current 99-row raw Profit sum is −$342.41 gross;
+  it is not the performance of the current strategy.
 - **There are THREE era boundaries, not one.** (a) 09-05: the outliers stop.
   (b) 09-06 17:49: geometry 1.5×/2.5× → 2×/4×. (c) **the gates went live
   09-10, not 09-09**: `replay_lib.PORT_DEPLOY` (09-09 02:25) is the first trade
-  of the "new regime" slice every existing review quotes, but the ledger's first
-  SELL is 09-10 09:05 and two 09-09 BUY rows (#57 at 3.11 ATR, #58 at 0.57 ATR
-  on the adverse side) violate the near-EMA gate — so `replay_lib.GATES_DEPLOY`
-  (09-10 00:00, mirrored by `check_data.GATES_LIVE`) is the boundary to use when
-  re-applying entry rules. Quoting the ≥09-09 slice is fine; *judging a gate* on
-  it is not.
-- `trades.csv` has multiple batches: `Trade_Num` **restarts** (21 duplicate
-  values — including a duplicated **#74** in the live era, 09-15 02:15 and
-  09-15 06:00) because of pre-port balance resets. **Dedupe/join by timestamp,
-  never by Trade_Num.** `Balance_After` has 9 continuity breaks for the same reason.
-- **Legacy rows are comma-formatted** (`"80,832.88"`) — 58 of 78 rows. Naive
-  `float()` breaks. Every loader must strip commas (all `tools/` do). New rows
-  are written plain `%.2f`.
+  of the tools' "new regime" slice, but the ledger's first SELL is 09-10 09:05
+  and two 09-09 BUY rows (#57 at 3.11 ATR, #58 at 0.57 ATR on the adverse side)
+  violate the near-EMA gate. Use `replay_lib.GATES_DEPLOY` (09-10 00:00,
+  mirrored by `check_data.GATES_LIVE`) when re-applying entry rules. The ≥09-09
+  slice is fine for comparable era reporting; **do not use it to judge gate
+  conformance**.
+- `trades.csv` has multiple batches: `Trade_Num` restarts (21 duplicate values)
+  because of pre-port balance resets. **Dedupe/join by timestamp, never by
+  `Trade_Num`.** `Balance_After` has 9 continuity breaks for the same reason.
+- Legacy ledger prices are comma-formatted in older rows (for example
+  `"80,832.88"`); naive `float()` breaks. Every loader must strip commas (the
+  `tools/` loaders do). New rows are written plain `%.2f`.
 - Schema is **16 fields with `Trade_Type`**; `engine.migrate_trades_csv()`
   self-heals drift on start and before every append (keeps a
   `.bak-pre-migration` backup) and `trade_filter.load_recent_trades()` has a
   loud drift tripwire.
-- **The price log starts 2026-09-07 20:20 UTC** (2494 M5 bars at the snapshot,
-  three single-bar holes). **Only 24 of 78 trades are log-covered** — 54 predate
-  the log, which is the source of every `check_data.py` cross-file warning and
-  the reason `validate_gates.py` and `phantom_trades.py` can only score the tail.
-  **Any conclusion drawn from log-joined analysis is a statement about the last
-  ~24 trades.** Ledger-feature analysis (RSI/ATR/wick/EMA columns) covers all 76
-  post-09-05 rows — prefer it where possible.
-- **The log's `EMA_50`/`RSI`/`ATR` are PRE-update for that bar; the ledger's
-  `*_At_Entry` are POST-update** (the engine gates on post-update values).
-  `replay_lib.enrich_log()` reconstructs the post-update values and prints its
-  match rate (2474/2474 floor, 2479/2479 ATR and RSI at the snapshot) — if that
-  is not ~100%, every census number is suspect. Never compare a log column
-  against a ledger column directly.
-- **The dashboard's funnel counters are since-restart, not lifetime** (they are
-  in-memory and never restored): at the snapshot `candles_evaluated` = 382
-  (≈32 h) with BUY `trend_confirmed` = 0 and `sell_all_confirmed` = 7. Use them
-  to read the *current regime*; use `win_rate_report.py` §6 for a census.
+- **The price log starts 2026-09-07 20:20 UTC** (4611 M5 bars through
+  2026-09-23 20:35 UTC; six missing slots in five runs). **Only 45 of 99 closed
+  trades are log-covered**; 54 predate the log, limiting any log-joined replay
+  to the covered tail. There is no gap >15 minutes. One duplicated minute is
+  present at 09-23 10:50: two same-OHLC rows at 10:50:00 and 10:50:01 with
+  updated indicators; treat it as a restart/re-evaluation warning, not an extra
+  price interval. `check_data.py` reports 0 fail / 62 warn.
+- **Log indicators are PRE-update for that bar; ledger `*_At_Entry` values are
+  POST-update** (the engine gates on post-update values). The current
+  `replay_lib.enrich_log()` reconstruction matches floor 4591/4591 and ATR/RSI
+  4596/4596. If the match rate is not ~100%, treat every census number as
+  suspect. Never compare a raw log indicator column against a ledger entry
+  column directly.
+- **Dashboard funnel counters are since-restart, not lifetime.** Current
+  `status.json` has `candles_evaluated = 2499`, `all_confirmed = 29` BUY and
+  `sell_all_confirmed = 15`; use them only for post-restart context, not a
+  lifetime signal census. Use `win_rate_report.py` for the reconstructed census.
 - Per-trade replay must use **±6 min** windows (M5 cadence); gold uses ±2 min on
   M1. Gap threshold is >15 min (gold: >5).
 - `archive/forward_test_log_m1.csv` (8,537 rows, Sep 1) is **M1** data from the
@@ -495,16 +488,17 @@ is where stale numbers actually hide.
   ever added, R-multiple math must reconstruct the original 2×/4×ATR geometry
   from `ATR_At_Entry` (1R$ ≈ 2×ATR×lot), as gold's tools do — `replay_lib`
   already keys on geometry, not on `Exit_Reason`.
-- **Cost haircut**: the live terminal spread is measured at **$40.00/BTC =
+- **Cost haircut:** the live terminal spread is measured at **$40.00/BTC =
   $0.40/trade at 0.01 lot** (XM, 2026-09-15 04:06 UTC, Asian session — one
-  sample, §7.2). The tools default to `--spread 0`, so always pass `--spread
-  0.40`: gross +$20.45 is net −$9.95 across the 76 post-outlier trades.
-  Phantom P&L uses the same scaling and is an upper bound.
-- **Symbol / contract**: `BTCUSD` exists on XM MT5 with contract 1.0 / min lot
+  sample). Always pass `--spread 0.40`; tools default to gross (`--spread 0`).
+  From 09-05 on the current clean slice is +$52.43 gross / +$13.63 net at this
+  assumed flat cost. `phantom_trades.py` uses the same scaling and its outcomes
+  are upper-bound counterfactuals, not fills.
+- **Symbol / contract:** `BTCUSD` exists on XM MT5 with contract 1.0 / min lot
   0.01; `BTCUSDm` does not exist (`SYMBOL_MT5=BTCUSD`).
-- `status.json` equity ($217.45) is the **engine ledger**, not the sum of the
-  Profit column (−$374.39 raw, −$174.39 true equity from $200). `check_data.py`
-  reports the +$391.84 drift by design.
+- `status.json` equity ($249.43) is the **engine ledger**, not the raw sum of
+  Profit (−$342.41 gross, −$142.41 from $200 before spread costs). `check_data.py`
+  reports the +$391.84 drift by design; see the outlier/reset notes above.
 
 ## 10. How to keep this file honest (do this every session)
 
@@ -558,8 +552,8 @@ rules apply to every session, from the first commit:
    to §7's "Explicitly NOT queued" *with the evidence that closed it*.
 5. Write the analysis itself in `docs/REVIEW-YYYY-MM-DD.md`; this file only
    carries the *conclusion* and a pointer. The current one is
-   `docs/REVIEW-2026-09-15.md` — **re-cut it (add a dated delta section) rather
-   than starting a new file unless the question changed.**
+   `docs/REVIEW-2026-09-15.md` — **§13 is the 2026-09-24 re-cut; keep adding a
+   dated delta there rather than starting a new file unless the question changed.**
 6. Never quote a pooled R total or a breakeven WR across the era boundaries in
    §9, and never quote a P/L without saying whether it is gross or net. Both
    traps have bitten this project twice.
@@ -575,15 +569,15 @@ blocked signals (+reason) · `status.json` live state (funnel counters are
 since-restart) · `tools/replay_lib.py` shared bar-walk core + era constants ·
 `tools/handoff_check.py` freshness gate for this file · `tools/` analysis +
 tests · `deploy/mt5feed.service` sidecar unit · `docs/PORT-2026-09-10.md` what
-came from gold and why · `docs/REVIEW-2026-09-15.md` first data review (**§12 =
-the 2026-09-16 re-cut**) · `docs/AUTOSYNC.md` the unattended deploy loop +
+came from gold and why · `docs/REVIEW-2026-09-15.md` first data review (**§13 =
+the 2026-09-24 re-cut; §12 is historical**) · `docs/AUTOSYNC.md` the unattended deploy loop +
 digest guide · `archive/PROJECT_LOG.md` full history · **this file** =
 executive summary.
 
 ## 12. Reading order for a brand-new agent
 
 1. **`docs/HANDOFF.md`** (this file) — snapshot block, §1, then §5's tables
-2. `docs/REVIEW-2026-09-15.md` §12 — the newest numbers and their provenance
+2. `docs/REVIEW-2026-09-15.md` §13 — the newest numbers and their provenance
 3. `archive/PROJECT_LOG.md` — changelog + current strategy state
 4. `docs/PORT-2026-09-10.md` — what the gold port changed and why
 5. `docs/REVIEW-2026-09-15.md` §1–§11 — the full first review (73 trades)
