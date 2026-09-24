@@ -91,3 +91,5 @@ Timestamp,Reason,Price,ATR
 2026-09-24 12:15:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83540.00,84.75
 2026-09-24 12:20:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83532.01,84.82
 2026-09-24 12:35:00,Blackout: NY Early Pre-Market,83400.00,105.35
+2026-09-24 20:00:04,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,84363.67,116.76
+2026-09-24 20:05:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,84393.28,116.65
