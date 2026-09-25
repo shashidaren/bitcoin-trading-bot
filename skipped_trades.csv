@@ -103,3 +103,6 @@ Timestamp,Reason,Price,ATR
 2026-09-25 08:15:00,Blackout: London Open & Early Session Kill-Zone,84121.74,119.85
 2026-09-25 16:10:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83984.00,203.50
 2026-09-25 16:15:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,84010.48,188.59
+2026-09-25 16:25:01,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83982.89,180.86
+2026-09-25 16:30:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83972.01,170.06
+2026-09-25 16:35:00,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83830.01,171.92
