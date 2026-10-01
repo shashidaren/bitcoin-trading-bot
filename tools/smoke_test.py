@@ -37,6 +37,10 @@ Scenarios:
      a server DST change, heal gaps and restarts without duplicates, write NOQUOTE/
      BADQUOTE/STALE rows instead of silent holes, never emit CRLF or misaligned rows,
      exit 2 (systemd restart) after 15 quiet minutes
+  L) xm_quote_report (the logger's data) -> MUST parse the real writer's files and
+     survive a torn line, count complete days/weekends against the Stage B-i exit,
+     keep STALE/NOOFFSET/NOQUOTE rows out of every spread statistic, price a trade at
+     (entry spread + exit spread) / 2, and CATCH candles stamped an hour off
 
 Usage: python3 tools/smoke_test.py
 """
@@ -764,7 +768,8 @@ try:
     r_crossed = last_rows(2)
     fm.mode = "stale"
     off_before = lg3.offset
-    k_run(lg3, clk, 400)
+    n_changes_before = sum(1 for m in logs3 if "offset changed" in m)
+    k_run(lg3, clk, 3900)       # > 1 h: the frozen tick passes through 'exactly an hour old'
     r_stale = last_rows(3)
     check("K: no tick -> NOQUOTE rows (outages are explicit)",
           all(r["flags"] == "NOQUOTE" and r["bid"] == "" and r["n_ok"] == "0" for r in r_none), f"{r_none}")
@@ -772,8 +777,10 @@ try:
     check("K: crossed quotes (ask < bid) are never logged as a negative spread",
           all(r["flags"] == "BADQUOTE" and r["spread"] == "" for r in r_crossed), f"{r_crossed}")
     check("K: a frozen tick is flagged STALE", all("STALE" in r["flags"] for r in r_stale), f"{r_stale}")
-    check("K: a stale feed does NOT move the learned server offset (hour-ambiguity guard)",
-          lg3.offset == off_before == 10800, f"{lg3.offset}")
+    check("K: a feed frozen for over an hour does NOT move the learned server offset (a tick exactly "
+          "N hours old looks like a fresh tick on a server N hours behind)",
+          lg3.offset == off_before == 10800
+          and sum(1 for m in logs3 if "offset changed" in m) == n_changes_before, f"{lg3.offset}")
     fm.mode = "ok"
     k_run(lg3, clk, 70)
 
@@ -944,6 +951,277 @@ finally:
 check("K: an incompatible interval/poll falls back to 30/5 instead of mis-aligning rows",
       (lambda lg: (lg.interval, lg.poll))(Q.XmLogger(KMT5(KClock(K_T0)), "BTCUSD", "/nonexistent-never-written",
                                                     interval=30, poll=7, log=lambda m: None)) == (30, 5))
+
+# --- Scenario L ------------------------------------------------------------
+print("\nScenario L: xm_quote_report (the logger's data -> spread, cost and parity answers)")
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import xm_quote_report as X  # noqa: E402
+
+L_DAY0 = int(Q.parse_utc("2026-09-14 00:00:00"))          # a Monday
+
+
+def l_model(t):
+    """Deterministic spread model ($/BTC): session level, weekend x2.4 (UTC Sat/Sun)."""
+    d = datetime.fromtimestamp(t, tz=timezone.utc)
+    base = 38.0 if d.hour < 8 else 44.0 if d.hour < 13 else 56.0 if d.hour < 21 else 42.0
+    return base * (2.4 if d.weekday() >= 5 else 1.0)
+
+
+def l_write_quotes(qdir, days=15, step=60, holes=(), tweak=None):
+    """Write quotes-YYYY-MM-DD.csv files in the logger's exact schema."""
+    os.makedirs(qdir, exist_ok=True)
+    by_day = {}
+    for t in range(L_DAY0, L_DAY0 + days * 86400, step):
+        if any(a <= t < b for a, b in holes):
+            continue
+        sp = l_model(t) + ((t // step * 7919) % 11 - 5) * 0.4
+        row = {"ts_utc": Q.utc_str(t), "bid": "83000.00", "ask": "%.2f" % (83000 + sp), "spread": "%.2f" % sp,
+               "spread_min": "%.2f" % (sp - 1), "spread_max": "%.2f" % (sp + 3), "n_ok": 2, "n_bad": 0,
+               "tick_age_s": "0.9", "srv_offset_s": 10800, "flags": ""}
+        if tweak:
+            tweak(t, row)
+        by_day.setdefault(row["ts_utc"][:10], []).append(row)
+    for day, rows in by_day.items():
+        with open(os.path.join(qdir, f"quotes-{day}.csv"), "w", newline="") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(Q.QUOTE_FIELDS)
+            for r in rows:
+                w.writerow([r[k] for k in Q.QUOTE_FIELDS])
+
+
+# L1: the reader parses what the REAL writer produced, and survives a torn line
+tmp = tempfile.mkdtemp()
+try:
+    clk = KClock(K_T0 + 1)
+    fm = KMT5(clk)
+    lg, _ = k_new(tmp, clk, fm)
+    lg.start(clk(), clock=clk)
+    k_run(lg, clk, 200)
+    lg.flush_window(clk.t)
+    rows_a, bad_a, nf_a = X.load_quotes(tmp)
+    check("L: the report parses the logger's own quote files (writer and reader share one schema)",
+          len(rows_a) >= 6 and bad_a == 0 and nf_a == 1 and rows_a == sorted(rows_a, key=lambda s: s.t),
+          f"{len(rows_a)} rows, {bad_a} malformed")
+    with open(os.path.join(tmp, "quotes-2026-10-01.csv"), "a") as f:
+        f.write("2026-10-01 05:00:00,83000.00,830")             # killed mid-write
+    rows_b, bad_b, _ = X.load_quotes(tmp)
+    check("L: a torn line is skipped and counted, never fatal", len(rows_b) == len(rows_a) and bad_b == 1,
+          f"{len(rows_b)} rows, {bad_b} malformed")
+    cds_l = X.load_candles(tmp)
+    check("L: the candle reader parses the logger's candle file", len(cds_l) == 60 and
+          cds_l[-1]["close"] == datetime(2026, 10, 1, 3, 0), f"{len(cds_l)}")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# L2: coverage, complete days/weekends, outages -> the Stage B-i clock
+tmp = tempfile.mkdtemp()
+try:
+    full_dir, holey_dir = os.path.join(tmp, "full"), os.path.join(tmp, "holey")
+    l_write_quotes(full_dir)
+    thu, sun = L_DAY0 + 3 * 86400, L_DAY0 + 13 * 86400            # Thu 17 Sep, Sun 27 Sep
+    l_write_quotes(holey_dir, holes=[(thu + 4 * 3600, thu + 10 * 3600), (sun, sun + 8 * 3600)])
+    s_full, _, _ = X.load_quotes(full_dir)
+    s_hole, _, _ = X.load_quotes(holey_dir)
+    cf, ch = X.coverage(s_full), X.coverage(s_hole)
+    check("L: the inferred cadence is the logger's (60 s here)", cf["interval"] == 60, f"{cf['interval']}")
+    check("L: 15 clean days = 15 complete days and 2 complete weekends -> Stage B-i exit MET",
+          X.stage_b_progress(cf) == (15, 2, True), f"{X.stage_b_progress(cf)}")
+    check("L: a 6 h outage and an 8 h Sunday outage cost 2 days and 1 weekend -> NOT met",
+          X.stage_b_progress(ch) == (13, 1, False), f"{X.stage_b_progress(ch)}")
+    check("L: outages are listed longest first", [round(d / 3600) for _, d in ch["outages"]] == [8, 6],
+          f"{[(round(d / 3600)) for _, d in ch['outages']]}")
+    check("L: blackout windows are counted per day against the engine's own windows",
+          set(X.blackout_days(s_full, 60).values()) == {15} and len(X.blackout_days(s_full, 60)) == 3,
+          f"{X.blackout_days(s_full, 60)}")
+
+    # L3: spread statistics against the generating model
+    good = [s for s in s_full if X.usable(s)]
+    ny_wd = X.summarize([s.spread for s in good if X.session_of(s.t) == "NY" and not X.is_weekend(s.t)])
+    asia_wd = X.summarize([s.spread for s in good if X.session_of(s.t) == "ASIA" and not X.is_weekend(s.t)])
+    wd = X.summarize([s.spread for s in good if not X.is_weekend(s.t)])
+    we = X.summarize([s.spread for s in good if X.is_weekend(s.t)])
+    check("L: session medians recover the model (NY weekday ~56, Asia weekday ~38)",
+          abs(ny_wd["med"] - 56) < 1.5 and abs(asia_wd["med"] - 38) < 1.5, f"{ny_wd['med']:.1f} {asia_wd['med']:.1f}")
+    check("L: the weekend/weekday ratio recovers the x2.4 widening",
+          2.0 < we["med"] / wd["med"] < 2.8, f"{we['med'] / wd['med']:.2f}")
+    vals = [s.spread for s in good]
+    n_we = sum(1 for s in good if X.is_weekend(s.t))
+    check("L: every weekend sample is above the $87 break-even, no weekday sample is",
+          abs(X.share_above(vals, 87.0) - 100.0 * n_we / len(good)) < 0.5, f"{X.share_above(vals, 87.0):.1f}%")
+    check("L: share-above is monotone in the threshold",
+          X.share_above(vals, 40) >= X.share_above(vals, 60) >= X.share_above(vals, 87) >= X.share_above(vals, 500))
+    check("L: UTC Saturday and Sunday are the weekend; a Friday 23:59 is not",
+          X.is_weekend(L_DAY0 + 5 * 86400) and X.is_weekend(L_DAY0 + 6 * 86400 + 86399)
+          and not X.is_weekend(L_DAY0 + 5 * 86400 - 1))
+    check("L: blackout membership follows trade_filter (07:55-09:00, 13:25-15:15 UTC)",
+          X.blackout_of(L_DAY0 + 8 * 3600) is not None and X.blackout_of(L_DAY0 + 14 * 3600) is not None
+          and X.blackout_of(L_DAY0 + 11 * 3600) is None and X.blackout_of(L_DAY0 + 7 * 3600 + 54 * 60) is None)
+    check("L: percentile helper interpolates", X.pct([1, 2, 3, 4], 0.5) == 2.5 and X.pct([], .5) is None)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# L4/L5: bad rows never reach the statistics; the bar-close subset excludes LATE rows
+tmp = tempfile.mkdtemp()
+try:
+    def tweak(t, row):
+        if t % 3600 == 0:
+            row["spread"], row["flags"] = "9999.00", "STALE"
+        if t % 3600 == 60:
+            row["bid"] = row["ask"] = row["spread"] = row["spread_min"] = row["spread_max"] = ""
+            row["flags"], row["n_ok"] = "NOQUOTE", 0
+        if t % 3600 == 120:
+            row["spread"], row["flags"] = "8888.00", "NOOFFSET"
+        if t % 300 == 0:
+            row["spread"] = "99.00"
+            if t % 3600 == 300:
+                row["flags"] = "LATE"
+    l_write_quotes(tmp, days=2, tweak=tweak)
+    s2, _, _ = X.load_quotes(tmp)
+    good2 = [s for s in s2 if X.usable(s)]
+    check("L: STALE / NOOFFSET / NOQUOTE rows are excluded from spread statistics",
+          max(s.spread for s in good2) < 1000 and all(not (s.flags & X.BAD_FLAGS) for s in good2),
+          f"{len(good2)} of {len(s2)} usable")
+    bar = [s.spread for s in good2 if int(s.t) % 300 == 0 and "LATE" not in s.flags]
+    check("L: the bar-close subset is the :00/:05 rows only, minus LATE ones",
+          bar and set(bar) == {99.0} and 0 < len(bar) < len([s for s in good2 if int(s.t) % 300 == 0]),
+          f"{len(bar)}")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# L6: measured cost on the ledger's trades (half the spread in, half out)
+tmp = tempfile.mkdtemp()
+try:
+    def tweak(t, row):
+        if abs(t - (L_DAY0 + 10 * 3600)) <= 120:
+            row["spread"] = "40.00"
+        if abs(t - (L_DAY0 + 11 * 3600)) <= 120:
+            row["spread"] = "60.00"
+    l_write_quotes(tmp, days=1, tweak=tweak)
+    s3, _, _ = X.load_quotes(tmp)
+    dt0 = datetime(2026, 9, 14, 0, 0)
+    tr = [dict(et=dt0 + timedelta(hours=10, seconds=20), xt=dt0 + timedelta(hours=11, seconds=5), profit=1.0),
+          dict(et=dt0 + timedelta(hours=10), xt=dt0 + timedelta(days=3), profit=5.0),            # exit has no quote
+          dict(et=dt0 - timedelta(days=2), xt=dt0 - timedelta(days=2) + timedelta(hours=1), profit=5.0)]
+    tc = X.trade_costs(tr, s3, 1.0)
+    check("L: cost = (entry spread + exit spread) / 2 x 0.01 lot = $0.50 for $40 in / $60 out",
+          len(tc) == 1 and abs(tc[0][1] - 0.50) < 1e-9, f"{[(round(c, 3)) for _, c, _, _ in tc]}")
+    check("L: trades without a fresh quote at BOTH ends are skipped, not guessed", len(tc) == 1)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# L7/L8: candle parity vs the forward-test log, time-shift scan, bar-spread check
+import random as _rnd  # noqa: E402
+_rnd.seed(5)
+walk, px = [], 83000.0
+for i in range(700):
+    o = px
+    px = px + _rnd.gauss(0, 25)
+    hi, lo = max(o, px) + abs(_rnd.gauss(0, 12)), min(o, px) - abs(_rnd.gauss(0, 12))
+    close_dt = datetime(2026, 9, 14, 0, 0) + timedelta(minutes=5 * (i + 1))
+    walk.append(dict(dt=close_dt + timedelta(seconds=(1 if i % 7 == 0 else 2 if i % 11 == 0 else 0)),
+                     o=o, h=hi, l=lo, c=px))
+
+
+def l_candles(shift_h=0, noise=3.0):
+    out = []
+    for b in walk:
+        n = _rnd.gauss(0, noise)
+        close = datetime(b["dt"].year, b["dt"].month, b["dt"].day, b["dt"].hour, b["dt"].minute) + timedelta(hours=shift_h)
+        out.append(dict(close=close, o=b["o"] + n, h=b["h"] + n + 1, l=b["l"] + n - 1, c=b["c"] + n, tv=250.0,
+                        sp=4000.0, off=10800.0))
+    return out
+
+
+good_c = l_candles()
+pairs0 = X.pair_candles(good_c, walk)
+check("L: log rows stamped a second or two late still join (5-minute grid)", len(pairs0) == 700, f"{len(pairs0)}")
+ps = X.parity_stats(pairs0)
+check("L: parity stats recover the injected noise and agree on direction",
+      ps["close_abs"]["med"] < 6 and ps["dir_agree"] > 99 and abs(ps["close_bias"]) < 1.0, f"{ps['close_abs']['med']:.2f}")
+sc0 = X.shift_scan(good_c, walk)
+check("L: correctly stamped candles: the time-shift scan's best shift is 0",
+      min(sc0, key=sc0.get) == 0 and not X.shifted_days(good_c, walk, min_pairs=60), f"{sc0}")
+bad_c = l_candles(shift_h=1)
+sc1 = X.shift_scan(bad_c, walk)
+check("L: candles stamped one hour late are caught (best shift -1 h) and the days flagged",
+      min(sc1, key=sc1.get) == -1 and len(X.shifted_days(bad_c, walk, min_pairs=60)) >= 1, f"{sc1}")
+
+tmp = tempfile.mkdtemp()
+try:
+    l_write_quotes(tmp, days=2, step=30)
+    s4, _, _ = X.load_quotes(tmp)
+    cs = []
+    for k in range(60):                     # 5 h of NY-session candles (live spread ~$56) inside the quote span
+        close = datetime(2026, 9, 14, 14, 0) + timedelta(minutes=5 * k)
+        cs.append(dict(close=close, o=1, h=1, l=1, c=1, tv=1.0, off=10800.0,
+                       sp=round(l_model(close.replace(tzinfo=timezone.utc).timestamp() - 150) * 100)))
+    ok = X.bar_spread_check(cs, s4, 0.01)
+    for c in cs:
+        c["sp"] = 4000.0                    # a constant $40 that ignores the live $56
+    flat = X.bar_spread_check(cs, s4, 0.01)
+    check("L: bar spreads consistent with the live samples -> AGREES (history usable)",
+          ok["verdict"] == "AGREES" and ok["inside"] > 90, f"{ok}")
+    check("L: a constant $40 bar spread against live $56 samples -> DISAGREES (never trusted as history)",
+          flat["verdict"] == "DISAGREES" and flat["inside"] < 20 and flat["med_diff"] > 5, f"{flat}")
+    check("L: too little overlap -> INSUFFICIENT, not a guess",
+          X.bar_spread_check(cs[:5], s4, 0.01)["verdict"] == "INSUFFICIENT")
+
+    # L9: the one-line advisory used by autosync's digest
+    now_l = Q.parse_utc("2026-09-15 23:59:30") + 120
+    args = type("A", (), dict(root=tmp, dir=".", now=now_l))()
+    line_ok = X.quiet_line(args)
+    args_stale = type("A", (), dict(root=tmp, dir=".", now=now_l + 3 * 3600))()
+    line_stale = X.quiet_line(args_stale)
+    empty = tempfile.mkdtemp()
+    line_none = X.quiet_line(type("A", (), dict(root=empty, dir="xm_data", now=now_l))())
+    shutil.rmtree(empty, ignore_errors=True)
+    check("L: --quiet says OK while rows are fresh", line_ok.startswith("xm logger: OK"), line_ok)
+    check("L: --quiet says STALE (and names the unit) once rows stop", "STALE" in line_stale and "mt5quotes-btc" in line_stale,
+          line_stale)
+    check("L: --quiet says 'not collecting yet' with no data", "not collecting yet" in line_none, line_none)
+
+    # L10: the full text report renders every section on a small synthetic repo root
+    root = os.path.join(tmp, "root")
+    os.makedirs(os.path.join(root, "xm_data"))
+    for fn in os.listdir(tmp):
+        if fn.startswith("quotes-"):
+            shutil.copy(os.path.join(tmp, fn), os.path.join(root, "xm_data", fn))
+    with open(os.path.join(root, "xm_data", "candles_m5.csv"), "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(Q.CANDLE_FIELDS)
+        for c in good_c:
+            w.writerow([c["close"].strftime(Q.TS_FMT), "%.2f" % c["o"], "%.2f" % c["h"], "%.2f" % c["l"],
+                        "%.2f" % c["c"], 250, 4000, 0, 10800])
+    with open(os.path.join(root, "forward_test_log.csv"), "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\r\n")
+        w.writerow(["Timestamp", "Open", "High", "Low", "Close"])
+        for b in walk:
+            w.writerow([b["dt"].strftime(Q.TS_FMT), "%.2f" % b["o"], "%.2f" % b["h"], "%.2f" % b["l"], "%.2f" % b["c"]])
+    with open(os.path.join(root, "trades.csv"), "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\r\n")
+        w.writerow(["Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
+                    "Exit_Price", "Exit_Reason", "Profit", "Balance_After", "RSI_At_Entry", "ATR_At_Entry",
+                    "Wick_Ratio_At_Entry", "EMA50_At_Entry", "EMA200_At_Entry"])
+        for i in range(12):
+            et = datetime(2026, 9, 14, 8, 0) + timedelta(hours=i)
+            w.writerow([i + 1, "BUY", et.strftime(Q.TS_FMT), (et + timedelta(minutes=20)).strftime(Q.TS_FMT), "83000.00",
+                        "82833.40", "83333.20", "83333.20", "TP", "3.33", "1000", "50", "83.30", "40%", "83000", "82000"])
+    with open(os.path.join(root, "xm_data", "symbol_spec.json"), "w") as f:
+        json.dump({"symbol_info": {"trade_contract_size": 1.0, "volume_min": 0.01, "point": 0.01},
+                   "decoded": {"account_kind": "DEMO"}, "account": {}, "terminal": {}, "probes": {}}, f)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = X.main(["--root", root, "--now", str(now_l)])
+    out = buf.getvalue()
+    heads = [h for h in ("== 1. LOGGER", "== 2. SPREAD", "== 3. COST", "== 4. PARITY", "== 5. SPEC") if h in out]
+    check("L: the full report renders all five sections without error", rc == 0 and len(heads) == 5, f"rc {rc}, {heads}")
+    check("L: the report quotes the review's reference numbers (break-even, hard cap, share of 1R)",
+          "hard-cap proposal $60/BTC" in out and "% of median 1R" in out and "break-even $" in out)
+    check("L: the report has no --spread flag (docs command blocks may only carry --spread 0.40)",
+          "--spread" not in open(os.path.join(HERE, "xm_quote_report.py")).read().split('ap = argparse')[1])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.
