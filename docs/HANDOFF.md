@@ -393,7 +393,7 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census  # 3. exit-rule replay (va
 python3 tools/analyze_losers.py --spread 0.40      # 4. winner/loser feature drift + stop grid
 python3 tools/validate_gates.py                    # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40      # 6. what did the blocked signals actually do?
-python3 tools/smoke_test.py                        # 7. engine regression tests (scenarios A–I)
+python3 tools/smoke_test.py                        # 7. engine regression tests (scenarios A–J)
 python3 tools/live_readiness.py --spread 0.40      # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                   # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
 ```
@@ -431,17 +431,30 @@ locks the direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
-> **Awaiting the user — answer these before any code change starts**
-> (raised in the 2026-10-01 review; delete this block once answered):
-> (a) accept or modify the staged path and its **proposed** thresholds (review
-> §7, Stages A–E);
-> (b) go-ahead for **Stage A** — LIVE order-path fixes, Wine order-executor
-> sidecar, spread guard, kill switches, and `TRADING_MODE` as an env var
-> defaulting to `FORWARD_TEST`. Stage A never enables LIVE;
-> (c) which `DATA_SOURCE` the live box runs (`/opt/bitcoin/.env` is not in the
-> repo and the code default is `TWELVEDATA`, so the feed is *assumed*, not
-> recorded) — it decides whether Stage B's MT5 forward run starts a new era or
-> is already the baseline.
+> **Where the 2026-10-01 review left the decisions** (delete this block once
+> they are settled):
+> - The user asked for the recommended order and said they would follow it —
+>   confirm it before any code starts. The staged-path **thresholds** in review §7
+>   remain proposals until the user says otherwise.
+> - **Recommended order.** (0) Merge the review PR — docs and tools only, no
+>   engine restart. (1) **Start the 14-day clock first** with a read-only XM
+>   *quote + contract-spec logger* (Stage B-i): a Wine sidecar modelled on
+>   `tools/mt5_feed.py` that logs BTCUSD bid/ask/spread every 10–60 s, takes one
+>   `symbol_info()` snapshot (execution mode, filling modes, stops level, volume
+>   step, swap, account type — never the login) and records shadow XM M5 candles,
+>   so feed parity can be measured offline *without* switching `DATA_SOURCE` or
+>   splitting the forward-test sample. Why first: it is read-only and touches no
+>   `engine.py`; it has the longest lead time (≥14 days incl. two weekends); it
+>   measures the assumption most able to kill the edge (break-even round trip
+>   $0.87 vs $0.40 assumed); and the spec snapshot turns Stage A's unverified XM
+>   facts (filling mode, stops level) into data. (2) **Stage A in parallel, in its
+>   own session/PR** — it edits `engine.py`, so merging it restarts the engine.
+>   (3) No real-money order before Stage A's probe exits 0 and Stage B has ≥14
+>   days.
+> - **Still needed from the user (nothing in the repo records it):** which
+>   `DATA_SOURCE` the box runs and whether the Wine MT5 terminal and the
+>   `mt5feed-btc` sidecar are installed there —
+>   `grep DATA_SOURCE /opt/bitcoin/.env` and `systemctl list-units | grep -i mt5`.
 
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
@@ -463,8 +476,10 @@ locks the direction/ratchet/horizon rules.
 2. **Stage B — measure, zero risk, start now:** (i) spread logger in the Wine
    sidecar — XM bid/ask every minute for ≥14 days incl. two weekends and the
    blackout windows, then a session-aware `--spread` and weekend rule;
-   (ii) run the forward test on `DATA_SOURCE=MT5` for ≥14 days (new era
-   boundary — record it in §9) to test signal parity with the Twelve Data era;
+   (ii) test signal parity with the Twelve Data era — either run the forward
+   test on `DATA_SOURCE=MT5` for ≥14 days (a new era boundary — record it in §9)
+   or, preferably, keep the current feed and log shadow XM M5 candles beside it,
+   then compare candles / ATR / signals offline (no era split);
    (iii) a multi-regime offline backtest of the frozen rules on public BTC
    history (M5 vs M15/H1, %-based costs — no network in the last session's
    sandbox); (iv) log spread-to-1R, weekend flag and side on every
@@ -496,23 +511,6 @@ locks the direction/ratchet/horizon rules.
    win-rate grounds (day-confounded); the cost control is the live spread guard
    (item 1). Leave TP4 and BE off until the timeframe/cost question is better
    measured.
-9. **Make the handoff freshness gate honour its own tolerances**
-   (`tools/handoff_check.py`; advisory only, so not urgent). Measured on a
-   scratch copy on 2026-10-01: straight after `--update` it reads FRESH; **one new
-   M5 bar later it reads STALE** (`log_last_bar_utc` is compared exactly); and a
-   doc exactly **one closed trade** behind goes STALE via `wins_losses` /
-   `win_rate_pct` even though `closed_trades` is inside the 5-trade tolerance.
-   Four keys that move with the data (`log_last_bar_utc`, `open_trade`,
-   `wins_losses`, `win_rate_pct`) are exact-match, so the "5 trades / 48 h — must
-   not cry wolf" design in the script header and `docs/AUTOSYNC.md` never reaches
-   them, and `BAR_TOLERANCE` (60 rows = 5 h) trips long before `MAX_AGE_HOURS`
-   (48 h) can. Result: the digest's `📝 handoff:` line flips to `STALE` within
-   about five minutes of every refresh, so as a *freshness* signal it carries
-   nothing between sessions (it still catches a missing doc or a `--spread`
-   mismatch). It is a policy choice, not a typo: decide the intended tolerances
-   first, then judge those four keys by the same gaps as their numeric
-   neighbours (and flag a snapshot *newer* than the data); re-run the three
-   scenarios above as the test.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 
@@ -664,10 +662,11 @@ rules apply to every session, from the first commit:
    CSVs. Then run it again without `--update` and require **HANDOFF FRESH**
    before you push. `tools/autosync.sh` reports the same verdict in the Telegram
    digest, so a stale handoff is visible between sessions too — a `STALE` line
-   there means "start the next session with step 1". **Known quirk (§7 item 9):**
-   until it is fixed that line reads `STALE` within about five minutes of any
-   refresh (one new bar is enough), so run `python3 tools/handoff_check.py` for
-   the real gap — `closed_trades` more than 5 behind is the case that matters.
+   there means "start the next session with step 1". The gate tolerates ordinary
+   drift (≤ 5 closed trades, ≤ 48 h of log; per-key rules in the
+   `tools/handoff_check.py` header, locked by smoke Scenario J), so between
+   sessions the digest normally reads `fresh, N advisory drift` and a `STALE`
+   line is a real signal.
 2. Update **§1** prose (what changed since the last update, the slice table,
    branch/PR state, ops notes).
 3. Update **§4/§5** if params changed or a review produced new numbers —

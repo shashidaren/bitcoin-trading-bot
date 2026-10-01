@@ -41,7 +41,7 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census # 3. exit-rule replay (pri
 python3 tools/analyze_losers.py --spread 0.40         # 4. winner/loser feature drift, MAE/MFE, stop grid
 python3 tools/validate_gates.py                       # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40         # 6. what did the blocked (skipped) signals actually do?
-python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–I)
+python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–J)
 python3 tools/live_readiness.py --spread 0.40         # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                      # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
 ```

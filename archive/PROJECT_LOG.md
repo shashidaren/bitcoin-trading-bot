@@ -69,9 +69,13 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
   `tools/live_readiness.py` (edge/cost/fragility/Monte Carlo/latency stress/gates, seeded, default
   `--spread 0.40`) and `tools/live_path_probe.py` (fake-MT5 probe of engine.py's LIVE path). `TRADING_MODE`
   untouched. Staged path (fix → measure → XM demo → micro-live → scale) in review §7.
-  Also found, documented and queued but **not changed**: `tools/handoff_check.py` compares four moving
-  keys exactly, so the autosync digest reads `STALE` within one bar of any refresh (HANDOFF §7 item 9,
-  `docs/AUTOSYNC.md`).
+  Also fixed (same PR): `tools/handoff_check.py` cried wolf — four moving keys (`log_last_bar_utc`,
+  `open_trade`, `wins_losses`, `win_rate_pct`) were exact-match and the log tolerance was 60 rows (5 h),
+  so the autosync digest read `STALE` within one bar of any refresh and a doc one trade behind was
+  already STALE, contradicting the "5 trades / 48 h, must not cry wolf" design. Each key is now judged
+  by what moves it; `BAR_TOLERANCE` 60 → 576 rows (= `MAX_AGE_HOURS`, tunable). Still STALE: > 5 trades
+  behind, > 48 h of log, outcomes changed without a new trade (ledger edited), a snapshot *newer* than the
+  data (lost data), a changed `--spread`. Locked by smoke Scenario J (13 checks; 6 fail on the old code).
 - **[2026-09-24] 99-trade forward-test re-cut; documentation only**
   (`docs/REVIEW-2026-09-15.md` §13, `docs/HANDOFF.md`). Autosync snapshot
   `data collection 1301` is through 2026-09-23 20:35 UTC: 99 closed rows,
@@ -250,10 +254,10 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
   09-29 08:35)**, 183 missing M5 slots in 7 runs, two repeated minutes; all 66
   post-gate rows pass current gate conformance. Log coverage is 70/124; never
   blend the archive M1 log with the current M5 log.
-- **Freshness gate:** `tools/handoff_check.py` reads FRESH right after `--update` and `STALE` one M5 bar
-  later (exact-match `log_last_bar_utc`; likewise `wins_losses`/`win_rate_pct` after a single trade), so
-  the digest's `📝 handoff:` line is not yet a usable freshness signal — noted in `docs/AUTOSYNC.md`,
-  fix queued (HANDOFF §7 item 9).
+- **Freshness gate (fixed 2026-10-01):** `tools/handoff_check.py` used to read FRESH right after
+  `--update` and `STALE` one M5 bar (or one closed trade) later; it now tolerates ≤ 5 closed trades and
+  ≤ 48 h of log and still flags real staleness (smoke Scenario J). Expect `fresh, N advisory drift` in
+  the digest between sessions and treat `STALE` as a real signal.
 - **LIVE:** not ready — `tools/live_path_probe.py` fails 8 of 9 checks and the
   Linux engine cannot import `MetaTrader5` (review §6). Keep `TRADING_MODE =
   FORWARD_TEST`.
@@ -273,10 +277,10 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
 - [ ] **LIVE order-path fixes** (review §6): close detection by `position=`, restart reconciliation via `positions_get`/`MAGIC_NUMBER`, filling mode from `symbol_info()`, `None`-result handling, one position per magic; promote `tools/live_path_probe.py` checks into smoke scenarios. Exit: the probe exits 0.
 - [ ] Live spread guard before order dispatch (share of 1R + hard $ cap, e.g. <= $60/BTC) and kill switches (equity floor −$30 at 0.01 lot, `trade_allowed`/demo-vs-real check, manual halt file, position-aware dead-man alarm).
 - [ ] Wine order-executor sidecar (the Linux engine cannot import `MetaTrader5`); make `TRADING_MODE` an env var (default `FORWARD_TEST`).
-- [ ] Spread logger in the Wine sidecar (XM bid/ask every minute, >= 14 days incl. two weekends) -> session-aware `--spread`; confirm swap/commission on the Specification tab.
-- [ ] Forward test on `DATA_SOURCE=MT5` for >= 14 days (new era boundary) to test signal parity with the Twelve Data era.
+- [ ] **Recommended first step:** read-only XM quote + contract-spec logger as a Wine sidecar (bid/ask/spread every 10–60 s, a one-time `symbol_info()` snapshot, shadow XM M5 candles for feed parity; >= 14 days incl. two weekends) -> session-aware `--spread` and the real filling mode / stops level for Stage A; confirm swap/commission on the Specification tab.
+- [ ] Signal parity with the Twelve Data era: forward test on `DATA_SOURCE=MT5` for >= 14 days (new era boundary) or, preferably, shadow XM M5 candles beside the current feed (no era split).
 - [ ] Multi-regime offline backtest of the frozen rules on public BTC history (M5 vs M15/H1, %-based costs).
 - [ ] XM demo run through the real order path: >= 30 closed trades and >= 2 weekends, parity/cost criteria in review §7 Stage C.
 - [ ] Agree micro-live terms in writing (0.01 lot, −$30 hard stop, weekdays only, >= 50 trades) before any real-money order.
 - [ ] Investigate the 09-28/29 885-minute outage cause (`journalctl` on the box) and add a position-aware stale-feed alarm.
-- [ ] `tools/handoff_check.py`: decide the intended tolerances and apply them to `log_last_bar_utc`, `open_trade`, `wins_losses`, `win_rate_pct` (exact-match today, so the digest is `STALE` within one bar of any refresh); add a snapshot-newer-than-data check. Advisory tool — never blocks a deploy.
+- [x] `tools/handoff_check.py` judges each key by what moves it (≤ 5 trades / ≤ 48 h, no more exact-match on moving keys); smoke Scenario J (2026-10-01).

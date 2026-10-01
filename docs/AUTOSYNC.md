@@ -83,18 +83,11 @@ the ledger as-is, and a force-push can drop a trading day's log.
   |---|---|---|
   | `fresh (snapshot matches the live data)` | the doc and the CSVs agree | none |
   | `fresh, N advisory drift (data moved since the snapshot)` | counts moved inside tolerance (5 trades / 48 h) | none, or refresh at the next session |
-  | `STALE (N problem(s)): <first problem>` | the doc is behind the data, or contradicts itself (e.g. a command block passes a different `--spread` than the snapshot's cost assumption) | next session starts with `python3 tools/handoff_check.py --update`, then updates the prose (§10 ritual) |
+  | `STALE (N problem(s)): <first problem>` | the doc is behind the data (more than 5 closed trades or 48 h of log), outcomes were edited without a new trade, the snapshot is *newer* than the data (lost data / stale checkout), or it contradicts itself (e.g. a command block passes a different `--spread` than the snapshot's cost assumption) | next session starts with `python3 tools/handoff_check.py --update`, then updates the prose (§10 ritual) |
   | `not run` | `tools/handoff_check.py` or `docs/HANDOFF.md` missing on the box | `git pull` the branch that added them |
   Advisory by design: it never blocks a deploy, never rolls anything back, and
   never triggers the 🚨/⚠️ lines — a doc that is 6 trades behind is not an
   incident, and nagging four times an hour would get the digest muted.
-  **Known quirk (2026-10-01; fix queued in `docs/HANDOFF.md` §7 item 9):** four
-  snapshot keys that move with the data (`log_last_bar_utc`, `open_trade`,
-  `wins_losses`, `win_rate_pct`) are compared exactly, so the line reads `STALE`
-  within about one M5 bar of any refresh — typically `STALE (1 problem(s)):
-  log_last_bar_utc value changed` — instead of `fresh, N advisory drift`. Until
-  then read it as "the data has moved since the last session" and run
-  `python3 tools/handoff_check.py` on the box for the real trade gap.
 - **💰 stats** — straight from `status.json`.
 
 ### Deploy states and what they mean
