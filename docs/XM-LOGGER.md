@@ -95,9 +95,10 @@ stop and tell the next session (that would be a bug in the allow-list).
 # 2. One real cycle into a SCRATCH directory (does not touch xm_data/).
 MT5_QUOTES_DIR=Z:/tmp/xm_probe $PY --once
 ```
-Expect, in this order: `server offset +3h` (summer; `+2h` after the broker's DST change) ·
-`contract spec recorded` · `first run - back-filled N closed M5 bars` · a quote row ·
-`candles written`. Then check the three things only the real terminal can answer:
+Expect, in this order: `contract spec recorded` · the banner with `server offset +3h`
+(summer; `+2h` after the broker's DST change) · `first run - back-filled N closed M5 bars` ·
+a quote row · `candles written this run N` (Scenario K locks this order and the `--spec` /
+`--backfill` behaviour). Then check the three things only the real terminal can answer:
 
 | Check | Pass | If it fails |
 |---|---|---|

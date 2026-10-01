@@ -509,10 +509,10 @@ class XmLogger:
 
     def __init__(self, mt5mod, symbol, out_dir, interval=30, poll=5, lag=LAG_S,
                  stale_s=STALE_TICK_S, backfill_bars=12000, label="", log=None,
-                 spec_every_s=SPEC_EVERY_S, sleep=time.sleep):
+                 spec_every_s=SPEC_EVERY_S, sleep=None):
         self.mt5, self.symbol, self.out_dir = mt5mod, symbol, out_dir
         self.log = log or (lambda m: print(m, flush=True))
-        self.sleep = sleep
+        self.sleep = sleep or time.sleep      # resolved now, not at import (patchable in tests)
         self.interval, self.poll, self.lag = int(interval), int(poll), float(lag)
         if self.poll < 1 or self.interval < self.poll or self.interval % self.poll:
             self.log("mt5_quotes: interval %s / poll %s are not compatible (poll must divide the "
@@ -600,17 +600,19 @@ class XmLogger:
             except ValueError:
                 pass
 
-    def learn_offset(self, now, tries=10, clock=time.time):
-        """Poll until one fresh tick yields the server offset (or give up after `tries`)."""
-        for i in range(tries):
+    def learn_offset(self, now, tries=10, clock=None):
+        """Poll until one fresh tick yields the server offset (or give up after `tries`).
+        Needs two polls (a tick that ADVANCED), so it sleeps between them."""
+        clock = clock or time.time
+        for _ in range(tries):
             self._poll_tick(now)
             if self.offset is not None:
                 return True
             self.sleep(1.0)
-            now = clock() if clock is not None else now + 1.0
+            now = clock()
         return False
 
-    def start(self, now, clock=time.time):
+    def start(self, now, clock=None):
         os.makedirs(self.out_dir, exist_ok=True)
         self.started_at = now
         self.learn_digits()
@@ -874,7 +876,8 @@ class XmLogger:
             return None
 
     # ---- run -----------------------------------------------------------------------
-    def run_forever(self, clock=time.time):
+    def run_forever(self, clock=None):
+        clock = clock or time.time
         self.start(clock(), clock=clock)
         target = 0.0
         try:
@@ -917,22 +920,24 @@ def merge_candles(path, rows):
 # =========================================================================================
 # CLI
 # =========================================================================================
-def _connect(symbol):
-    if mt5 is None:
+def _connect(symbol, m):
+    if m is None:
         print("mt5_quotes: MetaTrader5 package missing - install it in the WINE python:\n"
               "  wine C:/Python312/python.exe -m pip install MetaTrader5", flush=True)
         sys.exit(1)
-    if not mt5.initialize():
+    if not m.initialize():
         print("mt5_quotes: MT5 initialize failed: %s (is the terminal running and logged in, "
-              "in this prefix?)" % (mt5.last_error(),), flush=True)
+              "in this prefix?)" % (m.last_error(),), flush=True)
         sys.exit(1)
-    if not mt5.symbol_select(symbol, True):
+    if not m.symbol_select(symbol, True):
         print("mt5_quotes: symbol_select(%s) failed: %s (check the exact symbol name in Market "
-              "Watch; XM has BTCUSD, not BTCUSDm)" % (symbol, mt5.last_error()), flush=True)
+              "Watch; XM has BTCUSD, not BTCUSDm)" % (symbol, m.last_error()), flush=True)
         sys.exit(1)
 
 
-def main(argv=None):
+def main(argv=None, mt5mod=None, clock=None, sleep=None):
+    """CLI entry. `mt5mod`, `clock` and `sleep` are injectable so the smoke test can drive every
+    mode (--spec, --once, --backfill) against a fake terminal without patching globals."""
     ap = argparse.ArgumentParser(description="XM quote + contract-spec logger (read-only)")
     ap.add_argument("--spec", action="store_true", help="print the contract-spec snapshot; write nothing")
     ap.add_argument("--once", action="store_true", help="one cycle, then exit")
@@ -942,45 +947,47 @@ def main(argv=None):
     ap.add_argument("--dir", default=os.environ.get("MT5_QUOTES_DIR", DEFAULT_DIR))
     a = ap.parse_args(argv)
 
+    m = mt5mod if mt5mod is not None else mt5
+    clock = clock or time.time
     symbol = os.environ.get("MT5_QUOTES_SYMBOL", "BTCUSD")
     label = os.environ.get("MT5_QUOTES_LABEL", "")
-    _connect(symbol)
+    _connect(symbol, m)
     try:
         if a.spec:
-            print(json.dumps(build_spec(mt5, symbol, label), indent=2, sort_keys=True))
+            print(json.dumps(build_spec(m, symbol, label, clock()), indent=2, sort_keys=True))
             return 0
-        lg = XmLogger(mt5, symbol, a.dir,
+        lg = XmLogger(m, symbol, a.dir,
                       interval=_env_num("MT5_QUOTES_INTERVAL", 30), poll=_env_num("MT5_QUOTES_POLL", 5),
-                      backfill_bars=_env_num("MT5_QUOTES_BACKFILL_BARS", 12000), label=label)
+                      backfill_bars=_env_num("MT5_QUOTES_BACKFILL_BARS", 12000), label=label, sleep=sleep)
         if a.backfill:
             os.makedirs(a.dir, exist_ok=True)
             lg.learn_digits()
-            if not lg.learn_offset(time.time()):
+            if not lg.learn_offset(clock(), clock=clock):
                 print("mt5_quotes: server offset unknown (no fresh tick) - cannot stamp UTC; "
                       "retry while the market is quoting", flush=True)
                 return 1
-            rates = lg.fetch_rates(a.backfill, time.time(), settle=True)
-            added, total = merge_candles(lg.candles_path, lg.candle_rows(rates, time.time()))
+            rates = lg.fetch_rates(a.backfill, clock(), settle=True)
+            added, total = merge_candles(lg.candles_path, lg.candle_rows(rates, clock()))
             print("mt5_quotes: backfill asked for %d bars, terminal returned %d, %d new rows merged "
                   "(file now %d rows, offset %s)" % (a.backfill, len(rates), added, total, lg.off_txt()),
                   flush=True)
             return 0
         if a.once:
-            lg.start(time.time())
-            lg.step(time.time())
-            row = lg.flush_window(time.time())
+            lg.start(clock(), clock=clock)
+            lg.step(clock())
+            row = lg.flush_window(clock())
             last = last_csv_row(lg.candles_path, CANDLE_FIELDS) or {}
             print("mt5_quotes --once: quote row = %s" % (row,), flush=True)
             print("mt5_quotes --once: candles written this run %d, newest bar_close_utc in file = %s"
                   % (lg.candles_written, last.get("bar_close_utc", "none")), flush=True)
             return 0
         try:
-            lg.run_forever()
+            lg.run_forever(clock=clock)
         finally:
             print("mt5_quotes: stopped", flush=True)
         return 0
     finally:
-        mt5.shutdown()
+        m.shutdown()
 
 
 if __name__ == "__main__":

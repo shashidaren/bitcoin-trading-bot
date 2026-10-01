@@ -948,6 +948,69 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
+# K14: the CLI modes the on-box checklist tells the operator to run (docs/XM-LOGGER.md section 3)
+import contextlib  # noqa: E402,F811
+import io  # noqa: E402,F811
+
+
+def k_cli(argv, env=None, fm=None):
+    clk = KClock(K_T0 + 1)
+    fm = fm or KMT5(clk, history_start=K_T0 - 300 * 500)
+    fm.clock = clk
+    old = dict(os.environ)
+    os.environ.update(env or {})
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = Q.main(argv, mt5mod=fm, clock=clk, sleep=clk.sleep)
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+    return rc, buf.getvalue(), fm
+
+
+tmp = tempfile.mkdtemp()
+try:
+    rc, out, fm = k_cli(["--spec", "--dir", tmp])
+    try:
+        parsed = json.loads(out)
+    except ValueError:
+        parsed = None
+    check("K: --spec prints PURE JSON (nothing before or after it) and writes no file",
+          rc == 0 and parsed is not None and os.listdir(tmp) == [], f"rc {rc} files {os.listdir(tmp)}")
+    check("K: --spec output carries no login/name/server/balance/path",
+          not [x for x in K_SECRETS if x in out] and parsed["decoded"]["account_kind"] == "DEMO",
+          f"{[x for x in K_SECRETS if x in out]}")
+    rc, out, fm = k_cli(["--once", "--dir", tmp], {"MT5_QUOTES_BACKFILL_BARS": "200"})
+    names = sorted(os.listdir(tmp))
+    i_spec, i_off, i_back = (out.find("contract spec recorded"), out.find("server offset +3h"),
+                             out.find("first run - back-filled 200"))
+    check("K: --once learns the offset, records the spec, back-fills and writes a quote row, in that order",
+          rc == 0 and 0 <= i_spec < i_off < i_back and "quote row" in out
+          and names == ["candles_m5.csv", "quotes-2026-10-01.csv", "symbol_spec.json", "symbol_spec_history.jsonl"],
+          f"rc {rc} {names}\n{out[:300]}")
+    check("K: --once is read-only too", fm.trading_calls == [] and not fm.unknown)
+    rc, out, fm = k_cli(["--backfill", "400", "--dir", tmp])
+    cds = k_candles(tmp)
+    check("K: --backfill N merges older history into the existing file (sorted, unique, no overwrite)",
+          rc == 0 and len(cds) == 400 and k_steps(cds) == {300} and "200 new rows merged" in out,
+          f"rc {rc} {len(cds)} rows; {out.strip()}")
+    rc, out, fm = k_cli(["--backfill", "400", "--dir", tmp])
+    check("K: a second --backfill is idempotent (0 new rows)", rc == 0 and "0 new rows merged" in out and
+          len(k_candles(tmp)) == 400, out.strip())
+    if Q.mt5 is None:
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                Q.main(["--spec"])
+            code = None
+        except SystemExit as e:
+            code = e.code
+        check("K: without MetaTrader5 the CLI refuses with a clear message and exit 1 (Linux python)",
+              code == 1 and "install it in the WINE python" in buf.getvalue(), f"{code}")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
 # K13: the deploy wiring that gets the logger's data to main (static: autosync is bash with side
 # effects, so it is exercised by a throwaway-remote test, but these lines must never regress)
 auto = open(os.path.join(HERE, "autosync.sh")).read()
