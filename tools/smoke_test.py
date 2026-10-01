@@ -24,6 +24,11 @@ Scenarios:
      fell back to their actual outcome and the tool validated itself), the BE
      ratchet MUST arm only at/above its trigger, and a walk MUST NOT resolve to
      TP when only the stop was touched inside its horizon
+  J) handoff_check tolerance policy -> the docs freshness gate MUST NOT cry wolf
+     (one new bar, one closed trade or an open-trade change is normal drift) and
+     MUST still go STALE when genuinely behind (> 5 trades, > 48 h), when
+     outcomes change without a new trade, or when the snapshot is newer than
+     the data
 
 Usage: python3 tools/smoke_test.py
 """
@@ -426,6 +431,70 @@ taken, skipped, _ = R.cascade(sigs, [sell_sl[0]] + [bar(4, 79900, 79910, 79790, 
                               horizon_min=240)
 check("I: cascade applies the SL cooldown after a loss", taken == 1 and skipped == 1,
       f"taken={taken} skipped={skipped}")
+
+# --- Scenario J ---
+print("\nScenario J: handoff_check tolerance policy (5 trades / 48 h, no crying wolf)")
+import handoff_check as HC  # noqa: E402
+
+J_DOC = {
+    "as_of_utc": "2026-10-01 02:05", "data_collection": "1937",
+    "closed_trades": "124", "wins_losses": "54W/70L", "win_rate_pct": "43.5",
+    "engine_ledger_usd": "260.19", "true_equity_usd": "-131.63",
+    "live_era_trades": "70", "live_era_net_usd": "+32.20",
+    "log_covered_trades": "70", "log_bars": "6518",
+    "log_last_bar_utc": "2026-10-01 02:05", "skip_rows": "117",
+    "open_trade": "SELL #124 @ 83602.0", "spread_usd_per_trade": "0.40",
+}
+
+
+def j_stale(doc=None, **live_over):
+    """Keys HC.compare() calls STALE when the live data differs by live_over."""
+    live = dict(J_DOC)
+    live.update(live_over)
+    rows = HC.compare(doc or J_DOC, live)
+    return sorted(k for k, _d, _l, verdict, _n in rows if verdict == "STALE")
+
+
+# normal drift: the box trades and logs while the doc sleeps -> never STALE
+check("J: identical snapshot is fresh", j_stale() == [])
+check("J: one new M5 bar is normal drift (was STALE via log_last_bar_utc)",
+      j_stale(as_of_utc="2026-10-01 02:10", data_collection="1938", log_bars="6519",
+              log_last_bar_utc="2026-10-01 02:10") == [])
+check("J: one closed trade + a new open trade is normal drift (was STALE via wins_losses)",
+      j_stale(closed_trades="125", wins_losses="55W/70L", win_rate_pct="44.0",
+              engine_ledger_usd="262.10", true_equity_usd="-129.73",
+              live_era_trades="71", live_era_net_usd="+33.10", log_covered_trades="71",
+              log_bars="6600", log_last_bar_utc="2026-10-01 09:00",
+              open_trade="BUY #125 @ 83700.0") == [])
+check("J: an open-trade change alone is normal drift", j_stale(open_trade="none") == [])
+check("J: 47 h of log is still fresh",
+      j_stale(log_bars=str(6518 + 47 * 12), log_last_bar_utc="2026-10-03 01:05") == [])
+five = dict(closed_trades="129", wins_losses="57W/72L", win_rate_pct="44.2",
+            engine_ledger_usd="270.19", true_equity_usd="-121.63", live_era_trades="75",
+            live_era_net_usd="+42.20", log_covered_trades="75", open_trade="none")
+check("J: 5 closed trades behind is still fresh (the documented tolerance)", j_stale(**five) == [])
+
+# genuinely behind or contradictory -> STALE
+six = dict(five, closed_trades="130", wins_losses="58W/72L", win_rate_pct="44.6",
+           live_era_trades="76", log_covered_trades="76")
+stale6 = j_stale(**six)
+check("J: 6 closed trades behind is STALE (count and outcomes both flagged)",
+      "closed_trades" in stale6 and "wins_losses" in stale6, f"stale={stale6}")
+check("J: 49 h of log is STALE",
+      "log_last_bar_utc" in j_stale(log_bars=str(6518 + 49 * 12),
+                                    log_last_bar_utc="2026-10-03 03:05"))
+check("J: changed outcomes with an unchanged trade count are STALE (ledger edited?)",
+      j_stale(wins_losses="53W/71L", win_rate_pct="42.7") == ["win_rate_pct", "wins_losses"])
+check("J: a snapshot NEWER than the data is STALE (lost data / stale checkout)",
+      j_stale(log_last_bar_utc="2026-10-01 01:00") == ["log_last_bar_utc"])
+check("J: a different cost assumption is STALE (config must match exactly)",
+      j_stale(spread_usd_per_trade="0.60") == ["spread_usd_per_trade"])
+check("J: a key missing from the doc is STALE",
+      j_stale(doc={k: v for k, v in J_DOC.items() if k != "skip_rows"}) == ["skip_rows"])
+check("J: tolerances stay tied to the documented 5 trades / 48 h",
+      HC.TRADE_TOLERANCE == 5 and HC.MAX_AGE_HOURS == 48
+      and HC.BAR_TOLERANCE == HC.MAX_AGE_HOURS * 12,
+      f"{HC.TRADE_TOLERANCE} trades, {HC.MAX_AGE_HOURS} h, {HC.BAR_TOLERANCE} rows")
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.

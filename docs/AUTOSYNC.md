@@ -83,7 +83,7 @@ the ledger as-is, and a force-push can drop a trading day's log.
   |---|---|---|
   | `fresh (snapshot matches the live data)` | the doc and the CSVs agree | none |
   | `fresh, N advisory drift (data moved since the snapshot)` | counts moved inside tolerance (5 trades / 48 h) | none, or refresh at the next session |
-  | `STALE (N problem(s)): <first problem>` | the doc is behind the data, or contradicts itself (e.g. a command block passes a different `--spread` than the snapshot's cost assumption) | next session starts with `python3 tools/handoff_check.py --update`, then updates the prose (§10 ritual) |
+  | `STALE (N problem(s)): <first problem>` | the doc is behind the data (more than 5 closed trades or 48 h of log), outcomes were edited without a new trade, the snapshot is *newer* than the data (lost data / stale checkout), or it contradicts itself (e.g. a command block passes a different `--spread` than the snapshot's cost assumption) | next session starts with `python3 tools/handoff_check.py --update`, then updates the prose (§10 ritual) |
   | `not run` | `tools/handoff_check.py` or `docs/HANDOFF.md` missing on the box | `git pull` the branch that added them |
   Advisory by design: it never blocks a deploy, never rolls anything back, and
   never triggers the 🚨/⚠️ lines — a doc that is 6 trades behind is not an

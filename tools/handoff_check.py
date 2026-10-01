@@ -29,9 +29,24 @@ Verdicts
           referenced doc missing, or the doc's own --spread commands disagree
           with the snapshot's cost assumption
 
-Tolerance defaults: 5 closed trades and 48 hours (see TRADE_TOLERANCE /
-MAX_AGE_HOURS). Small drift is normal - the box trades while you sleep - and
-must not cry wolf, or the digest line gets ignored.
+Tolerance policy: 5 closed trades and 48 hours (TRADE_TOLERANCE /
+MAX_AGE_HOURS below). Small drift is normal - the box trades while you sleep -
+and must not cry wolf, or the digest line gets ignored. So each key is judged
+by what moves it, not by exact match:
+
+  trade counts      closed_trades, live_era_trades, log_covered_trades: within
+                    TRADE_TOLERANCE.
+  trade outcomes    wins_losses / win_rate_pct may differ only because trades
+                    were ADDED (a changed outcome with an unchanged trade count
+                    means the ledger was edited -> STALE); open_trade may differ
+                    whenever a trade opened or closed.
+  the price log     log_bars / log_last_bar_utc: within MAX_AGE_HOURS of M5 bars
+                    (BAR_TOLERANCE = 576 rows). A snapshot NEWER than the data
+                    is STALE (lost data or a stale checkout - see AUTOSYNC.md on
+                    force-pushes).
+  money             within TRADE_TOLERANCE * $4.
+  config            spread_usd_per_trade must match exactly.
+  as_of_utc, data_collection: advisory only (they move every 15 minutes).
 
 Exit code: 0 = fresh (OK/DRIFT), 1 = STALE, 2 = snapshot block missing or
 unparseable. tools/autosync.sh treats the exit code as ADVISORY: it prints the
@@ -67,8 +82,19 @@ END_MARK = "<!-- /HANDOFF-SNAPSHOT -->"
 ADVISORY = {"as_of_utc", "data_collection"}
 
 TRADE_TOLERANCE = 5      # closed trades of drift before the doc is STALE
-BAR_TOLERANCE = 60       # M5 log rows of drift before STALE (60 rows = 5 h)
 MAX_AGE_HOURS = 48       # snapshot older than this is STALE even if counts match
+# M5 log rows of drift before STALE = MAX_AGE_HOURS of bars (12 per hour). This
+# was 60 rows (5 h), which tripped long before the documented 48 h and made the
+# doc go STALE a few hours after every refresh - the "cry wolf" the header warns
+# about. Keep the two in step by deriving one from the other.
+BAR_TOLERANCE = MAX_AGE_HOURS * 12
+SKIP_TOLERANCE = 60      # skipped-signal rows (~5 a day); unchanged
+
+# Keys judged by *what moves them* rather than by exact match (see the header).
+TRADE_COUNT_KEYS = {"closed_trades", "live_era_trades", "log_covered_trades"}
+OUTCOME_KEYS = {"wins_losses", "win_rate_pct"}   # may change only if trades were added
+OPEN_TRADE_KEYS = {"open_trade"}                 # changes on every open/close
+MONEY_KEYS = {"engine_ledger_usd", "true_equity_usd", "live_era_net_usd"}
 
 # Order the block is written in. --update regenerates exactly these keys.
 KEY_ORDER = [
@@ -231,9 +257,29 @@ def _num(s):
         return None
 
 
+def _minute(s):
+    """'2026-10-01 02:05' -> datetime, or None when it does not parse."""
+    try:
+        return datetime.strptime(str(s), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def _closed_gap(doc, facts):
+    """Signed closed-trade gap (live - doc), or None when it cannot be read."""
+    dn, ln = _num(doc.get("closed_trades")), _num(facts.get("closed_trades"))
+    return None if dn is None or ln is None else ln - dn
+
+
 def compare(doc, facts):
-    """[(key, doc_value, live_value, verdict, note)]"""
+    """[(key, doc_value, live_value, verdict, note)]
+
+    A doc is STALE only when it is genuinely behind (more than TRADE_TOLERANCE
+    closed trades or MAX_AGE_HOURS of log) or contradicts the data. Every other
+    difference is normal drift and passes - see the header for the per-key rules.
+    """
     rows = []
+    cgap = _closed_gap(doc, facts)
     for k in KEY_ORDER:
         if k not in facts:
             continue
@@ -248,24 +294,50 @@ def compare(doc, facts):
         if k in ADVISORY:
             rows.append((k, d, live, "DRIFT", "advisory"))
             continue
+
+        if k == "log_last_bar_utc":
+            dd, ld = _minute(d), _minute(live)
+            if dd is not None and ld is not None:
+                mins = (ld - dd).total_seconds() / 60.0
+                if mins < 0:
+                    rows.append((k, d, live, "STALE",
+                                 "snapshot is newer than the data (lost data, or a stale checkout?)"))
+                else:
+                    ok = mins <= BAR_TOLERANCE * 5
+                    rows.append((k, d, live, "OK" if ok else "STALE",
+                                 f"{mins / 5:+.0f} bars since the snapshot"))
+                continue
+
+        if (k in OUTCOME_KEYS or k in OPEN_TRADE_KEYS) and cgap is not None:
+            note = f"{cgap:+.0f} closed trades since the snapshot"
+            if abs(cgap) > TRADE_TOLERANCE:
+                rows.append((k, d, live, "STALE", note))
+            elif k in OUTCOME_KEYS and cgap == 0:
+                rows.append((k, d, live, "STALE",
+                             "outcomes changed but the closed-trade count did not (ledger edited?)"))
+            else:
+                rows.append((k, d, live, "OK", note))
+            continue
+
         dn, ln = _num(d), _num(live)
-        note = ""
         if dn is not None and ln is not None:
             gap = abs(ln - dn)
-            if k == "closed_trades":
+            note = ""
+            if k in TRADE_COUNT_KEYS:
                 ok = gap <= TRADE_TOLERANCE
                 note = f"{ln - dn:+.0f} trades since the snapshot"
-            elif k in ("log_bars", "skip_rows", "live_era_trades",
-                       "log_covered_trades"):
+            elif k == "log_bars":
                 ok = gap <= BAR_TOLERANCE
                 note = f"{ln - dn:+.0f} since the snapshot"
-            elif k in ("engine_ledger_usd", "true_equity_usd",
-                       "live_era_net_usd"):
+            elif k == "skip_rows":
+                ok = gap <= SKIP_TOLERANCE
+                note = f"{ln - dn:+.0f} since the snapshot"
+            elif k in MONEY_KEYS:
                 # money follows the trade count: judge it by the same tolerance
                 ok = gap <= TRADE_TOLERANCE * 4.0
                 note = f"${ln - dn:+.2f} since the snapshot"
             else:
-                ok = False
+                ok = False          # config (spread_usd_per_trade): exact
             rows.append((k, d, live, "OK" if ok else "STALE", note))
         else:
             rows.append((k, d, live, "STALE", "value changed"))

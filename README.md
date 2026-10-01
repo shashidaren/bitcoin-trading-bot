@@ -23,9 +23,12 @@ deliberately adapted for BTC).
 | `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
 | `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
-| `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). **§12 is the 2026-09-16 re-cut at 78 trades** — read that first; the body is the provenance behind it. |
+| `docs/REVIEW-2026-10-01.md` | **Live-readiness review (124 trades)** — is the edge real, how thin is the cost margin, what is wrong in the LIVE order path, and the staged path (fix → measure → XM demo → micro-live) to a capped pilot. Verdict: not ready for real money. |
+| `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). §12 is the 2026-09-16 re-cut at 78 trades and **§13 the 2026-09-24 re-cut at 99 trades**; the body is the provenance behind them. |
 | `docs/AUTOSYNC.md` | The unattended sync/deploy loop: cron assumptions, branch rule, Telegram digest legend, what a deploy does to a running trade. |
 | `tools/handoff_check.py` | Freshness gate for `docs/HANDOFF.md`: recomputes its snapshot block from the live CSVs, says `HANDOFF FRESH`/`STALE`, and rewrites the block with `--update`. |
+| `tools/live_readiness.py` | Evidence + go/no-go gates for LIVE: edge significance, cost margin, fragility, Monte Carlo risk, entry-latency stress, feed health (defaults to `--spread 0.40`). |
+| `tools/live_path_probe.py` | Offline probe of `engine.py`'s LIVE order path against a fake MT5 (no terminal, network or Telegram); exits 1 until the findings in the live-readiness review are fixed. |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
 
 ## 🧰 Tools (run in this order on every new data drop)
@@ -38,7 +41,9 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census # 3. exit-rule replay (pri
 python3 tools/analyze_losers.py --spread 0.40         # 4. winner/loser feature drift, MAE/MFE, stop grid
 python3 tools/validate_gates.py                       # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40         # 6. what did the blocked (skipped) signals actually do?
-python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–I)
+python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–J)
+python3 tools/live_readiness.py --spread 0.40         # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
+python3 tools/live_path_probe.py                      # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
 ```
 
 `--spread 0.40` is the measured XM BTCUSD round trip at `LOT_SIZE = 0.01`; the tools default to
