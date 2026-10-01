@@ -67,7 +67,7 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
   session/weekend/blackout/hour against the $87 break-even and the $60 cap proposal, the measured cost at the
   ledger's real entry/exit times, candle parity with a ±3 h time-shift scan, the spec. **Not yet validated on
   the real terminal** (no Wine/MT5 in the build sandbox): smoke Scenarios K (70 checks, fake terminal + fake
-  clock, mutation-checked) and L (34 checks, report) lock the behaviour; `docs/XM-LOGGER.md` §3 is the on-box
+  clock, mutation-checked) and L (36 checks, report) lock the behaviour; `docs/XM-LOGGER.md` §3 is the on-box
   validation checklist and the 14-day clock starts at the first real `OK` row. Traps found and designed
   around: MT5 `time` is **broker server time** (XM GMT+2/+3, EU DST rule, next change **Sun 25 Oct 2026**), so
   the offset is learned only from *fresh* ticks (a tick exactly N hours old looks like a fresh tick on a

@@ -75,6 +75,18 @@ fields only — see §5 *Privacy*.
 > existing feed sidecar is installed):
 > `grep DATA_SOURCE /opt/bitcoin/.env` and `systemctl list-units | grep -i mt5`.
 
+**Option: validate BEFORE merging (nothing on `/opt/bitcoin` changes).** The repo is public, so
+steps 1–2 below can run from a throwaway clone of the PR branch while the PR is still a draft:
+```bash
+git clone --depth 1 --branch <the PR's branch> https://github.com/shashidaren/bitcoin-trading-bot /tmp/xmtest
+export WINEPREFIX=/root/.mt5
+PY="xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/tmp/xmtest/tools/mt5_quotes.py"
+$PY --spec                                   # step 1
+MT5_QUOTES_DIR=Z:/tmp/xm_probe $PY --once    # step 2 (scratch dir)
+python3 /tmp/xmtest/tools/xm_quote_report.py --root /opt/bitcoin --dir /tmp/xm_probe   # parity vs the LIVE log
+```
+Only then merge, and do step 3 onwards.
+
 **Merge → autosync deploys the code.** This PR touches only `tools/`, `deploy/` and
 `docs/`: autosync runs the smoke gate but **does not restart the engine** (only
 `engine.py`/`trade_filter.py` changes do). Then on the box:

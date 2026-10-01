@@ -1261,6 +1261,18 @@ try:
     check("L: too little overlap -> INSUFFICIENT, not a guess",
           X.bar_spread_check(cs[:5], s4, 0.01)["verdict"] == "INSUFFICIENT")
 
+    # --quiet (run by autosync every 15 minutes) must not re-read the whole history forever
+    old_dir = os.path.join(tmp, "oldfiles")
+    os.makedirs(old_dir)
+    with open(os.path.join(old_dir, "quotes-2026-01-01.csv"), "w") as f:
+        f.write("this,is,not,the,schema\n1,2,3,4,5\n")             # would count as malformed if it were read
+    shutil.copy(os.path.join(tmp, "quotes-2026-09-14.csv"), old_dir)
+    _, bad_all, _ = X.load_quotes(old_dir)
+    _, bad_since, _ = X.load_quotes(old_dir, since=Q.parse_utc("2026-09-01 00:00:00"))
+    check("L: day files older than the window are skipped unread by name (bounded autosync cost)",
+          bad_all == 1 and bad_since == 0, f"{bad_all} vs {bad_since}")
+    check("L: --quiet looks back at most %d days" % X.QUIET_WINDOW_DAYS, X.QUIET_WINDOW_DAYS >= 2 * X.TARGET_DAYS)
+
     # L9: the one-line advisory used by autosync's digest
     now_l = Q.parse_utc("2026-09-15 23:59:30") + 120
     args = type("A", (), dict(root=tmp, dir=".", now=now_l))()

@@ -66,6 +66,7 @@ STALE_AFTER_S = 15 * 60                 # --quiet: no new row for this long = ST
 SESSIONS = (("ASIA", 0, 8), ("LONDON", 8, 13), ("NY", 13, 21), ("LATE", 21, 24))   # UTC hours
 BAD_FLAGS = frozenset({"STALE", "NOOFFSET", "NOQUOTE", "BADQUOTE"})
 PARITY_MIN_PAIRS = 50
+QUIET_WINDOW_DAYS = 45                  # --quiet reads only this much history: autosync runs it every 15 min
 
 Sample = namedtuple("Sample", "t spread smin smax flags age n_ok n_bad off")
 
@@ -86,6 +87,13 @@ def load_quotes(qdir, since=None):
     rows, bad = [], 0
     files = sorted(glob.glob(os.path.join(qdir, "quotes-????-??-??.csv")))
     for path in files:
+        if since is not None:                   # day files are named by UTC date: skip the old ones unread
+            try:
+                day = datetime.strptime(os.path.basename(path)[7:17], "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+                if day + 86400 <= since:
+                    continue
+            except ValueError:
+                pass
         try:
             with open(path, newline="", encoding="utf-8", errors="replace") as fh:
                 rd = csv.reader(fh)
@@ -657,7 +665,7 @@ def report(a):
 def quiet_line(a):
     qdir = a.dir if os.path.isabs(a.dir) else os.path.join(a.root, a.dir)
     now = a.now or time.time()
-    samples, malformed, nfiles = load_quotes(qdir)
+    samples, malformed, nfiles = load_quotes(qdir, since=now - QUIET_WINDOW_DAYS * 86400)
     if not samples:
         return "xm logger: not collecting yet (no quote rows in %s)" % os.path.relpath(qdir, a.root)
     cov = coverage(samples)
