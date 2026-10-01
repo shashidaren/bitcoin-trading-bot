@@ -219,6 +219,26 @@ def coverage(samples):
                 expected=expected, rows=len(samples), span_days=span / 86400.0)
 
 
+def unusable_runs(samples, interval, min_s=GAP_MIN_S):
+    """Runs of consecutive rows that carry NO usable quote (STALE / NOQUOTE / BADQUOTE / NOOFFSET).
+    These are the outages a gap list cannot see because the logger kept writing rows through
+    them - an exchange/broker maintenance window, a frozen feed, a closed market. XM's FAQ reports
+    a weekly Saturday crypto-CFD maintenance window, which would appear here."""
+    runs, start, last = [], None, None
+    for sm in samples:
+        if usable(sm):
+            if start is not None and last - start + interval >= min_s:
+                runs.append((start, last - start + interval))
+            start = None
+        else:
+            if start is None:
+                start = sm.t
+            last = sm.t
+    if start is not None and last - start + interval >= min_s:
+        runs.append((start, last - start + interval))
+    return sorted(runs, key=lambda r: -r[1])
+
+
 def stage_b_progress(cov):
     """(complete days, complete weekends, exit met?) - the Stage B-i clock."""
     d, w = len(cov["complete"]), len(cov["weekends"])
@@ -464,6 +484,12 @@ def report(a):
         cov["outage_s"] / 3600.0, len(cov["outages"]), GAP_MIN_S // 60))
     for t0, d in cov["outages"][:3]:
         print("     longest gaps: %s UTC for %.0f min" % (Q.utc_str(t0), d / 60.0))
+    runs = unusable_runs(samples, cov["interval"])
+    if runs:
+        print("  no-usable-quote runs >= %d min (rows kept, quotes stale/absent): %d, %.1f h in total; longest: %s" % (
+            GAP_MIN_S // 60, len(runs), sum(d for _, d in runs) / 3600.0,
+            "; ".join("%s UTC (%s) %.0f min" % (Q.utc_str(t0), dt_of(t0).strftime("%a"), d / 60.0)
+                      for t0, d in runs[:3])))
     fl = Counter(f for s in samples for f in s.flags)
     print("  flags: %s    offsets seen: %s" % (
         ", ".join("%s %d" % kv for kv in sorted(fl.items())) or "none",

@@ -1053,6 +1053,19 @@ try:
           set(X.blackout_days(s_full, 60).values()) == {15} and len(X.blackout_days(s_full, 60)) == 3,
           f"{X.blackout_days(s_full, 60)}")
 
+    # a 40-minute frozen-feed run that leaves rows behind (e.g. a Saturday maintenance window)
+    sat = L_DAY0 + 5 * 86400 + 7 * 3600
+
+    def freeze(t, row):
+        if sat <= t < sat + 40 * 60:
+            row["flags"] = "STALE"
+    l_write_quotes(os.path.join(tmp, "frozen"), days=7, tweak=freeze)
+    s_fz, _, _ = X.load_quotes(os.path.join(tmp, "frozen"))
+    runs = X.unusable_runs(s_fz, 60)
+    check("L: a 40-minute run of STALE rows (rows kept, no quotes) is reported as an outage a gap list cannot see",
+          len(runs) == 1 and runs[0][0] == sat and abs(runs[0][1] - 40 * 60) <= 60, f"{runs}")
+    check("L: a clean dataset has no unusable runs", X.unusable_runs(s_full, 60) == [])
+
     # L3: spread statistics against the generating model
     good = [s for s in s_full if X.usable(s)]
     ny_wd = X.summarize([s.spread for s in good if X.session_of(s.t) == "NY" and not X.is_weekend(s.t)])

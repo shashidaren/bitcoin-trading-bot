@@ -40,8 +40,9 @@ TIME. MT5 'time' fields are BROKER SERVER time encoded as epoch seconds, not UTC
 whatever the Python docs say (forum thread https://www.mql5.com/en/forum/369602: "the data
 is given in seconds since 1970 in the timezone of the broker"). There is no API for the
 server's zone; the only way to learn it is to compare a FRESH tick with the local clock:
-tick.time - now = offset - age. XM runs EET/EEST (UTC+2 winter, +3 summer), so the offset
-CHANGES twice a year. This tool estimates a whole-hour offset from every fresh tick, uses
+tick.time - now = offset - age. XM's server time is GMT+2 in winter and GMT+3 in summer on
+the EU rule (XM's trading-hours page: last Sunday of March/October; next change Sun 25 Oct
+2026), so the offset CHANGES twice a year. This tool estimates a whole-hour offset from every fresh tick, uses
 the current estimate, and records both the raw server time and the offset on every row.
 Back-filled bars are converted with the CURRENT offset: if a server DST change lies inside
 the back-filled span the older bars are off by one hour - the report's per-day shift check
