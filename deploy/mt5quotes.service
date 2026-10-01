@@ -1,0 +1,47 @@
+# Bitcoin XM quote + contract-spec logger (Wine Python -> /opt/bitcoin/xm_data/)
+#
+# READ-ONLY sidecar (tools/mt5_quotes.py, docs/XM-LOGGER.md). Every 30 s it logs the XM
+# BTCUSD bid/ask/spread (plus a 5 s min/max envelope), it snapshots the contract spec
+# (execution/filling modes, stops level, volume step, swap, demo-vs-real) and it records
+# shadow XM M5 candles, so the cost model ($0.40 assumed vs $0.87 break-even) and feed
+# parity are MEASURED instead of assumed. It never sends, checks or lists orders and never
+# touches engine.py or DATA_SOURCE. tools/autosync.sh commits xm_data/ with the other data.
+#
+# Same proven pattern as mt5feed-btc and the mt5-balance / mt5-trades shell aliases:
+# WINEPREFIX=~/.mt5 + xvfb-run + wine C:/Python312/python.exe.
+#
+# TEST FIRST (the terminal must be running and logged in, in the SAME prefix; it can run
+# beside mt5feed-btc - several Python clients may attach to one terminal):
+#   export WINEPREFIX=/root/.mt5
+#   xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/bitcoin/tools/mt5_quotes.py --spec
+#   xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/bitcoin/tools/mt5_quotes.py --once
+#
+# Install (note the -btc suffix, as with mt5feed-btc):
+#   sudo cp deploy/mt5quotes.service /etc/systemd/system/mt5quotes-btc.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mt5quotes-btc
+#   journalctl -u mt5quotes-btc -f     # expect "contract spec recorded" and "first run - back-filled N"
+#
+# Optional env (all have defaults): MT5_QUOTES_SYMBOL, MT5_QUOTES_DIR, MT5_QUOTES_INTERVAL,
+# MT5_QUOTES_POLL, MT5_QUOTES_BACKFILL_BARS, MT5_QUOTES_LABEL (free text published in the
+# spec, e.g. "XM Standard demo" - MT5 does not expose the account tier). Never put a login
+# or password here: the logger needs neither, and this repo is public.
+
+[Unit]
+Description=Bitcoin XM quote + contract-spec logger (Wine Python -> xm_data/)
+After=network.target
+
+[Service]
+User=root
+Environment=WINEPREFIX=/root/.mt5
+Environment=PYTHONUNBUFFERED=1
+Environment=MT5_QUOTES_SYMBOL=BTCUSD
+Environment=MT5_QUOTES_DIR=Z:/opt/bitcoin/xm_data
+#Environment=MT5_QUOTES_LABEL=XM Standard demo
+ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:\\Python312\\python.exe Z:\\opt\\bitcoin\\tools\\mt5_quotes.py
+WorkingDirectory=/root
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
