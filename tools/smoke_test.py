@@ -948,6 +948,24 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
+# K13: the deploy wiring that gets the logger's data to main (static: autosync is bash with side
+# effects, so it is exercised by a throwaway-remote test, but these lines must never regress)
+auto = open(os.path.join(HERE, "autosync.sh")).read()
+data_line = next((ln for ln in auto.splitlines() if ln.startswith("DATA_FILES=")), "")
+check("K: autosync commits xm_data/ with the other live data (else the logger's output never reaches main)",
+      "xm_data" in data_line, data_line)
+check("K: an autosync merge conflict in xm_data/ resolves server-wins like the other data files",
+      "|xm_data/*)" in auto and "git checkout --ours" in auto.split("|xm_data/*)")[1][:80])
+check("K: the digest carries the logger's liveness line (advisory)", "xm_quote_report.py --quiet" in auto)
+alert_block = auto.split('"xm logger: STALE"*)')[1].split(";;")[0] if '"xm logger: STALE"*)' in auto else "$"
+check("K: the STALE alert text has no changing numbers, so alert_once's dedupe cannot flood the chat",
+      "$XM_MSG" not in alert_block and "mt5quotes-btc" in alert_block, alert_block.strip()[:90])
+check("K: the unit file installs as mt5quotes-btc and never carries a login or password",
+      "mt5quotes-btc" in open(os.path.join(ROOT, "deploy", "mt5quotes.service")).read()
+      and not any(w in open(os.path.join(ROOT, "deploy", "mt5quotes.service")).read().lower().replace(
+          "never put a login", "").replace("or password", "")
+          for w in ("password=", "login=", "mt5_login", "mt5_password")))
+
 check("K: an incompatible interval/poll falls back to 30/5 instead of mis-aligning rows",
       (lambda lg: (lg.interval, lg.poll))(Q.XmLogger(KMT5(KClock(K_T0)), "BTCUSD", "/nonexistent-never-written",
                                                     interval=30, poll=7, log=lambda m: None)) == (30, 5))

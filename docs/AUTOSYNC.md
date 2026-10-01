@@ -24,7 +24,7 @@ assumes all of this is already true:
 | `tools/autosync.sh` is executable | cron needs the +x bit | `ls -l /opt/bitcoin/tools/autosync.sh` |
 | git can **push** to `origin/main` unattended | data commits are pushed every run | `cd /opt/bitcoin && git push --dry-run origin main` |
 | cron user is **root** | `systemctl stop/start` the engine | `crontab -l` (root's crontab) |
-| `python3` works from that cwd | smoke gate + `check_data.py` + `handoff_check.py` | `cd /opt/bitcoin && python3 tools/check_data.py` |
+| `python3` works from that cwd | smoke gate + `check_data.py` + `handoff_check.py` + `xm_quote_report.py` | `cd /opt/bitcoin && python3 tools/check_data.py` |
 | `docs/HANDOFF.md` exists | the advisory freshness check reads its snapshot block | `cd /opt/bitcoin && python3 tools/handoff_check.py --quiet` |
 | No **uncommitted hand-edits** in `engine.py` / `trade_filter.py` / `dashboard.py` / `tools/` | the script refuses to deploy over them | `cd /opt/bitcoin && git status --short` |
 
@@ -37,15 +37,20 @@ required — without it the script still runs, it just stays silent.
 
 **Data flows up `main`; code only comes down `main`.** Every run:
 
-1. commits `trades.csv forward_test_log.csv skipped_trades.csv status.json`
-   locally and pushes them to `origin/main`;
+1. commits `trades.csv forward_test_log.csv skipped_trades.csv status.json` **and
+   the `xm_data/` directory** (the XM quote logger's output, `docs/XM-LOGGER.md`;
+   absent until the sidecar is installed, which is harmless) locally and pushes
+   them to `origin/main`;
 2. `git fetch origin main`; **if `origin/main` advanced**, it stops the engine,
    merges (data-file conflicts = server wins, everything else = remote wins),
    runs the smoke gate, rolls back on failure, restarts the engine and checks
    `status.json` is fresh;
 3. runs `tools/check_data.py`, then `tools/handoff_check.py --quiet` (advisory:
    does `docs/HANDOFF.md`'s snapshot block still match the data it just
-   committed? it never blocks a deploy and never touches `$EXTRA`);
+   committed? it never blocks a deploy and never touches `$EXTRA`), then
+   `tools/xm_quote_report.py --quiet` (advisory: is the XM quote logger still
+   writing, and how far along is its 14-day clock? it never blocks a deploy;
+   it raises one deduplicated ⚠️ only when the logger goes **STALE**);
 4. notifies Telegram per the `NOTIFY` policy (§5).
 
 So a commit sitting on any other branch (e.g. an `arena/*` work branch) will
@@ -69,6 +74,7 @@ the ledger as-is, and a force-push can drop a trading day's log.
 🚀 deploy: deployed 6b1808b (code files: 9, smoke: ok)
 🩺 integrity: 0 fail, 61 warn
 📝 handoff: fresh (snapshot matches the live data)
+📈 xm logger: OK | 6/14 complete days, 1/2 weekends | rows 17210, outage 0.1 h | spread median $41 p95 $58 /BTC ($0.41/trade median)
 💰 equity 217.45 | 33W/45L | daily SLs 1/3 | open trade: no | updated 2026-09-16 12:10 UTC
 ```
 
@@ -88,6 +94,20 @@ the ledger as-is, and a force-push can drop a trading day's log.
   Advisory by design: it never blocks a deploy, never rolls anything back, and
   never triggers the 🚨/⚠️ lines — a doc that is 6 trades behind is not an
   incident, and nagging four times an hour would get the digest muted.
+- **📈 xm logger** — `tools/xm_quote_report.py --quiet`: is the read-only quote
+  sidecar (`deploy/mt5quotes.service`) still writing `xm_data/`, and where is the
+  Stage B-i clock (≥ 14 complete UTC days incl. 2 complete weekends)?
+  | Text | Meaning | Action |
+  |---|---|---|
+  | `OK \| 6/14 complete days, 1/2 weekends \| rows …, outage … h \| spread median …` | rows are fresh (newest < 15 min old) | none; read the full report at day 14 |
+  | `STALE (newest row 3.1 h old - is mt5quotes-btc running?)` | the sidecar stopped writing (the process, Wine or the MT5 terminal died) | `systemctl status mt5quotes-btc`, `journalctl -u mt5quotes-btc -n 50`; every lost day delays the Stage B-i exit |
+  | `not collecting yet (no quote rows in xm_data)` | the sidecar is not installed yet (or never wrote) | install it: `docs/XM-LOGGER.md` §3 |
+  | `not run` | `tools/xm_quote_report.py` missing on the box | `git pull` the branch that added it |
+  Unlike the handoff line, **STALE does raise one ⚠️ line** (`XM quote logger stopped
+  writing`): a dead logger silently wastes days of a clock that cannot be
+  compressed. The alert text carries no changing numbers on purpose, so
+  `alert_once`'s dedupe sends it once per incident and the clean run that follows
+  re-arms it; `not collecting yet` never alerts.
 - **💰 stats** — straight from `status.json`.
 
 ### Deploy states and what they mean
@@ -103,9 +123,9 @@ the ledger as-is, and a force-push can drop a trading day's log.
 | `engine service NOT FOUND - restart engine manually` | `detect_service` could not find a systemd unit referencing `/opt/bitcoin` and `engine.py` | restart manually, or set `ENGINE_SERVICE=` in the crontab |
 | `engine active but status.json looks STALE` | the service is up but has not written state for 3+ minutes | check the engine log |
 
-Machine-readable history: `/var/log/bitcoin_autosync.log`. Per-run detail:
-`/tmp/bitcoin_autosync_smoke.log`, `/tmp/bitcoin_autosync_check.log` and
-`/tmp/bitcoin_autosync_handoff.log`.
+Machine-readable history: `/var/log/bitcoin_autosync.log` (each run's `done.` line
+ends with `xm=[…]`). Per-run detail: `/tmp/bitcoin_autosync_smoke.log`,
+`/tmp/bitcoin_autosync_check.log` and `/tmp/bitcoin_autosync_handoff.log`.
 
 ---
 

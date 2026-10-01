@@ -4,13 +4,15 @@
 # Runs from cron (root). Full documentation: docs/AUTOSYNC.md
 #
 # Every run:
-#   1. Commits the live data files and pushes them to origin/main
+#   1. Commits the live data files (incl. xm_data/, the XM quote logger's output) and
+#      pushes them to origin/main
 #   2. If origin/main advanced (e.g. a merged PR):
 #        stops the engine -> merges (conflicts: data files = server wins,
 #        everything else = remote wins) -> runs the smoke test -> rolls back
 #        on failure -> restarts the engine -> verifies status.json is fresh
-#   3. Runs tools/check_data.py (integrity gate) and tools/handoff_check.py
-#      (docs/HANDOFF.md freshness - advisory only, never blocks a deploy)
+#   3. Runs tools/check_data.py (integrity gate), tools/handoff_check.py (docs/HANDOFF.md
+#      freshness) and tools/xm_quote_report.py --quiet (XM logger liveness). The last two
+#      are advisory: they never block a deploy
 #   4. Sends a one-message digest to the Telegram chat configured in .env
 #
 # Safety model:
@@ -33,7 +35,10 @@ DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}" # empty = auto-detect the unit runnin
 NOTIFY="${NOTIFY:-alerts}"            # alerts | always | quiet | off (phase 5 below)
 DAILY_STAMP="${DAILY_STAMP:-/tmp/bitcoin_autosync_daily_digest}"  # alerts: last daily summary date
 ALERT_STAMP="${ALERT_STAMP:-/tmp/bitcoin_autosync_last_alert}"    # alerts: last alerted state (dedupe)
-DATA_FILES=(trades.csv forward_test_log.csv skipped_trades.csv status.json)
+# xm_data/ is a DIRECTORY (tools/mt5_quotes.py: quotes-YYYY-MM-DD.csv, candles_m5.csv, symbol_spec*).
+# `git add -- xm_data` stages its new and modified files; before the logger is installed it matches
+# nothing and the (silenced) failure is harmless.
+DATA_FILES=(trades.csv forward_test_log.csv skipped_trades.csv status.json xm_data)
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -157,7 +162,7 @@ if [ "$NEED_MERGE" = "1" ]; then
             log "merge conflict - resolving: data files=ours, everything else=theirs"
             for f in $(git diff --name-only --diff-filter=U); do
                 case "$f" in
-                    trades.csv|forward_test_log.csv|skipped_trades.csv|status.json)
+                    trades.csv|forward_test_log.csv|skipped_trades.csv|status.json|xm_data/*)
                         git checkout --ours -- "$f" ;;
                     *) git checkout --theirs -- "$f" ;;
                 esac
@@ -257,6 +262,24 @@ if [ -f tools/handoff_check.py ] && [ -f docs/HANDOFF.md ]; then
     log "handoff: $HANDOFF_MSG"
 fi
 
+# --- phase 4c: XM logger liveness (ADVISORY - never blocks a deploy) -------------
+# tools/xm_quote_report.py --quiet prints ONE line: OK / STALE / not collecting yet, plus the
+# Stage B-i clock (complete days and weekends of the >= 14 days incl. 2 weekends). A dead
+# sidecar silently wastes days of that clock, so STALE raises ONE alert - the text is kept
+# free of changing numbers on purpose so alert_once's dedupe holds and a stuck logger cannot
+# re-flood the chat every 15 minutes. "not collecting yet" (not installed) never alerts.
+XM_MSG="not run"
+if [ -f tools/xm_quote_report.py ]; then
+    XM_MSG=$(python3 tools/xm_quote_report.py --quiet 2>/dev/null | tail -n1)
+    [ -z "$XM_MSG" ] && XM_MSG="xm_quote_report failed to run"
+    log "xm: $XM_MSG"
+    case "$XM_MSG" in
+        "xm logger: STALE"*)
+            EXTRA="$EXTRA
+⚠️ XM quote logger stopped writing - check: systemctl status mt5quotes-btc" ;;
+    esac
+fi
+
 STATS=$(python3 - <<'PYEOF' 2>/dev/null
 import json
 try:
@@ -270,7 +293,7 @@ except Exception as e:
 PYEOF
 )
 
-log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HANDOFF_MSG]"
+log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HANDOFF_MSG] xm=[$XM_MSG]"
 
 # --- phase 5: notification policy ----------------------------------------------
 # always  : digest every run (~96/day at the 15-min cron) - the original flood
@@ -318,5 +341,6 @@ if [ "$SEND" = "1" ]; then
 🚀 deploy: $DEPLOY_MSG
 🩺 integrity: $CHECK_MSG
 📝 handoff: $HANDOFF_MSG
+📈 $XM_MSG
 💰 $STATS$EXTRA"
 fi
