@@ -15,10 +15,16 @@ Run (manual test, mirrors the mt5-balance alias):
 Or as a service (see deploy/mt5feed.service):
   sudo systemctl enable --now mt5feed-btc
 
-Publishes (atomic write, refreshed every 5s; the engine dedups by candle ts):
+Publishes (atomic write, refreshed every 5s; the engine dedups by UTC candle ts):
   Z:/opt/bitcoin/mt5_last_candle.json
-  {"ts": 1789015200, "open": 80000.0, "high": 80010.0, "low": 79990.0,
+  {"ts": 1789004400, "server_ts": 1789015200, "server_offset_s": 10800,
+   "open": 80000.0, "high": 80010.0, "low": 79990.0,
    "close": 80005.0, "tick_volume": 120, "updated_at": "2026-09-10 05:20:03"}
+
+MT5 rate/tick timestamps are broker-server epoch values, not UTC. The sidecar
+learns the current whole-hour server offset from a fresh tick and converts the
+closed candle timestamp before publishing it. This is deliberately learned at
+runtime because XM changes between UTC+2 and UTC+3 at DST transitions.
 
 Env overrides: MT5_FEED_SYMBOL (default BTCUSD), MT5_FEED_FILE
 (default Z:/opt/bitcoin/mt5_last_candle.json), MT5_FEED_POLL (seconds, default 5),
@@ -53,6 +59,24 @@ def utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def estimate_server_offset(server_ts: int, now_epoch: float = None):
+    """Return the broker-server offset from UTC for a fresh tick.
+
+    XM's MT5 timestamps are epoch-shaped values in broker server time. A fresh
+    tick lets us estimate the whole-hour offset; stale ticks are rejected so a
+    weekend/maintenance quote cannot make the offset jump. The residual is the
+    tick age plus small clock skew.
+    """
+    if not server_ts:
+        return None
+    now = time.time() if now_epoch is None else float(now_epoch)
+    delta = float(server_ts) - now
+    candidate = int(round(delta / 3600.0) * 3600)
+    if abs(candidate) > 14 * 3600 or abs(delta - candidate) > 300:
+        return None
+    return candidate
+
+
 def main() -> None:
     if not mt5.initialize():
         print(f"mt5_feed: MT5 initialize failed: {mt5.last_error()} "
@@ -65,14 +89,29 @@ def main() -> None:
     account = mt5.account_info()
     acct = f" | account {account.login}" if account else ""
     print(f"mt5_feed: publishing closed {TIMEFRAME_NAME} {SYMBOL} candles -> {OUT}{acct}", flush=True)
+    server_offset = None
 
     while True:
         try:
+            # Learn the broker-server offset from a fresh tick. Do not use a
+            # stale tick: at a DST change or after maintenance it can make a
+            # UTC timestamp jump by an hour.
+            tick = mt5.symbol_info_tick(SYMBOL)
+            tick_ts = int(getattr(tick, "time", 0) or 0) if tick else 0
+            learned = estimate_server_offset(tick_ts)
+            if learned is not None:
+                server_offset = learned
+
             rates = mt5.copy_rates_from_pos(SYMBOL, TIMEFRAME, 1, 1)
-            if rates is not None and len(rates) > 0:
+            if rates is not None and len(rates) > 0 and server_offset is not None:
                 r = rates[0]
+                server_ts = int(r["time"])
                 payload = {
-                    "ts": int(r["time"]),
+                    # Engine-facing timestamp: always UTC.
+                    "ts": server_ts - server_offset,
+                    # Diagnostics: retain the raw broker timestamp and offset.
+                    "server_ts": server_ts,
+                    "server_offset_s": server_offset,
                     "open": float(r["open"]),
                     "high": float(r["high"]),
                     "low": float(r["low"]),

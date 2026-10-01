@@ -354,8 +354,22 @@ check("H: default data source stays TWELVEDATA", engine.DATA_SOURCE == "TWELVEDA
 eng_h = engine.BitcoinEngine()
 check("H: missing feed file -> None", eng_h.read_mt5_feed() is None)
 
-# sidecar publishes the latest closed candle; engine reads + normalizes it
-feed1 = {"ts": 2000, "open": 80000.0, "high": 80010.0, "low": 79990.0,
+# The sidecar must convert broker-server timestamps to UTC using a fresh tick.
+# Import its pure helper with a stub MT5 module (Linux has no MT5 package).
+import importlib.util
+fake_mt5 = types.ModuleType("MetaTrader5")
+fake_mt5.TIMEFRAME_M1 = 1
+fake_mt5.TIMEFRAME_M5 = 5
+fake_mt5.TIMEFRAME_M15 = 15
+sys.modules["MetaTrader5"] = fake_mt5
+feed_spec = importlib.util.spec_from_file_location("mt5_feed_under_test", os.path.join(HERE, "mt5_feed.py"))
+feed_mod = importlib.util.module_from_spec(feed_spec)
+feed_spec.loader.exec_module(feed_mod)
+check("H: fresh +3h tick estimates UTC offset", feed_mod.estimate_server_offset(100000 + 10800 - 1, 100000) == 10800)
+check("H: stale tick cannot estimate offset", feed_mod.estimate_server_offset(100000 + 10800 - 1200, 100000) is None)
+
+# sidecar publishes the latest closed candle with a UTC ts; engine reads + normalizes it
+feed1 = {"ts": 2000, "server_ts": 12800, "server_offset_s": 10800, "open": 80000.0, "high": 80010.0, "low": 79990.0,
          "close": 80005.0, "tick_volume": 120, "updated_at": "2026-09-10 05:01:03"}
 with open(engine.MT5_FEED_FILE, "w") as f:
     json.dump(feed1, f)
