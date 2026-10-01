@@ -69,6 +69,9 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
   `tools/live_readiness.py` (edge/cost/fragility/Monte Carlo/latency stress/gates, seeded, default
   `--spread 0.40`) and `tools/live_path_probe.py` (fake-MT5 probe of engine.py's LIVE path). `TRADING_MODE`
   untouched. Staged path (fix → measure → XM demo → micro-live → scale) in review §7.
+  Also found, documented and queued but **not changed**: `tools/handoff_check.py` compares four moving
+  keys exactly, so the autosync digest reads `STALE` within one bar of any refresh (HANDOFF §7 item 9,
+  `docs/AUTOSYNC.md`).
 - **[2026-09-24] 99-trade forward-test re-cut; documentation only**
   (`docs/REVIEW-2026-09-15.md` §13, `docs/HANDOFF.md`). Autosync snapshot
   `data collection 1301` is through 2026-09-23 20:35 UTC: 99 closed rows,
@@ -247,6 +250,10 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
   09-29 08:35)**, 183 missing M5 slots in 7 runs, two repeated minutes; all 66
   post-gate rows pass current gate conformance. Log coverage is 70/124; never
   blend the archive M1 log with the current M5 log.
+- **Freshness gate:** `tools/handoff_check.py` reads FRESH right after `--update` and `STALE` one M5 bar
+  later (exact-match `log_last_bar_utc`; likewise `wins_losses`/`win_rate_pct` after a single trade), so
+  the digest's `📝 handoff:` line is not yet a usable freshness signal — noted in `docs/AUTOSYNC.md`,
+  fix queued (HANDOFF §7 item 9).
 - **LIVE:** not ready — `tools/live_path_probe.py` fails 8 of 9 checks and the
   Linux engine cannot import `MetaTrader5` (review §6). Keep `TRADING_MODE =
   FORWARD_TEST`.
@@ -272,3 +279,4 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
 - [ ] XM demo run through the real order path: >= 30 closed trades and >= 2 weekends, parity/cost criteria in review §7 Stage C.
 - [ ] Agree micro-live terms in writing (0.01 lot, −$30 hard stop, weekdays only, >= 50 trades) before any real-money order.
 - [ ] Investigate the 09-28/29 885-minute outage cause (`journalctl` on the box) and add a position-aware stale-feed alarm.
+- [ ] `tools/handoff_check.py`: decide the intended tolerances and apply them to `log_last_bar_utc`, `open_trade`, `wins_losses`, `win_rate_pct` (exact-match today, so the digest is `STALE` within one bar of any refresh); add a snapshot-newer-than-data check. Advisory tool — never blocks a deploy.

@@ -88,6 +88,13 @@ the ledger as-is, and a force-push can drop a trading day's log.
   Advisory by design: it never blocks a deploy, never rolls anything back, and
   never triggers the 🚨/⚠️ lines — a doc that is 6 trades behind is not an
   incident, and nagging four times an hour would get the digest muted.
+  **Known quirk (2026-10-01; fix queued in `docs/HANDOFF.md` §7 item 9):** four
+  snapshot keys that move with the data (`log_last_bar_utc`, `open_trade`,
+  `wins_losses`, `win_rate_pct`) are compared exactly, so the line reads `STALE`
+  within about one M5 bar of any refresh — typically `STALE (1 problem(s)):
+  log_last_bar_utc value changed` — instead of `fresh, N advisory drift`. Until
+  then read it as "the data has moved since the last session" and run
+  `python3 tools/handoff_check.py` on the box for the real trade gap.
 - **💰 stats** — straight from `status.json`.
 
 ### Deploy states and what they mean

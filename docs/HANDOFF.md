@@ -431,6 +431,18 @@ locks the direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
+> **Awaiting the user — answer these before any code change starts**
+> (raised in the 2026-10-01 review; delete this block once answered):
+> (a) accept or modify the staged path and its **proposed** thresholds (review
+> §7, Stages A–E);
+> (b) go-ahead for **Stage A** — LIVE order-path fixes, Wine order-executor
+> sidecar, spread guard, kill switches, and `TRADING_MODE` as an env var
+> defaulting to `FORWARD_TEST`. Stage A never enables LIVE;
+> (c) which `DATA_SOURCE` the live box runs (`/opt/bitcoin/.env` is not in the
+> repo and the code default is `TWELVEDATA`, so the feed is *assumed*, not
+> recorded) — it decides whether Stage B's MT5 forward run starts a new era or
+> is already the baseline.
+
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
    **A** fix the order path (findings 1–7, 9 in review §6: close detection by
@@ -484,6 +496,23 @@ locks the direction/ratchet/horizon rules.
    win-rate grounds (day-confounded); the cost control is the live spread guard
    (item 1). Leave TP4 and BE off until the timeframe/cost question is better
    measured.
+9. **Make the handoff freshness gate honour its own tolerances**
+   (`tools/handoff_check.py`; advisory only, so not urgent). Measured on a
+   scratch copy on 2026-10-01: straight after `--update` it reads FRESH; **one new
+   M5 bar later it reads STALE** (`log_last_bar_utc` is compared exactly); and a
+   doc exactly **one closed trade** behind goes STALE via `wins_losses` /
+   `win_rate_pct` even though `closed_trades` is inside the 5-trade tolerance.
+   Four keys that move with the data (`log_last_bar_utc`, `open_trade`,
+   `wins_losses`, `win_rate_pct`) are exact-match, so the "5 trades / 48 h — must
+   not cry wolf" design in the script header and `docs/AUTOSYNC.md` never reaches
+   them, and `BAR_TOLERANCE` (60 rows = 5 h) trips long before `MAX_AGE_HOURS`
+   (48 h) can. Result: the digest's `📝 handoff:` line flips to `STALE` within
+   about five minutes of every refresh, so as a *freshness* signal it carries
+   nothing between sessions (it still catches a missing doc or a `--spread`
+   mismatch). It is a policy choice, not a typo: decide the intended tolerances
+   first, then judge those four keys by the same gaps as their numeric
+   neighbours (and flag a snapshot *newer* than the data); re-run the three
+   scenarios above as the test.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 
@@ -635,7 +664,10 @@ rules apply to every session, from the first commit:
    CSVs. Then run it again without `--update` and require **HANDOFF FRESH**
    before you push. `tools/autosync.sh` reports the same verdict in the Telegram
    digest, so a stale handoff is visible between sessions too — a `STALE` line
-   there means "start the next session with step 1".
+   there means "start the next session with step 1". **Known quirk (§7 item 9):**
+   until it is fixed that line reads `STALE` within about five minutes of any
+   refresh (one new bar is enough), so run `python3 tools/handoff_check.py` for
+   the real gap — `closed_trades` more than 5 behind is the case that matters.
 2. Update **§1** prose (what changed since the last update, the slice table,
    branch/PR state, ops notes).
 3. Update **§4/§5** if params changed or a review produced new numbers —
