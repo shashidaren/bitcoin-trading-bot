@@ -84,8 +84,9 @@ LOG_FILE_PATH = "/opt/bitcoin/forward_test_log.csv"
 TRADES_LOG_PATH = "/opt/bitcoin/trades.csv"
 STATUS_FILE_PATH = "/opt/bitcoin/status.json"
 # DATA_SOURCE=MT5: the Wine sidecar (tools/mt5_feed.py) publishes the latest
-# closed M5 candle here; the engine reads this file instead of importing
-# MetaTrader5 (no Linux wheels exist for that package).
+# closed M5 candle here; its `ts` field is UTC (the sidecar converts XM's
+# broker-server timestamp using a fresh-tick offset). The engine reads this
+# file instead of importing MetaTrader5 (no Linux wheels exist for that package).
 MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", "/opt/bitcoin/mt5_last_candle.json")
 
 # Canonical trades.csv schema (what log_trade() writes). Trade_Type was added
@@ -1191,12 +1192,12 @@ class BitcoinEngine:
 
                 # Stale-feed guard (same as run_forward_test): feed went quiet
                 # (sidecar crashed / terminal logged out) -> alert. The sidecar
-                # is a separate service: systemctl restart mt5feed.
+                # is a separate service: systemctl restart mt5feed-btc.
                 # BTC trades 24/7, so there are no quiet hours to suppress.
                 stale = self.feed_stale_seconds()
                 if stale > STALE_FEED_SECONDS:
                     print(f"\nStale MT5 feed: no closed candles for {stale:.0f}s - "
-                          f"check the mt5feed sidecar (systemctl restart mt5feed)", flush=True)
+                          f"check the mt5feed-btc sidecar (systemctl restart mt5feed-btc)", flush=True)
                     if not is_market_quiet():
                         self.maybe_alert_stale_feed(stale)
                 time.sleep(5)

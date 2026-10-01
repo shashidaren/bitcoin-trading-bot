@@ -171,6 +171,12 @@ statistic. The ledger models no cost; the clean 09-05-on book is +$63.21 gross /
   and the ≥14-day clock (incl. two weekends) starts at the first real `OK` row,
   not at merge. It never touches `engine.py`, `DATA_SOURCE` or the forward-test
   sample.
+- **MT5 feed timestamp fix — implemented in this PR, not yet deployed.**
+  `tools/mt5_feed.py` now learns XM's whole-hour offset from a fresh tick and
+  publishes UTC `ts` values, retaining `server_ts` and `server_offset_s`; smoke
+  Scenario H covers fresh/stale offset estimation. The Bitcoin sidecar must be
+  restarted after deployment, and `DATA_SOURCE=MT5` must wait until the first
+  post-deploy JSON is verified.
 - Feed health at this snapshot: 6532 M5 rows since 09-07 20:20 UTC, **one
   885-minute outage (09-28 17:50 → 09-29 08:35)**, 183 missing M5 slots in seven
   runs, and the two repeated minutes noted above. `status.json` is updated
@@ -238,13 +244,14 @@ re-tested it; §5 below has the 124-trade re-read).
   (≤2 min old). Smoke Scenario H covers the read/normalize/dedup path.
 - **MT5 `time` is broker server time, not UTC** (XM: GMT+2 winter / GMT+3
   summer on the EU rule — next change **Sun 25 Oct 2026**; the Python docs say UTC,
-  the integers are not). `tools/mt5_feed.py` publishes the raw server-time `ts`
-  while `engine.run_mt5_test` seeds its dedup from the **UTC** stamp of the log's
-  last row and compares the two, so each engine restart in `DATA_SOURCE=MT5` mode
-  re-evaluates and re-logs the last bar once (indicators advance twice for it).
-  Read from the code, **not fixed** (it needs an `engine.py` change, i.e. a PR
-  allowed to restart the engine; the default `TWELVEDATA` path is unaffected);
-  Scenario H uses toy timestamps and cannot see it. Check and fix recipe:
+  the integers are not). `tools/mt5_feed.py` now learns the whole-hour offset from
+  a fresh tick and publishes a UTC `ts` (retaining `server_ts` and
+  `server_offset_s` for diagnosis). `engine.run_mt5_test` and its restart dedup
+  therefore compare like with like. The fix is covered by smoke Scenario H for
+  fresh/stale +3 h ticks; the default `TWELVEDATA` path is unaffected. The service
+  must be restarted after this PR deploys; do not switch `DATA_SOURCE=MT5` before
+  verifying the first post-deploy JSON has a UTC `ts`. The logger's independent
+  candle conversion remains the reference for DST behavior; see
   `docs/XM-LOGGER.md` §6.
 - **XM quote + contract-spec logger** (`mt5quotes-btc`, read-only, writes
   `xm_data/`): see §1 Operations and `docs/XM-LOGGER.md` (file/column dictionary,
@@ -550,11 +557,12 @@ locks the direction/ratchet/horizon rules.
    (item 1). Leave TP4 and BE off until the timeframe/cost question is better
    measured.
 
-9. **Fix the MT5-mode server-time dedup** (§3; `docs/XM-LOGGER.md` §6): publish a
-   UTC `ts` from `tools/mt5_feed.py` using the logger's fresh-tick offset
-   estimate and compare like with like in `engine.run_mt5_test`; add a smoke
-   scenario with a non-zero offset (Scenario H cannot see it). Only matters if
-   `DATA_SOURCE=MT5` is chosen — do it in a PR that may restart the engine.
+9. **MT5-mode server-time dedup — fixed in this PR, pending deployment.**
+   `tools/mt5_feed.py` now publishes a UTC `ts` using a fresh-tick offset
+   estimate and retains the raw server timestamp for diagnosis; `engine.py`
+   compares like with like and Scenario H covers fresh/stale +3 h offsets. After
+   merge, restart `mt5feed-btc`, verify the JSON, and only then consider
+   `DATA_SOURCE=MT5`. The default `TWELVEDATA` path is unaffected.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 

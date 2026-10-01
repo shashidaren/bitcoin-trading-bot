@@ -227,18 +227,13 @@ of 1R, and Stage C's all-in limits ($0.60 median, $1.00 for any session/weekend 
   Python clients can attach to the terminal at once.
 - **Demo vs real spreads.** If `account_kind` is `DEMO`, XM demo normally mirrors live pricing
   but that is not guaranteed; Stage C must confirm on the account that will trade.
-- **Latent finding in the existing MT5 *feed* path (not fixed here — `engine.py` is out of
-  scope and a merge touching it restarts the engine).** `tools/mt5_feed.py` publishes the raw
-  **server-time** bar `ts`; `engine.run_mt5_test` seeds its dedup from the **UTC** stamp of the
-  log's last row and then compares the two. With a +2/+3 h server, the freshest candle always
-  looks newer than the log, so **each engine restart in `DATA_SOURCE=MT5` mode re-evaluates and
-  re-logs the last bar once** (indicators advance twice for it). `HANDOFF` §3's "a restart never
-  re-logs the boundary candle" is therefore only true at offset 0, and Scenario H uses toy
-  timestamps so it cannot see it. It does not affect the default `TWELVEDATA` feed. **Fix when
-  the data-source question is decided** (publish a UTC `ts` using this logger's offset
-  estimate), in a PR that is allowed to restart the engine. Confirm the offset first:
-  `jq .ts,.updated_at /opt/bitcoin/mt5_last_candle.json` then `date -u -d @<ts>` — a +2/+3 h
-  difference proves it.
+- **Fixed in the existing MT5 feed path.** `tools/mt5_feed.py` now learns the whole-hour
+  broker-server offset from a fresh tick and publishes a UTC `ts`, retaining `server_ts` and
+  `server_offset_s` for diagnosis. `engine.run_mt5_test` therefore compares UTC with UTC and
+  restart deduplication no longer re-logs the last bar because of XM's +2/+3 h server clock.
+  Smoke Scenario H covers fresh/stale offset estimation. The service must be restarted after
+  deployment, and the first JSON should be checked before switching `DATA_SOURCE=MT5`. The
+  default `TWELVEDATA` feed is unaffected.
 - **Not a trading rule.** Nothing here changes strategy, parameters or the cost used in any
   P/L. The `--spread` the other tools use stays `0.40` until a human changes it on the report's
   evidence.
