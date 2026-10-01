@@ -20,8 +20,8 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-01 02:05 |
-| data_collection | 1937 |
+| as_of_utc | 2026-10-01 03:15 |
+| data_collection | 1944 |
 | closed_trades | 124 |
 | wins_losses | 54W/70L |
 | win_rate_pct | 43.5 |
@@ -30,8 +30,8 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 | live_era_trades | 70 |
 | live_era_net_usd | +32.20 |
 | log_covered_trades | 70 |
-| log_bars | 6518 |
-| log_last_bar_utc | 2026-10-01 02:05 |
+| log_bars | 6532 |
+| log_last_bar_utc | 2026-10-01 03:15 |
 | skip_rows | 117 |
 | open_trade | SELL #124 @ 83602.0 |
 | spread_usd_per_trade | 0.40 |
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (data as of 2026-10-01 02:05 UTC; review re-cut 2026-10-01 at 124 closed trades)
+## 1. Where things stand (data as of 2026-10-01 03:15 UTC; review re-cut 2026-10-01 at 124 closed trades)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -157,16 +157,31 @@ statistic. The ledger models no cost; the clean 09-05-on book is +$63.21 gross /
   auto-detects the engine/dashboard units by scanning systemd for units
   referencing `/opt/bitcoin`, and **it only ever pulls `origin/main`**. Install
   checklist + digest legend: `docs/AUTOSYNC.md`.
-- Feed health at this snapshot: 6518 M5 rows since 09-07 20:20 UTC, **one
+- **XM quote + contract-spec logger (review §7 Stage B-i) — built, not yet running.**
+  `tools/mt5_quotes.py` + `deploy/mt5quotes.service` (install as
+  `mt5quotes-btc`) is a read-only Wine sidecar: XM BTCUSD bid/ask/spread every
+  30 s (+ a 5 s min/max spike envelope), an allow-listed contract-spec snapshot
+  (execution/filling modes, stops level, volume step, swap, demo-vs-real) and
+  shadow XM M5 candles **back-filled from the terminal's history** (so feed parity
+  is measurable on install day, with no era split) into `xm_data/`, which
+  `tools/autosync.sh` commits with the other live data; `tools/xm_quote_report.py`
+  reads it (the digest gains a `📈 xm logger` line and one deduplicated alert if
+  it goes STALE). **Tested only against a fake terminal** (smoke Scenarios K, L):
+  the install + validation checklist in `docs/XM-LOGGER.md` §3 is the real test,
+  and the ≥14-day clock (incl. two weekends) starts at the first real `OK` row,
+  not at merge. It never touches `engine.py`, `DATA_SOURCE` or the forward-test
+  sample.
+- Feed health at this snapshot: 6532 M5 rows since 09-07 20:20 UTC, **one
   885-minute outage (09-28 17:50 → 09-29 08:35)**, 183 missing M5 slots in seven
   runs, and the two repeated minutes noted above. `status.json` is updated
-  through 02:05 UTC. The forward-test simulator has an open SELL #124 at 83602.0
+  through 03:15 UTC. The forward-test simulator has an open SELL #124 at 83602.0
   (entered 01:15 UTC; SL 83735.78, TP 83334.43); the daily-loss counter reads
   0/3. The open trade is not in the closed-trade statistics.
-- **The next milestone is 100 strictly-post-gate trades (66 today) and the
-  staged gates in review §7 — not a retune.** Keep collecting. The timeframe
-  decision, session spread profile, and stronger per-signal skip logging remain
-  open.
+- **The next milestones are (a) the logger's exit — ≥14 complete UTC days incl.
+  2 complete weekends, read with `python3 tools/xm_quote_report.py` — and (b)
+  100 strictly-post-gate trades (66 today) with the staged gates in review §7 —
+  not a retune.** Keep collecting. The timeframe decision, session spread
+  profile, and stronger per-signal skip logging remain open.
 
 ## 2. Bot in one paragraph
 
@@ -212,7 +227,8 @@ re-tested it; §5 below has the 124-trade re-read).
   `tools/mt5_feed.py` runs under the **Wine** Python in the same prefix as the
   terminal and atomically publishes the latest **closed M5 BTCUSD** candle to
   `/opt/bitcoin/mt5_last_candle.json`; the engine reads and dedupes it by
-  candle timestamp (a restart never re-logs the boundary candle).
+  candle timestamp (**but see the server-time caveat below: with XM's +2/+3 h
+  server a restart re-logs the boundary candle once**).
   Install: `sudo cp deploy/mt5feed.service /etc/systemd/system/mt5feed-btc.service
   && sudo systemctl daemon-reload && sudo systemctl enable --now mt5feed-btc`
   — **note the `-btc` suffix; the gold bot owns plain `mt5feed.service`.**
@@ -220,6 +236,23 @@ re-tested it; §5 below has the 124-trade re-read).
   `BTCUSDm` — verified 2026-09-15), `MT5_FEED_TIMEFRAME` (default `M5`),
   `MT5_FEED_POLL`. Ops check: `jq .updated_at /opt/bitcoin/mt5_last_candle.json`
   (≤2 min old). Smoke Scenario H covers the read/normalize/dedup path.
+- **MT5 `time` is broker server time, not UTC** (XM: GMT+2 winter / GMT+3
+  summer on the EU rule — next change **Sun 25 Oct 2026**; the Python docs say UTC,
+  the integers are not). `tools/mt5_feed.py` publishes the raw server-time `ts`
+  while `engine.run_mt5_test` seeds its dedup from the **UTC** stamp of the log's
+  last row and compares the two, so each engine restart in `DATA_SOURCE=MT5` mode
+  re-evaluates and re-logs the last bar once (indicators advance twice for it).
+  Read from the code, **not fixed** (it needs an `engine.py` change, i.e. a PR
+  allowed to restart the engine; the default `TWELVEDATA` path is unaffected);
+  Scenario H uses toy timestamps and cannot see it. Check and fix recipe:
+  `docs/XM-LOGGER.md` §6.
+- **XM quote + contract-spec logger** (`mt5quotes-btc`, read-only, writes
+  `xm_data/`): see §1 Operations and `docs/XM-LOGGER.md` (file/column dictionary,
+  on-box validation checklist, reading guide). Install: `sudo cp
+  deploy/mt5quotes.service /etc/systemd/system/mt5quotes-btc.service && sudo
+  systemctl daemon-reload && sudo systemctl enable --now mt5quotes-btc` — **run
+  the `--spec` and `--once` dry runs first** (checklist §3). Env overrides:
+  `MT5_QUOTES_SYMBOL`, `_DIR`, `_INTERVAL`, `_POLL`, `_BACKFILL_BARS`, `_LABEL`.
 - Deploy note (gold lesson): put `Environment=PYTHONUNBUFFERED=1` in the
   engine's systemd unit or prints are block-buffered out of `journalctl`.
 
@@ -377,7 +410,7 @@ R totals or breakeven rates across the boundary.
 | Question | Current evidence | What would settle it |
 |---|---|---|
 | **Live readiness** | edge t = +1.22 at n = 66; best 5 trades = 98% of net; break-even spread $0.87; order path fails 8/9 probes; no Linux MT5 | Stages A–E in review 2026-10-01 §7 (fix → measure → XM demo → micro-live → scale) |
-| Bar timeframe / execution cost | M5 cost ≈ 24.0% of median post-gate 1R; $0.40 is one Asian-session sample | spread logger across sessions + a multi-regime M5/M15/H1 backtest on older BTC history |
+| Bar timeframe / execution cost | M5 cost ≈ 24.0% of median post-gate 1R; $0.40 is one Asian-session sample | the XM quote logger (`docs/XM-LOGGER.md`; **built, awaiting install** — ≥14 days incl. 2 weekends, read with `tools/xm_quote_report.py`) + a multi-regime M5/M15/H1 backtest on older BTC history |
 | BUY vs SELL | post-gate BUY +$31.36 / SELL −$0.32 net; raw census BUY −$3.31 / SELL −$49.25 | per-side data from the demo stage; do not use the unfiltered census alone |
 | Cooldown and blackouts | cooldown +$18.84 on 11 scorable; blackout −$4.38 on 21; 43 of 117 skips unscorable | more log coverage before changing either gate |
 | TP / BE | TP 5–6× beats live in both replay views (+$30.00/+$36.20 vs +$15.43; census +$25.21/+$36.27 vs +$16.17); BE views disagree | prospective collection and a multi-regime re-cut |
@@ -393,9 +426,10 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census  # 3. exit-rule replay (va
 python3 tools/analyze_losers.py --spread 0.40      # 4. winner/loser feature drift + stop grid
 python3 tools/validate_gates.py                    # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40      # 6. what did the blocked signals actually do?
-python3 tools/smoke_test.py                        # 7. engine regression tests (scenarios A–J)
+python3 tools/smoke_test.py                        # 7. engine + sidecar regression tests (scenarios A–L)
 python3 tools/live_readiness.py --spread 0.40      # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                   # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
+python3 tools/xm_quote_report.py                   # 10. XM logger: spread by session, cost on real trades, feed parity (needs xm_data/)
 ```
 
 **`--spread 0.40` is the measured XM BTCUSD round trip at 0.01 lot** (§9). The
@@ -412,10 +446,10 @@ Expected first lines at the snapshot (a mismatch means the data moved — refres
 the block, then re-read the prose):
 
 ```
-win_rate_report - 124 trades, 6518 M5 bars (2026-09-07 20:20:00 -> 2026-10-01 02:05:00), spread $0.40/trade
-pathwalk_sims  - 124 trades, 6518 M5 bars (...), horizon 240 min, spread $0.40/trade
-analyze_losers - 124 trades (122 from 09-05), 70 log-covered, 6518 M5 bars
-live_readiness - 66 post-gate trades (entries >= 2026-09-10) of 124 total, 6518 M5 bars, spread $0.40/trade, seed 2026
+win_rate_report - 124 trades, 6532 M5 bars (2026-09-07 20:20:00 -> 2026-10-01 03:15:00), spread $0.40/trade
+pathwalk_sims  - 124 trades, 6532 M5 bars (...), horizon 240 min, spread $0.40/trade
+analyze_losers - 124 trades (122 from 09-05), 70 log-covered, 6532 M5 bars
+live_readiness - 66 post-gate trades (entries >= 2026-09-10) of 124 total, 6532 M5 bars, spread $0.40/trade, seed 2026
 == result: 0 fail, 64 warn ==
 ```
 
@@ -431,30 +465,25 @@ locks the direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
-> **Where the 2026-10-01 review left the decisions** (delete this block once
-> they are settled):
-> - The user asked for the recommended order and said they would follow it —
->   confirm it before any code starts. The staged-path **thresholds** in review §7
->   remain proposals until the user says otherwise.
-> - **Recommended order.** (0) Merge the review PR — docs and tools only, no
->   engine restart. (1) **Start the 14-day clock first** with a read-only XM
->   *quote + contract-spec logger* (Stage B-i): a Wine sidecar modelled on
->   `tools/mt5_feed.py` that logs BTCUSD bid/ask/spread every 10–60 s, takes one
->   `symbol_info()` snapshot (execution mode, filling modes, stops level, volume
->   step, swap, account type — never the login) and records shadow XM M5 candles,
->   so feed parity can be measured offline *without* switching `DATA_SOURCE` or
->   splitting the forward-test sample. Why first: it is read-only and touches no
->   `engine.py`; it has the longest lead time (≥14 days incl. two weekends); it
->   measures the assumption most able to kill the edge (break-even round trip
->   $0.87 vs $0.40 assumed); and the spec snapshot turns Stage A's unverified XM
->   facts (filling mode, stops level) into data. (2) **Stage A in parallel, in its
->   own session/PR** — it edits `engine.py`, so merging it restarts the engine.
->   (3) No real-money order before Stage A's probe exits 0 and Stage B has ≥14
->   days.
+> **Status of the recommended order (updated by the logger session, 2026-10-01).**
+> The user accepted the order in the review PR and started with step 1:
+> - **(1) Stage B-i logger — built, awaiting install.** Draft PR from this session's
+>   branch until the user signs off; **nothing on the box changes until it merges
+>   and the sidecar is installed** (`docs/XM-LOGGER.md` §3). The PR touches only
+>   `tools/`, `deploy/` and `docs/`, so autosync runs the smoke gate but does
+>   **not** restart the engine.
+> - **(2) Stage A — next, in its own session/PR.** It edits `engine.py`, so merging
+>   it restarts the engine. Fold the MT5-mode server-time dedup fix (item 9) into
+>   whichever PR is allowed to restart the engine.
+> - **(3)** No real-money order before Stage A's probe exits 0 and Stage B has ≥14
+>   days. The staged-path **thresholds** in review §7 remain proposals until the
+>   user says otherwise.
 > - **Still needed from the user (nothing in the repo records it):** which
 >   `DATA_SOURCE` the box runs and whether the Wine MT5 terminal and the
->   `mt5feed-btc` sidecar are installed there —
+>   `mt5feed-btc` sidecar are installed —
 >   `grep DATA_SOURCE /opt/bitcoin/.env` and `systemctl list-units | grep -i mt5`.
+>   The logger's install checklist needs both answers. (Delete this block once the
+>   logger is validated on the box.)
 
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
@@ -473,13 +502,18 @@ locks the direction/ratchet/horizon rules.
    Earliest sensible micro-live: ~5–6 weeks. Make `TRADING_MODE` an env var
    (default `FORWARD_TEST`) so a demo/live run is configuration, not a code edit
    autosync would overwrite.
-2. **Stage B — measure, zero risk, start now:** (i) spread logger in the Wine
-   sidecar — XM bid/ask every minute for ≥14 days incl. two weekends and the
-   blackout windows, then a session-aware `--spread` and weekend rule;
-   (ii) test signal parity with the Twelve Data era — either run the forward
-   test on `DATA_SOURCE=MT5` for ≥14 days (a new era boundary — record it in §9)
-   or, preferably, keep the current feed and log shadow XM M5 candles beside it,
-   then compare candles / ATR / signals offline (no era split);
+2. **Stage B — measure, zero risk:** (i) **spread logger — built (this PR),
+   awaiting install**; exit = `xm_quote_report.py` prints `Stage B-i exit: MET`
+   (≥14 complete UTC days incl. 2 complete weekends, blackout windows covered);
+   then decide the session-aware `--spread` and the weekend rule **from its
+   report** (`docs/XM-LOGGER.md` §4 reading guide), not from the proposals;
+   (ii) test signal parity with the Twelve Data era — the logger already records
+   shadow XM M5 candles beside the current feed (no era split) and back-fills
+   them, so **candle-level parity (match rate, wick-gate agreement, time-shift
+   scan) is readable on install day**; **signal-level parity — feed
+   `engine.evaluate_candle` the shadow candles, as `smoke_test.py` does with
+   synthetic ones — is still to build**; the alternative (forward test on
+   `DATA_SOURCE=MT5` for ≥14 days) would be a new era boundary — record it in §9;
    (iii) a multi-regime offline backtest of the frozen rules on public BTC
    history (M5 vs M15/H1, %-based costs — no network in the last session's
    sandbox); (iv) log spread-to-1R, weekend flag and side on every
@@ -490,10 +524,14 @@ locks the direction/ratchet/horizon rules.
    breakeven rate versus 43.9% observed (Wilson 32.6–55.9); the break-even
    round trip is $0.87. That interval is not proof of an edge. Item 2(iii) is
    the way to settle it; do not tune M5 first.
-4. **Confirm swap/commission and the full contract spec on the XM terminal**
-   (Specification tab: swap, commission, stops level, execution mode, filling
-   modes, weekend maintenance). Sources disagree on crypto swap; the $0.40 model
-   assumes spread-only.
+4. **Confirm swap/commission and the full contract spec on the XM terminal.**
+   Partly automated now: the logger's `symbol_spec.json` records execution and
+   filling modes, stops/freeze level, volume step, swap and demo-vs-real once the
+   sidecar runs. Still manual: **commission** (not in `symbol_info()`; Stage C
+   deals) and realised swap/slippage. An XM FAQ reports a **Saturday 10:05–10:35
+   server-time crypto maintenance window** (unverified — the report lists runs of
+   stale quotes). Sources disagree on crypto swap; the $0.40 model assumes
+   spread-only.
 5. **Keep collecting rather than retuning.** The next milestone is 100 strictly
    post-gate trades (66 today, ~22/week): re-run `python3 tools/live_readiness.py
    --spread 0.40` and read the gates. No exit or entry parameter change is
@@ -511,6 +549,12 @@ locks the direction/ratchet/horizon rules.
    win-rate grounds (day-confounded); the cost control is the live spread guard
    (item 1). Leave TP4 and BE off until the timeframe/cost question is better
    measured.
+
+9. **Fix the MT5-mode server-time dedup** (§3; `docs/XM-LOGGER.md` §6): publish a
+   UTC `ts` from `tools/mt5_feed.py` using the logger's fresh-tick offset
+   estimate and compare like with like in `engine.run_mt5_test`; add a smoke
+   scenario with a non-zero offset (Scenario H cannot see it). Only matters if
+   `DATA_SOURCE=MT5` is chosen — do it in a PR that may restart the engine.
 
 ### Explicitly NOT queued (with the evidence that closed them)
 
@@ -538,7 +582,7 @@ locks the direction/ratchet/horizon rules.
 ## 8. How to verify code changes (always)
 
 ```bash
-python3 tools/smoke_test.py                      # must print "SMOKE TEST PASSED" (A–I)
+python3 tools/smoke_test.py                      # must print "SMOKE TEST PASSED" (A–L)
 python3 -m py_compile engine.py trade_filter.py dashboard.py tools/*.py
 python3 tools/check_data.py                      # expect "0 fail" (warnings are normal)
 python3 tools/handoff_check.py                   # expect "HANDOFF FRESH"; --update the block if not
@@ -576,8 +620,8 @@ is where stale numbers actually hide.
   self-heals drift on start and before every append (keeps a
   `.bak-pre-migration` backup) and `trade_filter.load_recent_trades()` has a
   loud drift tripwire.
-- **The price log starts 2026-09-07 20:20 UTC** (6518 M5 rows through
-  2026-10-01 02:05 UTC; 183 missing slots in 7 runs, **dominated by one
+- **The price log starts 2026-09-07 20:20 UTC** (6532 M5 rows through
+  2026-10-01 03:15 UTC; 183 missing slots in 7 runs, **dominated by one
   885-minute outage, 09-28 17:50 → 09-29 08:35** — the only gap >15 minutes, cause
   unrecorded). **Only 70 of 124 closed trades are log-covered**; 54 predate the
   log, limiting any log-joined replay to the covered tail. Two minutes are
@@ -616,7 +660,14 @@ is where stale numbers actually hide.
   assumed flat cost. `phantom_trades.py` uses the same scaling and its outcomes
   are upper-bound counterfactuals, not fills.
 - **Symbol / contract:** `BTCUSD` exists on XM MT5 with contract 1.0 / min lot
-  0.01; `BTCUSDm` does not exist (`SYMBOL_MT5=BTCUSD`).
+  0.01; `BTCUSDm` does not exist (`SYMBOL_MT5=BTCUSD`). The logger's
+  `symbol_spec.json` re-checks both (and `0.01 lot × $100 = $1.00`) on the box.
+- **Never compare an MT5 `time` to a UTC stamp.** MT5 bar/tick times are broker
+  *server* time (XM: GMT+2/+3). `xm_data/` carries both: `bar_close_utc` (the
+  `forward_test_log.csv` convention, UTC) and the raw `time_srv` + `offset_s`; a
+  server DST change (next: Sun 25 Oct 2026) can leave bars stamped one hour off
+  — `xm_quote_report.py`'s time-shift scan flags the day. `xm_data/` rows are
+  live-collected data: never hand-edit them.
 - `status.json` equity ($260.19) is the **engine ledger**, not the raw sum of
   Profit (−$331.63 gross, −$131.63 from $200 before spread costs). `check_data.py`
   reports the +$391.82 drift by design; see the outlier/reset notes above.
@@ -696,8 +747,10 @@ blocked signals (+reason) · `status.json` live state (funnel counters are
 since-restart) · `tools/replay_lib.py` shared bar-walk core + era constants ·
 `tools/handoff_check.py` freshness gate for this file · `tools/live_readiness.py`
 edge/cost/risk evidence + LIVE go/no-go gates · `tools/live_path_probe.py` LIVE
-order-path probe (fake MT5) · `tools/` analysis + tests · `deploy/mt5feed.service`
-sidecar unit · `docs/PORT-2026-09-10.md` what came from gold and why ·
+order-path probe (fake MT5) · `tools/mt5_quotes.py` + `tools/xm_quote_report.py` XM
+quote/spec logger sidecar and its reader (`xm_data/` = its output, `docs/XM-LOGGER.md`
+= its runbook) · `tools/` analysis + tests · `deploy/mt5feed.service` +
+`deploy/mt5quotes.service` sidecar units · `docs/PORT-2026-09-10.md` what came from gold and why ·
 `docs/REVIEW-2026-10-01.md` **live-readiness review (current)** ·
 `docs/REVIEW-2026-09-15.md` first data review (**§13 = the 99-trade re-cut; §12
 is historical**) · `docs/AUTOSYNC.md` the unattended deploy loop +
@@ -712,7 +765,8 @@ executive summary.
 3. `archive/PROJECT_LOG.md` — changelog + current strategy state
 4. `docs/PORT-2026-09-10.md` — what the gold port changed and why
 5. `docs/REVIEW-2026-09-15.md` §13 (99-trade re-cut) and §1–§11 — the full first review (73 trades)
-6. `git log --oneline` — what changed recently
+6. `docs/XM-LOGGER.md` — only when touching the XM/MT5 side (logger, spread, parity)
+7. `git log --oneline` — what changed recently
 
 Then run `python3 tools/handoff_check.py` and `python3 tools/check_data.py`
 before drawing any conclusion from the CSVs.

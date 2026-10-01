@@ -20,15 +20,19 @@ deliberately adapted for BTC).
 | `forward_test_log.csv` | M5 candle log with all indicator values per bar. |
 | `skipped_trades.csv` | Every full signal the risk layer blocked, with reason. |
 | `status.json` | Live engine state (equity, funnel counters, daily losses). |
+| `xm_data/` | Output of the read-only XM quote logger (`tools/mt5_quotes.py`): `quotes-YYYY-MM-DD.csv` (bid/ask/spread every 30 s), `candles_m5.csv` (shadow XM M5 candles), `symbol_spec.json` (contract spec). Appears once the sidecar is installed; committed by autosync like the other live data. |
 | `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
 | `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
 | `docs/REVIEW-2026-10-01.md` | **Live-readiness review (124 trades)** — is the edge real, how thin is the cost margin, what is wrong in the LIVE order path, and the staged path (fix → measure → XM demo → micro-live) to a capped pilot. Verdict: not ready for real money. |
 | `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). §12 is the 2026-09-16 re-cut at 78 trades and **§13 the 2026-09-24 re-cut at 99 trades**; the body is the provenance behind them. |
 | `docs/AUTOSYNC.md` | The unattended sync/deploy loop: cron assumptions, branch rule, Telegram digest legend, what a deploy does to a running trade. |
+| `docs/XM-LOGGER.md` | Runbook for the XM quote + contract-spec logger: column dictionary, the on-box install/validation checklist, how to read its report, design traps (broker server time ≠ UTC, DST, privacy). |
 | `tools/handoff_check.py` | Freshness gate for `docs/HANDOFF.md`: recomputes its snapshot block from the live CSVs, says `HANDOFF FRESH`/`STALE`, and rewrites the block with `--update`. |
 | `tools/live_readiness.py` | Evidence + go/no-go gates for LIVE: edge significance, cost margin, fragility, Monte Carlo risk, entry-latency stress, feed health (defaults to `--spread 0.40`). |
 | `tools/live_path_probe.py` | Offline probe of `engine.py`'s LIVE order path against a fake MT5 (no terminal, network or Telegram); exits 1 until the findings in the live-readiness review are fixed. |
+| `tools/mt5_quotes.py` | **Read-only** Wine sidecar (never touches orders or `engine.py`): logs XM BTCUSD bid/ask/spread, a contract-spec snapshot and shadow XM M5 candles into `xm_data/` so the cost assumption ($0.40 vs $0.87 break-even) and feed parity are measured. Unit: `deploy/mt5quotes.service`. |
+| `tools/xm_quote_report.py` | Reads `xm_data/`: logger progress vs the ≥14-day/2-weekend exit, spread by session/weekend/blackout/hour, the cost on the ledger's real trades, candle parity vs `forward_test_log.csv`, the contract spec. `--quiet` = one advisory line (autosync digest). |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
 
 ## 🧰 Tools (run in this order on every new data drop)
@@ -41,9 +45,10 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census # 3. exit-rule replay (pri
 python3 tools/analyze_losers.py --spread 0.40         # 4. winner/loser feature drift, MAE/MFE, stop grid
 python3 tools/validate_gates.py                       # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40         # 6. what did the blocked (skipped) signals actually do?
-python3 tools/smoke_test.py                           # 7. engine regression tests (scenarios A–J)
+python3 tools/smoke_test.py                           # 7. engine + sidecar regression tests (scenarios A–L)
 python3 tools/live_readiness.py --spread 0.40         # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                      # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
+python3 tools/xm_quote_report.py                      # 10. XM logger: spread by session, real-trade cost, feed parity (needs xm_data/)
 ```
 
 `--spread 0.40` is the measured XM BTCUSD round trip at `LOT_SIZE = 0.01`; the tools default to
@@ -87,6 +92,13 @@ a service: `sudo cp deploy/mt5feed.service /etc/systemd/system/mt5feed-btc.servi
 && sudo systemctl daemon-reload && sudo systemctl enable --now mt5feed-btc`
 (note the `-btc` suffix — the gold bot owns `mt5feed.service`).
 Trading stays simulated either way.
+
+**XM quote logger (measurement only).** Independently of `DATA_SOURCE`, a second read-only
+sidecar `tools/mt5_quotes.py` (`deploy/mt5quotes.service`, installed as `mt5quotes-btc`) records
+what XM actually quotes and offers — spread every 30 s, the contract spec, and shadow M5 candles —
+into `xm_data/`, so the flat $0.40 cost assumption and feed parity can be measured without
+switching the forward-test feed. Install, validation checklist and how to read the report:
+`docs/XM-LOGGER.md`. Note that MT5 timestamps are broker **server** time (XM: GMT+2/+3), not UTC.
 
 ## 🆕 Starting a new session / handing off to a new agent
 

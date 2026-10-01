@@ -54,6 +54,33 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-10-01] XM quote + contract-spec logger (review §7 Stage B-i) — new read-only Wine sidecar; no engine,
+  strategy, parameter or `DATA_SOURCE` change** (`docs/XM-LOGGER.md`, `tools/mt5_quotes.py`,
+  `tools/xm_quote_report.py`, `deploy/mt5quotes.service`). Built because the whole edge rests on an
+  unmeasured cost: break-even round trip $0.87 vs $0.40 assumed, and the $0.40 is one Asian-session sample.
+  The sidecar logs XM BTCUSD bid/ask/spread every 30 s (+ a 5 s min/max spike envelope), snapshots the
+  allow-listed contract spec (execution/filling modes, stops level, volume step, swap, demo-vs-real; changes
+  are history-logged) and records shadow XM M5 candles **back-filled from the terminal's own history**
+  (so feed parity is measurable on install day, with no era split) into `xm_data/`, which `tools/autosync.sh`
+  now commits and whose liveness rides in the digest (`📈 xm logger`; one deduplicated alert if STALE).
+  `tools/xm_quote_report.py` reads it: progress vs the ≥14-day / 2-weekend exit, spread by
+  session/weekend/blackout/hour against the $87 break-even and the $60 cap proposal, the measured cost at the
+  ledger's real entry/exit times, candle parity with a ±3 h time-shift scan, the spec. **Not yet validated on
+  the real terminal** (no Wine/MT5 in the build sandbox): smoke Scenarios K (70 checks, fake terminal + fake
+  clock, mutation-checked) and L (36 checks, report) lock the behaviour; `docs/XM-LOGGER.md` §3 is the on-box
+  validation checklist and the 14-day clock starts at the first real `OK` row. Traps found and designed
+  around: MT5 `time` is **broker server time** (XM GMT+2/+3, EU DST rule, next change **Sun 25 Oct 2026**), so
+  the offset is learned only from *fresh* ticks (a tick exactly N hours old looks like a fresh tick on a
+  server N hours behind) and bars are converted with the current-or-previous offset inside a plausible
+  window (otherwise the bar straddling a DST change is dated an hour into the future and an hour of candles
+  is dropped); `account_info()`/`terminal_info()` contain the login, balance, server and Windows user paths
+  and the repo is public, so only explicit allow-lists are copied (a planted fake secret must never reach a
+  file); the Wine Python writes CRLF in text mode. **Finding, not fixed (needs an `engine.py` change):**
+  `mt5_feed.py` publishes the raw server-time `ts` while `engine.run_mt5_test` seeds its dedup from the
+  UTC log stamp, so with XM's +2/+3 h server each restart in `DATA_SOURCE=MT5` mode re-logs the last bar once
+  (the default Twelve Data path is unaffected); queued with Stage A. Verified with a throwaway bare remote:
+  the data commit includes `xm_data/` (no `.tmp` junk), a conflicting `xm_data` edit resolves server-wins
+  while upstream code lands, the STALE alert fires once, dedupes and re-arms.
 - **[2026-10-01] Live-readiness review; documentation + two read-only tools — no engine, strategy or parameter change**
   (`docs/REVIEW-2026-10-01.md`, `docs/HANDOFF.md`). Autosync snapshot `data collection 1937` is through
   2026-10-01 02:05 UTC: 124 closed rows (54W/70L), 70 post-port / 66 strictly post-gate, open simulated
@@ -268,7 +295,7 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
 - [x] **Measure real XM BTCUSD spread**: $40.00/BTC ($0.40/trade) measured 2026-09-15 live MT5 terminal.
 - [x] Confirm `SYMBOL_MT5` (`BTCUSD` vs `BTCUSDm`) and contract size: confirmed `BTCUSD` contract 1.0, min lot 0.01.
 - [ ] **Bar timeframe decision (M5 vs M15 vs H1 vs H4)** — primary blocker before tuning parameters.
-- [ ] Confirm spread profile across London and NY sessions (superseded by the spread-logger item below, which also covers weekends).
+- [ ] Confirm spread profile across London and NY sessions (superseded by the logger items below, which also cover weekends).
 - [ ] Log the wick/near-EMA feature per signal (monitor-only) and re-read on a larger post-gate sample.
 - [ ] Validate regime-gate + SELL-mirror parameters against BTC data (currently inherited from gold's review, unproven on BTC).
 - [ ] Revisit `WICK_RATIO_TARGET` 0.15 (loose vs gold's 0.38) once the funnel counters show signal quality.
@@ -277,8 +304,10 @@ SELL #124. These are forward-test simulation results, not realized brokerage P/L
 - [ ] **LIVE order-path fixes** (review §6): close detection by `position=`, restart reconciliation via `positions_get`/`MAGIC_NUMBER`, filling mode from `symbol_info()`, `None`-result handling, one position per magic; promote `tools/live_path_probe.py` checks into smoke scenarios. Exit: the probe exits 0.
 - [ ] Live spread guard before order dispatch (share of 1R + hard $ cap, e.g. <= $60/BTC) and kill switches (equity floor −$30 at 0.01 lot, `trade_allowed`/demo-vs-real check, manual halt file, position-aware dead-man alarm).
 - [ ] Wine order-executor sidecar (the Linux engine cannot import `MetaTrader5`); make `TRADING_MODE` an env var (default `FORWARD_TEST`).
-- [ ] **Recommended first step:** read-only XM quote + contract-spec logger as a Wine sidecar (bid/ask/spread every 10–60 s, a one-time `symbol_info()` snapshot, shadow XM M5 candles for feed parity; >= 14 days incl. two weekends) -> session-aware `--spread` and the real filling mode / stops level for Stage A; confirm swap/commission on the Specification tab.
-- [ ] Signal parity with the Twelve Data era: forward test on `DATA_SOURCE=MT5` for >= 14 days (new era boundary) or, preferably, shadow XM M5 candles beside the current feed (no era split).
+- [x] **Built (this PR):** read-only XM quote + contract-spec logger as a Wine sidecar (`tools/mt5_quotes.py`, `deploy/mt5quotes.service`, `docs/XM-LOGGER.md`) with shadow XM M5 candles, `tools/xm_quote_report.py` and the autosync wiring.
+- [ ] **Install and validate the logger on the box** (`docs/XM-LOGGER.md` §3: `--spec`, `--once`, install `mt5quotes-btc`; first confirm which `DATA_SOURCE` the box runs and that the Wine terminal + `mt5feed-btc` exist). The ≥14-day clock (incl. two weekends) starts at the first real `OK` row; exit = `python3 tools/xm_quote_report.py` prints `Stage B-i exit: MET` -> session-aware `--spread`, weekend rule, and the real filling mode / stops level for Stage A.
+- [ ] Signal parity with the Twelve Data era: the logger now records (and back-fills) shadow XM M5 candles beside the current feed (no era split), so **candle-level** parity is readable on install day; still to build: **signal-level** parity (feed `engine.evaluate_candle` the shadow candles). The alternative — forward test on `DATA_SOURCE=MT5` for >= 14 days — is a new era boundary.
+- [ ] **Fix the MT5-mode server-time dedup** (`engine.run_mt5_test` compares a server-time candle `ts` with a UTC log stamp, so a restart re-logs the last bar once; `docs/XM-LOGGER.md` §6). Only matters if `DATA_SOURCE=MT5`; do it in a PR that may restart the engine (Stage A or the data-source decision) and add a smoke scenario with a non-zero offset.
 - [ ] Multi-regime offline backtest of the frozen rules on public BTC history (M5 vs M15/H1, %-based costs).
 - [ ] XM demo run through the real order path: >= 30 closed trades and >= 2 weekends, parity/cost criteria in review §7 Stage C.
 - [ ] Agree micro-live terms in writing (0.01 lot, −$30 hard stop, weekdays only, >= 50 trades) before any real-money order.
