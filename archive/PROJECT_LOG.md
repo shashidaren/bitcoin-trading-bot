@@ -54,6 +54,22 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-10-05] BUY #125 exit-state verification — documentation only; no production change.**
+  Refreshed `docs/HANDOFF.md` and `docs/REVIEW-2026-10-05.md` from the current
+  checkout (7,668 M5 rows through 03:00:03 UTC; status snapshot 03:02:16) and
+  operator-pasted host output. The host reports `DATA_SOURCE=MT5`, an active
+  `bitcoin-engine.service` with a FORWARD_TEST (MT5 feed) startup, and a restart
+  that restored #125 as open after loading 125 closed rows. The 10-01 07:20:11
+  M5 OHLC crossed the saved SL, while the supplied journal excerpt has no close
+  event. Checked-in `run_mt5_test()` lacks a position/bar exit check, making MT5
+  a plausible code-level explanation **if** it was active on the deployed
+  revision at the time; the Oct 1 source and deployed SHA remain unknown. Current
+  MT5 mode is not evidence of a broker position, and OHLC is not an exact fill.
+  The review includes read-only host checks for the deployed SHA, direct
+  `mt5feed-btc.service` state, safe candle timestamps and Oct 1 startup/feed-mode
+  journal lines. Do not edit the status/ledger, deploy a fix or enable LIVE while
+  those checks are pending. This documentation-only change is in open draft PR #13;
+  do not merge until the host output is reviewed and the user approves.
 - **[2026-10-01] XM quote + contract-spec logger (review §7 Stage B-i) — new read-only Wine sidecar; no engine,
   strategy, parameter or `DATA_SOURCE` change** (`docs/XM-LOGGER.md`, `tools/mt5_quotes.py`,
   `tools/xm_quote_report.py`, `deploy/mt5quotes.service`). Built because the whole edge rests on an
@@ -244,25 +260,32 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 
 ## Forward Test Observations
 
-Current snapshot/review: data through **2026-10-05 02:35 UTC**; see
-`docs/HANDOFF.md` and the 2026-10-05 data/exit-state delta
-`docs/REVIEW-2026-10-05.md`. `docs/REVIEW-2026-10-01.md` remains the full
-live-readiness review and staged LIVE path. These are paper-forward-test results,
-not realized brokerage P/L. The checkout does not contain `/opt/bitcoin/.env`,
-production systemd state or journals.
+Current local snapshot/review: CSV data through **2026-10-05 03:00:03 UTC**
+(7,668 M5 rows), with `status.json` updated at 03:02:16; see `docs/HANDOFF.md`
+and the 2026-10-05 data/exit-state delta `docs/REVIEW-2026-10-05.md`.
+`docs/REVIEW-2026-10-01.md` remains the full live-readiness review and staged
+LIVE path. These are paper-forward-test results, not realized brokerage P/L.
+The checkout does not contain `/opt/bitcoin/.env`, systemd state or journals;
+the operator has pasted a limited host snapshot (current MT5 forward-test mode
+and restart state), which cannot establish the Oct 1 feed or deployed revision.
 
-- **Important operations finding — open paper trade appears stuck.** `status.json`
-  marks BUY #125 active (entry 2026-10-01 07:10:10 at $84,177.15; SL $84,008.74;
-  TP $84,513.98) through 2026-10-05 02:35:03. The 10-01 07:20:11 M5 row has
-  low $83,838.25 and close $83,841.65, below the stop; it is the first recorded
-  barrier crossing. There is no close row for #125. The checked-in `run_mt5_test()`
-  evaluates bars without calling `check_position()`, so this is a direct defect
-  if the deployed `.env` uses `DATA_SOURCE=MT5`; the production feed mode and
-  revision are unverified. The Twelve Data callback does check each tick, but
-  silently suppresses exceptions. Confirm the host config/journal, then fix and
-  regression-test the exit path and reconcile from ordered history. Do not
-  manually edit the ledger or status to guess a fill. Keep `TRADING_MODE` in
-  `FORWARD_TEST`; this is not evidence of a live broker position.
+- **Important operations finding — simulated BUY #125 remains open after a logged
+  stop breach.** Local `status.json` at 2026-10-05 03:02:16 and the operator's
+  host snapshot both show BUY #125 active (entry 2026-10-01 07:10:10 at
+  $84,177.15; SL $84,008.74; TP $84,513.98), with no close row. The 07:15 M5
+  low ($84,035.75) stayed above the stop; the 07:20:11 candle low was $83,838.25
+  and close $83,841.65, below the stop. This establishes a recorded OHLC breach,
+  not an executable fill. Host output sampled `DATA_SOURCE=MT5` on Oct 5 and
+  reported an active engine started in FORWARD_TEST (MT5 feed); after restart it
+  loaded 125 closed rows and restored #125 open. That is simulator state, not a
+  broker position, and does not prove MT5 was the feed on Oct 1. The checked-in
+  `run_mt5_test()` evaluates candles without `check_position()`, a plausible
+  explanation only if the deployed revision and historical feed match; the
+  deployed Git SHA and source-switch date remain unknown. The Twelve Data path
+  checks ticks but silently catches callback exceptions. The supplied journal
+  excerpt has no close/SL event at the breach. Run the read-only checks in
+  `docs/REVIEW-2026-10-05.md`; do not guess a fill or edit status/ledger. Keep
+  `TRADING_MODE=FORWARD_TEST`; no broker position is evidenced.
 - **Current ledger:** 125 closed rows, 54W/71L (43.2%). Raw Profit totals
   −$333.01 gross, or −$133.01 from the $200 start before spread costs; engine
   equity $258.81, a +$391.82 history/reset gap. Exclude the two 09-03 sizing
@@ -281,11 +304,12 @@ production systemd state or journals.
   $391.82; do not use the engine balance as cumulative true P/L. Current
   geometry slice from 09-06 17:49 is n=88, 39W/49L, +$60.61 gross / +$25.41
   net; never pool R totals or breakeven WR across geometry eras.
-- **Integrity:** `check_data.py` reports 0 fail / 64 warnings. The M5 log has
-  7,663 rows through 10-05 02:35:03, 197 missing slots in 14 runs, including
-  gaps of 885 min (09-28/29), 35 min (10-03) and 20 min (10-04); two repeated
-  minutes remain. 71/125 closed rows are log-covered and replay agrees 71/71 on
-  those closed outcomes. This replay does not resolve the active #125 anomaly.
+- **Integrity:** `check_data.py` reports 0 fail / 64 warnings. The local M5
+  log has 7,668 rows through 10-05 03:00:03, 197 missing slots in 14 runs,
+  including gaps of 885 min (09-28/29), 35 min (10-03) and 20 min (10-04); two
+  repeated minutes remain. Status updated at 03:02:16, 2 min 13 s after the last
+  bar; status/ledger counts agree. 71/125 closed rows are log-covered and replay
+  agrees 71/71 on those closed outcomes. This replay does not resolve #125.
 - **Risk gates:** all 117 skip rows remain; daily-halt phantoms are 3W/36L/3T,
   −$65.29 net; blackouts −$4.38 net on 21 scorable; cooldown +$18.84 on 11
   scorable; 43 skips remain unscorable. Do not relax gates on these small
@@ -299,9 +323,9 @@ production systemd state or journals.
   `tools/xm_quote_report.py --quiet` says “not collecting yet”. The ≥14-day
   logger clock has not started here.
 - **Freshness gate:** `tools/handoff_check.py` uses ≤5 closed trades / ≤48 h
-  tolerances. Refreshed the snapshot on 2026-10-05; it should report
-  `HANDOFF FRESH` after the prose update. Smoke Scenario J continues to lock the
-  tolerance behavior.
+  tolerances. The snapshot was refreshed to 2026-10-05 03:02 / latest bar 03:00;
+  it reports `HANDOFF FRESH` with 0 advisory drift after the prose update. Smoke
+  Scenario J continues to lock the tolerance behavior.
 
 ## Future Tweaks / To-Do
 - [x] First data review (73 trades) -> `docs/REVIEW-2026-09-15.md`.
@@ -315,7 +339,7 @@ production systemd state or journals.
 - [ ] Revisit `WICK_RATIO_TARGET` 0.15 (loose vs gold's 0.38) once the funnel counters show signal quality.
 - [ ] Multi-Timeframe (15m/1h) higher-timeframe trend integration.
 - [x] Live-readiness review at 124 closed rows -> `docs/REVIEW-2026-10-01.md` (verdict: not ready; staged path in §7).
-- [x] 2026-10-05 data/exit-state recheck at 125 closed rows -> `docs/REVIEW-2026-10-05.md`; documented the active #125 stop breach and unverified MT5 exit path (no production host access).
+- [x] 2026-10-05 data/exit-state recheck at 125 closed rows -> `docs/REVIEW-2026-10-05.md`; documented the stop breach, operator-pasted Oct 5 MT5 simulator/restart evidence, and unverified Oct 1 feed/revision. Read-only host checks remain pending; no engine, status, ledger or production change.
 - [ ] **LIVE order-path fixes** (review §6): close detection by `position=`, restart reconciliation via `positions_get`/`MAGIC_NUMBER`, filling mode from `symbol_info()`, `None`-result handling, one position per magic; promote `tools/live_path_probe.py` checks into smoke scenarios. Exit: the probe exits 0.
 - [ ] Live spread guard before order dispatch (share of 1R + hard $ cap, e.g. <= $60/BTC) and kill switches (equity floor −$30 at 0.01 lot, `trade_allowed`/demo-vs-real check, manual halt file, position-aware dead-man alarm).
 - [ ] Wine order-executor sidecar (the Linux engine cannot import `MetaTrader5`); make `TRADING_MODE` an env var (default `FORWARD_TEST`).
