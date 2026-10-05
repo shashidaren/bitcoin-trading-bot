@@ -41,6 +41,10 @@ Scenarios:
      survive a torn line, count complete days/weekends against the Stage B-i exit,
      keep STALE/NOOFFSET/NOQUOTE rows out of every spread statistic, price a trade at
      (entry spread + exit spread) / 2, and CATCH candles stamped an hour off
+  M) MT5 closed-candle simulated exits -> MUST close already-open trades from candle
+     OHLC with deterministic stop/target fills, stop-first ties, no entry-candle
+     self-exit, exit-before-entry ordering on the same close, and restart/dedup
+     without duplicate close rows
 
 Usage: python3 tools/smoke_test.py
 """
@@ -1342,6 +1346,188 @@ try:
           "--spread" not in open(os.path.join(HERE, "xm_quote_report.py")).read().split('ap = argparse')[1])
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- Scenario M ---
+print("\nScenario M: MT5 closed-candle simulated exits")
+
+
+def m_make_engine(tmpdir):
+    engine.LOG_FILE_PATH = os.path.join(tmpdir, "forward_test_log.csv")
+    engine.STATUS_FILE_PATH = os.path.join(tmpdir, "status.json")
+    engine.TRADES_LOG_PATH = os.path.join(tmpdir, "trades.csv")
+    engine.MT5_FEED_FILE = os.path.join(tmpdir, "mt5_last_candle.json")
+    trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
+    trade_filter.SKIP_LOG = os.path.join(tmpdir, "skipped_trades.csv")
+    trade_filter.is_in_blackout = lambda now=None: (False, "")
+    return engine.BitcoinEngine()
+
+
+
+def m_trade_rows(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+
+def m_seed_trade(eng, side, entry, sl, tp, trade_num=1):
+    eng.trade_active = True
+    eng.trade_type = side
+    eng.entry_price = float(entry)
+    eng.stop_loss = float(sl)
+    eng.take_profit = float(tp)
+    eng.current_trade_num = trade_num
+    eng.next_trade_num = max(eng.next_trade_num, trade_num + 1)
+    eng.entry_time = "2026-10-01 07:10:10"
+    eng.entry_rsi = 55.0
+    eng.entry_atr = abs(entry - sl) / engine.ATR_SL_MULT if abs(entry - sl) else 1.0
+    eng.entry_wick_ratio = 0.25
+    eng.entry_ema_fast = entry
+    eng.entry_ema_slow = entry - 50.0 if side == "BUY" else entry + 50.0
+    eng.save_status()
+
+
+
+def m_expect_exit(label, side, candle, expected_reason, expected_exit):
+    tmpdir = tempfile.mkdtemp(prefix="btc_smoke_m_")
+    try:
+        eng = m_make_engine(tmpdir)
+        if side == "BUY":
+            entry, sl, tp = 100.0, 90.0, 120.0
+            expected_profit = (expected_exit - entry) * engine.LOT_SIZE
+        else:
+            entry, sl, tp = 100.0, 110.0, 80.0
+            expected_profit = (entry - expected_exit) * engine.LOT_SIZE
+        m_seed_trade(eng, side, entry, sl, tp)
+        exited = eng.check_position_on_closed_candle(*candle)
+        rows = m_trade_rows(engine.TRADES_LOG_PATH)
+        row = rows[0] if rows else {}
+        wins = 1 if expected_reason == "TP" else 0
+        losses = 1 if expected_reason == "SL" else 0
+        check(f"M: {label}",
+              exited and not eng.trade_active and len(rows) == 1
+              and row.get("Exit_Reason") == expected_reason
+              and row.get("Exit_Price") == f"{expected_exit:.2f}"
+              and row.get("Profit") == f"{expected_profit:.2f}"
+              and eng.wins == wins and eng.losses == losses,
+              f"row={row} wins={eng.wins} losses={eng.losses}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+m_expect_exit("BUY stop touch fills at the stop", "BUY", (100.0, 108.0, 89.0, 95.0), "SL", 90.0)
+m_expect_exit("BUY target touch fills at the target", "BUY", (100.0, 121.0, 96.0, 119.0), "TP", 120.0)
+m_expect_exit("SELL stop touch fills at the stop", "SELL", (100.0, 111.0, 94.0, 109.0), "SL", 110.0)
+m_expect_exit("SELL target touch fills at the target", "SELL", (100.0, 104.0, 79.0, 82.0), "TP", 80.0)
+
+# no-touch candle -> stay open, no ledger row
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_notouch_")
+try:
+    eng_m = m_make_engine(_tmp)
+    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
+    exited = eng_m.check_position_on_closed_candle(100.0, 109.0, 91.0, 102.0)
+    check("M: no-touch candle leaves the trade open",
+          not exited and eng_m.trade_active and m_trade_rows(engine.TRADES_LOG_PATH) == [])
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+# both barriers in one candle -> conservative stop-first
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_both_")
+try:
+    eng_m = m_make_engine(_tmp)
+    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
+    eng_m.check_position_on_closed_candle(100.0, 125.0, 85.0, 115.0)
+    rows = m_trade_rows(engine.TRADES_LOG_PATH)
+    check("M: a candle spanning both barriers resolves to the stop first",
+          len(rows) == 1 and rows[0]["Exit_Reason"] == "SL" and rows[0]["Exit_Price"] == "90.00",
+          f"rows={rows}")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+# gap convention: adverse gap uses the open; favourable gap still fills at target
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_gapstop_")
+try:
+    eng_m = m_make_engine(_tmp)
+    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
+    eng_m.check_position_on_closed_candle(88.0, 92.0, 87.0, 89.0)
+    rows = m_trade_rows(engine.TRADES_LOG_PATH)
+    check("M: stop gaps fill at the candle open, not the stop level",
+          len(rows) == 1 and rows[0]["Exit_Reason"] == "SL" and rows[0]["Exit_Price"] == "88.00",
+          f"rows={rows}")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_gaptp_")
+try:
+    eng_m = m_make_engine(_tmp)
+    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
+    eng_m.check_position_on_closed_candle(125.0, 128.0, 124.0, 127.0)
+    rows = m_trade_rows(engine.TRADES_LOG_PATH)
+    check("M: target gaps still fill at the target level (no favourable overshoot credit)",
+          len(rows) == 1 and rows[0]["Exit_Reason"] == "TP" and rows[0]["Exit_Price"] == "120.00",
+          f"rows={rows}")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+# A newly opened trade must NOT be exposed to its own entry candle's earlier range.
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_entry_")
+try:
+    eng_m = m_make_engine(_tmp)
+    run_candles(eng_m, candles_uptrend(240), datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc))
+    entry_candle = rejection_dip_buy(eng_m)
+    eng_m.process_closed_candle(*entry_candle, tick_count=300)
+    check("M: a trade opened at the candle close is NOT stopped by that candle's earlier low",
+          eng_m.trade_active and eng_m.trade_type == "BUY" and entry_candle[2] <= eng_m.stop_loss
+          and m_trade_rows(engine.TRADES_LOG_PATH) == [],
+          f"low={entry_candle[2]:.2f} stop={eng_m.stop_loss:.2f}")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+# Exit ordering: the same candle may close an older trade first, then open a new one at the close.
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_reentry_")
+_m_old_should_take_trade = engine.should_take_trade
+engine.should_take_trade = lambda **kwargs: (True, "")
+try:
+    eng_m = m_make_engine(_tmp)
+    run_candles(eng_m, candles_uptrend(240), datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc))
+    reentry_candle = rejection_dip_buy(eng_m)
+    m_seed_trade(eng_m, "SELL", 83340.0, 83370.0, 83280.0, trade_num=7)
+    eng_m.process_closed_candle(*reentry_candle, tick_count=300)
+    rows = m_trade_rows(engine.TRADES_LOG_PATH)
+    check("M: exit happens before signal evaluation, so the exit candle may also open a new trade",
+          len(rows) == 1 and rows[0]["Trade_Type"] == "SELL" and rows[0]["Exit_Reason"] == "SL"
+          and rows[0]["Exit_Price"] == "83370.00"
+          and eng_m.trade_active and eng_m.trade_type == "BUY" and eng_m.current_trade_num == 8
+          and eng_m.losses == 1 and eng_m.next_trade_num == 9,
+          f"rows={rows} active={eng_m.trade_active} type={eng_m.trade_type} num={eng_m.current_trade_num}")
+finally:
+    engine.should_take_trade = _m_old_should_take_trade
+    shutil.rmtree(_tmp, ignore_errors=True)
+
+# Restart/dedup: the same MT5 candle must not create a duplicate close row.
+_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_dedup_")
+try:
+    eng_m = m_make_engine(_tmp)
+    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0, trade_num=4)
+    with open(engine.MT5_FEED_FILE, "w") as f:
+        json.dump({"ts": 3000, "open": 100.0, "high": 108.0, "low": 89.0,
+                   "close": 95.0, "tick_volume": 123, "updated_at": "2026-10-05 03:20:11"}, f)
+    candle = eng_m.mt5_next_candle(eng_m.read_mt5_feed(), 0)
+    eng_m.process_closed_candle(candle[1], candle[2], candle[3], candle[4], candle[5])
+    rows_once = m_trade_rows(engine.TRADES_LOG_PATH)
+
+    eng_m2 = m_make_engine(_tmp)
+    dup = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), candle[0])
+    if dup is not None:
+        eng_m2.process_closed_candle(dup[1], dup[2], dup[3], dup[4], dup[5])
+    rows_twice = m_trade_rows(engine.TRADES_LOG_PATH)
+    check("M: restart dedup rejects the same candle and keeps one close row",
+          dup is None and len(rows_once) == 1 and len(rows_twice) == 1,
+          f"dup={dup} rows_once={rows_once} rows_twice={rows_twice}")
+finally:
+    shutil.rmtree(_tmp, ignore_errors=True)
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.
