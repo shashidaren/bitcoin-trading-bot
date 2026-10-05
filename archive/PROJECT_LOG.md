@@ -54,6 +54,27 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-10-05] MT5 forward-test candle exits fixed for future simulated trades; historical #125 left untouched.**
+  Implemented a narrowly scoped `engine.py` change for `TRADING_MODE=FORWARD_TEST`
+  with `DATA_SOURCE=MT5`: every newly accepted closed M5 candle now checks an
+  already-open simulated position against candle OHLC **before** signal
+  evaluation. Convention is explicitly conservative and deterministic because
+  OHLC is not an exact path: BUY exits on low<=SL / high>=TP, SELL mirrors it,
+  a candle spanning both barriers resolves to **SL first**, a stop gap fills at
+  the candle **open**, and a target touch fills at the **target level** even if
+  the bar opened through it. This prevents a trade opened at a candle's close
+  from being closed by that candle's earlier range, while still allowing an exit
+  candle to open a new trade at the same close. The existing simulated trade
+  logging/state-update path is reused exactly once, so balance, W/L, daily-loss
+  counts, status and Telegram notifications stay aligned. Added smoke Scenario M
+  covering BUY/SELL SL/TP touches, no-touch candles, tie-bars, gap handling,
+  entry-candle ordering, exit-before-entry ordering, and restart/dedup without
+  duplicate close rows. Updated `docs/HANDOFF.md` and `docs/REVIEW-2026-10-05.md`
+  to record the incident context, the new fill convention, and the later host
+  evidence: current deployed checkout `aa506c0...` is the docs-only PR #13 merge,
+  `mt5feed-btc.service` was active/running, and the supplied Oct 1 journal shows
+  an MT5-feed startup before #125's breach window. No host files, `status.json`,
+  or `trades.csv` history were edited; #125 was not retro-closed.
 - **[2026-10-05] BUY #125 exit-state verification — documentation only; no production change.**
   Refreshed `docs/HANDOFF.md` and `docs/REVIEW-2026-10-05.md` from the current
   checkout (7,668 M5 rows through 03:00:03 UTC; status snapshot 03:02:16) and
@@ -68,8 +89,8 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
   The review includes read-only host checks for the deployed SHA, direct
   `mt5feed-btc.service` state, safe candle timestamps and Oct 1 startup/feed-mode
   journal lines. Do not edit the status/ledger, deploy a fix or enable LIVE while
-  those checks are pending. This documentation-only change is in open draft PR #13;
-  do not merge until the host output is reviewed and the user approves.
+  those checks are pending. That documentation-only change later landed as merged
+  PR #13; the follow-up MT5 candle-exit fix is recorded in the newer entry above.
 - **[2026-10-01] XM quote + contract-spec logger (review §7 Stage B-i) — new read-only Wine sidecar; no engine,
   strategy, parameter or `DATA_SOURCE` change** (`docs/XM-LOGGER.md`, `tools/mt5_quotes.py`,
   `tools/xm_quote_report.py`, `deploy/mt5quotes.service`). Built because the whole edge rests on an
