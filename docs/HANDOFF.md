@@ -64,9 +64,14 @@ edited it — that is what §10's ritual is for.
   remains the full live-readiness review and staged path; its detailed data
   snapshot is historical. `docs/REVIEW-2026-09-15.md` §13 is the 99-trade
   historical re-cut (§12 the 78-trade one).
-- **Current session:** the documentation-only verification is in open draft PR #13;
-  the read-only host results in the 2026-10-05 review are still pending. Keep the
-  PR draft and do not merge until those results are reviewed and the user approves.
+- **Current session:** PR #13 (docs-only verification) is already merged and did
+  **not** contain an engine exit fix. This session adds a narrowly scoped,
+  unmerged MT5 forward-test exit fix for future simulated candles only: BUY/SELL
+  SL/TP checks on each accepted closed M5 candle, conservative stop-first ties,
+  stop gaps filled at the candle open, target touches filled at the target,
+  exit-before-entry ordering on the same candle close, and smoke Scenario M.
+  Do not merge/deploy until the user approves; merging restarts the engine via
+  autosync.
 
 **LIVE verdict (2026-10-05): not ready for real money.** The strictly post-gate
 sample is 67 trades (29W/38L), with t = +1.14 and an 83% day-block bootstrap
@@ -124,15 +129,20 @@ measured $0.40 round trip.
    engine excerpt has no close/SL event; later prices rise above TP, which cannot
    supersede the first stop. OHLC proves a breach, not an exact executable fill.
    The MT5 forward-test startup is a simulator, not evidence of a broker position.
-4. **The MT5-mode exit omission is plausible, not a confirmed production cause.**
-   Checked-in `run_mt5_test()` evaluates closed candles without calling
-   `check_position()`; the Twelve Data `on_event()` path checks per tick but
-   suppresses callback exceptions. The operator reports `DATA_SOURCE=MT5` and an
-   active `bitcoin-engine.service` with a `FORWARD TEST (MT5 feed)` startup on
-   Oct 5. That sample does not prove the Oct 1 feed mode; the source-switch date
-   and deployed Git SHA remain unknown. Restart restored #125 but did not
-   reconcile the earlier breach. Do not attribute a root cause or hand-edit
-   status/ledger files until the read-only host checks in the review are complete.
+4. **The best-supported explanation is the historical MT5 candle-exit omission.**
+   The operator-supplied host evidence now points strongly at the MT5 forward-test
+   path for #125: a Twelve Data startup at 04:43:08 UTC on Oct 1, then an MT5-feed
+   startup at 04:53:24, no later engine stop/start in the supplied Oct 1–2 journal
+   window, `mt5feed-btc.service` loaded/active/running, and the host's current
+   deployed checkout at `aa506c025494acc9de008755393abe060948d5a8` (a docs-only
+   merge of PR #13). The checked-in `run_mt5_test()` in that line of history
+   evaluates closed candles without checking an already-open simulated trade
+   against candle OHLC. This session fixes future MT5 forward-test exits with a
+   conservative convention (SL first on ties; stop gaps fill at the candle open;
+   target touches fill at the target; entry-candle range is ignored), but it does
+   **not** retro-close #125 or mutate the host ledger/state. The exact engine SHA
+   at the 07:20 breach was not supplied, so the MT5 attribution is still a strong
+   inference rather than a byte-for-byte proof.
 5. **Data integrity:** `check_data.py` reports 0 failures / 64 warnings. The local
    log has 7,668 rows through 10-05 03:00:03, 197 missing M5 slots in 14 runs,
    and three gaps >15 min (885 min on 09-28/29; 35 min on 10-03; 20 min on
@@ -146,8 +156,10 @@ measured $0.40 round trip.
    log-covered **closed** trades; that agreement does not resolve open #125.
 7. **LIVE path remains blocked.** `tools/live_path_probe.py` reports 4 BLOCKER,
    3 HIGH and 1 ADVISORY (1/9 clean); the Linux engine cannot import
-   `MetaTrader5`. The smoke suite passes A–L but does not test MT5 forward-test
-   exit handling.
+   `MetaTrader5`. The smoke suite now passes **A–M**; new Scenario M covers MT5
+   forward-test candle exits (BUY/SELL SL/TP touches, no-touch candles,
+   stop-first both-barriers behaviour, gap fills, no entry-candle self-exit,
+   exit-before-entry ordering, and restart/dedup without duplicate close rows).
 
 ### Operations
 
@@ -435,7 +447,7 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census  # 3. exit-rule replay (va
 python3 tools/analyze_losers.py --spread 0.40      # 4. winner/loser feature drift + stop grid
 python3 tools/validate_gates.py                    # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40      # 6. what did the blocked signals actually do?
-python3 tools/smoke_test.py                        # 7. engine + sidecar regression tests (scenarios A–L)
+python3 tools/smoke_test.py                        # 7. engine + sidecar regression tests (scenarios A–M)
 python3 tools/live_readiness.py --spread 0.40      # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                   # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
 python3 tools/xm_quote_report.py                   # 10. XM logger: spread by session, cost on real trades, feed parity (needs xm_data/)
@@ -475,32 +487,33 @@ locks the direction/ratchet/horizon rules.
 ## 7. Next steps (in order)
 
 > **Status (re-checked 2026-10-05).**
-> - **Immediate: triage the open paper trade #125.** The saved M5 path records an
->   SL breach on 10-01 07:20 while local and host status still show #125 active
->   at 10-05 03:02:16 after restart. Host output reports current
->   `DATA_SOURCE=MT5` and an active FORWARD_TEST (MT5 feed) engine, but that does
->   not prove the Oct 1 feed mode or deployed revision. The checked-in
->   `run_mt5_test()` lacks an exit check; Twelve Data checks each accepted price
->   but suppresses callback exceptions. Run the review's read-only checks for the
->   deployed SHA, `mt5feed-btc.service`, current candle timestamps and Oct 1
->   startup/feed-mode journal lines. Do not hand-edit the ledger/status or infer
->   a fill; see `docs/REVIEW-2026-10-05.md`.
+> - **Immediate: leave historical #125 untouched, but prevent repeats.** The
+>   saved M5 path records an SL breach on 10-01 07:20 while local and host status
+>   still show #125 active at 10-05 03:02:16 after restart. Later host evidence
+>   strongly supports MT5 forward-test mode for that trade (`mt5feed-btc.service`
+>   active; Oct 1 journal showing Twelve Data startup then MT5-feed startup with
+>   no later engine restart in the supplied window; current deployed checkout
+>   `aa506c0...`, a docs-only merge). This session adds the future-simulation fix
+>   only: on each accepted closed MT5 M5 candle, an already-open simulated trade
+>   is checked against candle OHLC before signal evaluation; BUY uses low/high vs
+>   SL/TP, SELL mirrors it, ties resolve to SL first, stop gaps fill at the candle
+>   open, target touches fill at the target, and a candle opened at its own close
+>   cannot self-exit. Do **not** hand-edit the ledger/status or invent a fill for
+>   #125; see `docs/REVIEW-2026-10-05.md`.
 > - **Stage B-i logger — built, awaiting on-box validation.** No `xm_data/` is
 >   present in this checkout. The ≥14-day clock (including 2 weekends) starts
 >   at the first real `OK` row (`docs/XM-LOGGER.md` §3).
-> - **Stage A — next engine-changing PR.** It restarts the engine; include the
->   existing MT5 server-time dedup fix (item 9) and test the MT5 forward-test
->   exit path in the same controlled change, after current state is reconciled.
+> - **Stage A — next engine-changing PR after this one.** This session already
+>   covers the MT5 forward-test exit path; keep the remaining MT5 server-time
+>   dedup/restart work (item 9) and any LIVE-path changes in separately reviewed
+>   steps. Every merge restarts the engine.
 > - **No real-money order** before Stage A's LIVE probe exits 0 and Stage B has
 >   ≥14 days. The staged-path thresholds in review §7 remain proposals until
 >   the user says otherwise.
-> - **Still needed from the user/host:** the deployed engine Git SHA, direct
->   `mt5feed-btc.service` state, safe timestamp metadata from
->   `mt5_last_candle.json`, and engine startup/feed-mode lines around Oct 1. The
->   current host `DATA_SOURCE=MT5` and FORWARD_TEST startup are already reported,
->   but the source-switch date is unknown. Run the read-only block in
->   `docs/REVIEW-2026-10-05.md`; it prints no `.env` secrets. The feed-unit scan
->   only matched `/opt/bitcoin` and cannot establish that the sidecar is absent.
+> - **Remaining evidence gap:** the exact engine SHA at the 10-01 07:20:11 stop
+>   breach was not supplied. The current deployed SHA and journal context make the
+>   MT5 omission the best-supported explanation, but they do not justify
+>   retroactively writing a guessed close.
 
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
@@ -601,7 +614,7 @@ locks the direction/ratchet/horizon rules.
 ## 8. How to verify code changes (always)
 
 ```bash
-python3 tools/smoke_test.py                      # must print "SMOKE TEST PASSED" (A–L)
+python3 tools/smoke_test.py                      # must print "SMOKE TEST PASSED" (A–M)
 python3 -m py_compile engine.py trade_filter.py dashboard.py tools/*.py
 python3 tools/check_data.py                      # expect "0 fail" (warnings are normal)
 python3 tools/handoff_check.py                   # expect "HANDOFF FRESH"; --update the block if not

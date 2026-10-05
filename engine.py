@@ -652,6 +652,82 @@ class BitcoinEngine:
                 "EMA200_At_Entry": f"{self.entry_ema_slow:.2f}" if self.entry_ema_slow is not None else "",
             })
 
+    def close_simulated_trade(self, exit_price: float, exit_reason: str) -> bool:
+        """Finalize one simulated exit and write the ledger/status exactly once."""
+        if not self.trade_active:
+            return False
+        if exit_reason not in ("TP", "SL"):
+            raise ValueError(f"Unsupported exit reason: {exit_reason}")
+
+        if self.trade_type == "BUY":
+            profit = (exit_price - self.entry_price) * LOT_SIZE
+        else:
+            profit = (self.entry_price - exit_price) * LOT_SIZE
+
+        self.balance += profit
+        if exit_reason == "TP":
+            self.wins += 1
+        else:
+            self.losses += 1
+
+        self.trade_active = False
+        self.log_trade(exit_price=exit_price, exit_reason=exit_reason, profit=profit)
+
+        pnl_text = f"+${profit:,.2f}" if profit >= 0 else f"-${abs(profit):,.2f}"
+        self.send_telegram(
+            f"BTC {exit_reason} HIT ({self.trade_type} #{self.current_trade_num})\n"
+            f"Exit: `${exit_price:,.2f}` ({pnl_text})\n"
+            f"Equity: `${self.balance:,.2f}`"
+        )
+        self.save_status()
+        return True
+
+    def check_position_on_closed_candle(self, o: float, h: float, l: float, c: float) -> bool:
+        """Evaluate ONE closed candle against an already-open simulated trade.
+
+        Closed-candle OHLC proves barrier touches, not the exact intrabar path, so
+        the MT5 forward-test path uses deterministic, conservative conventions:
+          - BUY:  stop if low <= SL, target if high >= TP
+          - SELL: stop if high >= SL, target if low <= TP
+          - If both barriers print inside one candle, STOP wins (conservative)
+          - Stop gaps fill at the candle open if the bar opens through the stop;
+            otherwise they fill at the stop level
+          - Target touches fill at the target level even if the bar opened beyond
+            it (do not credit favourable OHLC overshoot as an exact fill)
+
+        Call this BEFORE evaluate_candle(): entries happen at the candle close, so
+        a position opened by this candle must not be exposed to this candle's
+        earlier range. A candle that exits an older trade may still open a new
+        trade at its close.
+        """
+        if not self.trade_active:
+            return False
+
+        if self.trade_type == "BUY":
+            stop_hit = l <= self.stop_loss
+            target_hit = h >= self.take_profit
+            if stop_hit:
+                exit_price = o if o <= self.stop_loss else self.stop_loss
+                return self.close_simulated_trade(exit_price=exit_price, exit_reason="SL")
+            if target_hit:
+                return self.close_simulated_trade(exit_price=self.take_profit, exit_reason="TP")
+
+        elif self.trade_type == "SELL":
+            stop_hit = h >= self.stop_loss
+            target_hit = l <= self.take_profit
+            if stop_hit:
+                exit_price = o if o >= self.stop_loss else self.stop_loss
+                return self.close_simulated_trade(exit_price=exit_price, exit_reason="SL")
+            if target_hit:
+                return self.close_simulated_trade(exit_price=self.take_profit, exit_reason="TP")
+
+        return False
+
+    def process_closed_candle(self, o, h, l, c, tick_count):
+        """MT5 forward-test ordering: exit old trades on the bar, then score the close."""
+        self.check_position_on_closed_candle(o, h, l, c)
+        self.evaluate_candle(o, h, l, c, tick_count)
+
     def evaluate_candle(self, o, h, l, c, tick_count):
         candle_range = h - l
         if candle_range <= 0:
@@ -968,55 +1044,15 @@ class BitcoinEngine:
 
         if self.trade_type == "BUY":
             if price >= self.take_profit:
-                actual_profit = (price - self.entry_price) * LOT_SIZE
-                self.balance += actual_profit
-                self.wins += 1
-                self.trade_active = False
-                self.log_trade(exit_price=price, exit_reason="TP", profit=actual_profit)
-                self.send_telegram(
-                    f"BTC TP HIT (BUY #{self.current_trade_num})\n"
-                    f"Exit: `${price:,.2f}` (+${actual_profit:,.2f})\n"
-                    f"Equity: `${self.balance:,.2f}`"
-                )
-                self.save_status()
+                self.close_simulated_trade(exit_price=price, exit_reason="TP")
             elif price <= self.stop_loss:
-                actual_loss = (self.entry_price - price) * LOT_SIZE
-                self.balance -= actual_loss
-                self.losses += 1
-                self.trade_active = False
-                self.log_trade(exit_price=price, exit_reason="SL", profit=-actual_loss)
-                self.send_telegram(
-                    f"BTC SL HIT (BUY #{self.current_trade_num})\n"
-                    f"Exit: `${price:,.2f}` (-${actual_loss:,.2f})\n"
-                    f"Equity: `${self.balance:,.2f}`"
-                )
-                self.save_status()
+                self.close_simulated_trade(exit_price=price, exit_reason="SL")
 
         elif self.trade_type == "SELL":
             if price <= self.take_profit:
-                actual_profit = (self.entry_price - price) * LOT_SIZE
-                self.balance += actual_profit
-                self.wins += 1
-                self.trade_active = False
-                self.log_trade(exit_price=price, exit_reason="TP", profit=actual_profit)
-                self.send_telegram(
-                    f"BTC TP HIT (SELL #{self.current_trade_num})\n"
-                    f"Exit: `${price:,.2f}` (+${actual_profit:,.2f})\n"
-                    f"Equity: `${self.balance:,.2f}`"
-                )
-                self.save_status()
+                self.close_simulated_trade(exit_price=price, exit_reason="TP")
             elif price >= self.stop_loss:
-                actual_loss = (price - self.entry_price) * LOT_SIZE
-                self.balance -= actual_loss
-                self.losses += 1
-                self.trade_active = False
-                self.log_trade(exit_price=price, exit_reason="SL", profit=-actual_loss)
-                self.send_telegram(
-                    f"BTC SL HIT (SELL #{self.current_trade_num})\n"
-                    f"Exit: `${price:,.2f}` (-${actual_loss:,.2f})\n"
-                    f"Equity: `${self.balance:,.2f}`"
-                )
-                self.save_status()
+                self.close_simulated_trade(exit_price=price, exit_reason="SL")
 
     def check_live_exits(self):
         """Checks MT5 history to see if our active live trade has closed."""
@@ -1150,6 +1186,15 @@ class BitcoinEngine:
         the broker feed (tools/mt5_feed.py publishes MT5_FEED_FILE, immune to
         Twelve Data plan / WS-trial limits). One candle row per closed 5-min
         bar, deduplicated by candle timestamp.
+
+        Ordering matters: an already-open simulated trade is checked against the
+        newly accepted candle's OHLC BEFORE the candle close is evaluated for a
+        fresh signal. That prevents a trade opened at this candle's close from
+        being stopped by this candle's earlier range, while still allowing an
+        exit candle to open a new trade at the same close if the signal stack
+        says so. Closed-candle fills are deterministic, conservative estimates
+        rather than claims about the exact intrabar path; see
+        check_position_on_closed_candle().
         """
         print("Bitcoin Engine FORWARD TEST (MT5 feed) starting...")
         last_ts = 0
@@ -1177,7 +1222,7 @@ class BitcoinEngine:
                     last_ts = ts
                     self._last_price_mono = time.monotonic()
                     try:
-                        self.evaluate_candle(o, h, l, c, vol)
+                        self.process_closed_candle(o, h, l, c, vol)
                     except Exception as e:
                         print(f"\nError evaluating candle @ {ts}: {e}", flush=True)
                     if ts % 3600 == 0:
