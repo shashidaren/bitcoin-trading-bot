@@ -34,3 +34,6 @@ Thumbs.db
 # === Wine / MT5 Local Data (if any symlinks exist here) ===
 drive_c/
 *.tmp
+
+# === One-off reconciler backups (tools/reconcile_stale_trade.py) ===
+backups/
