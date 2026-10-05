@@ -20,20 +20,20 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-01 03:15 |
-| data_collection | 1944 |
-| closed_trades | 124 |
-| wins_losses | 54W/70L |
-| win_rate_pct | 43.5 |
-| engine_ledger_usd | 260.19 |
-| true_equity_usd | -131.63 |
-| live_era_trades | 70 |
-| live_era_net_usd | +32.20 |
-| log_covered_trades | 70 |
-| log_bars | 6532 |
-| log_last_bar_utc | 2026-10-01 03:15 |
+| as_of_utc | 2026-10-05 02:35 |
+| data_collection | 2323 |
+| closed_trades | 125 |
+| wins_losses | 54W/71L |
+| win_rate_pct | 43.2 |
+| engine_ledger_usd | 258.81 |
+| true_equity_usd | -133.01 |
+| live_era_trades | 71 |
+| live_era_net_usd | +30.42 |
+| log_covered_trades | 71 |
+| log_bars | 7663 |
+| log_last_bar_utc | 2026-10-05 02:35 |
 | skip_rows | 117 |
-| open_trade | SELL #124 @ 83602.0 |
+| open_trade | BUY #125 @ 84177.15 |
 | spread_usd_per_trade | 0.40 |
 <!-- /HANDOFF-SNAPSHOT -->
 
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (data as of 2026-10-01 03:15 UTC; review re-cut 2026-10-01 at 124 closed trades)
+## 1. Where things stand (data through 2026-10-05 02:35 UTC; delta review 2026-10-05 at 125 closed trades)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -59,86 +59,87 @@ edited it — that is what §10's ritual is for.
   SELL funnel, EMA-slope + near-EMA regime gates, escalating SL cooldowns,
   daily-loss breaker, UTC everywhere, self-healing 16-field ledger, stale-feed
   guard, MT5 sidecar option, `tools/` suite.
-- **Reviews:** `docs/REVIEW-2026-10-01.md` is the 2026-10-01 **live-readiness**
-  review at 124 closed trades; it is the provenance for the evidence in §5 below
-  and for the LIVE verdict. `docs/REVIEW-2026-09-15.md` §13 is the historical
-  99-trade re-cut (§12 the 78-trade one).
+- **Reviews:** `docs/REVIEW-2026-10-05.md` is the latest data and exit-state
+  recheck (125 closed ledger rows plus active #125). `docs/REVIEW-2026-10-01.md`
+  remains the full live-readiness review and staged path; its detailed data
+  snapshot is historical. `docs/REVIEW-2026-09-15.md` §13 is the 99-trade
+  historical re-cut (§12 the 78-trade one).
 
-**LIVE verdict (2026-10-01): not ready for real money.** The forward test is
-promising but unproven (strictly post-gate t = +1.22 at n = 66; the best 5 trades
-are 98 % of net), the margin over the measured cost is thin (break-even round
-trip $0.87 vs $0.40 assumed), and the LIVE order path fails 8 of 9 offline probes
-and cannot even import `MetaTrader5` on the Linux box. The staged path to a
-capped micro-live pilot (fix → measure → XM demo → micro-live, ~5–6 weeks at the
-soonest) is in `docs/REVIEW-2026-10-01.md` §7 and §7 below. `tools/live_readiness.py`
-re-scores the evidence gates on any data drop (3/6 pass today).
+**LIVE verdict (2026-10-05): not ready for real money.** The strictly post-gate
+sample is 67 trades (29W/38L), with t = +1.14 and an 83% day-block bootstrap
+probability of positive mean; the best 5 trades are 104% of net (net −$1.27
+without them). Estimated break-even round trip is $0.84 vs $0.40 assumed, and
+only 3/6 data-readiness gates pass. The LIVE order-path probe remains at 1/9
+clean (4 BLOCKER, 3 HIGH, 1 ADVISORY), and the Linux engine cannot import
+`MetaTrader5`. Keep `TRADING_MODE = FORWARD_TEST`; do not enable real-money
+orders. Separately, the saved simulator state has an active BUY #125 despite an
+earlier recorded stop breach; this is an exit-state incident, not evidence of a
+live broker position (details below and in the 2026-10-05 review).
 
 ### The book in one table (net of $0.40/trade; gross in brackets)
 
 | Slice | n | W/L | WR | net | gross | net/trade |
 |---|---:|---:|---:|---:|---:|---:|
-| from 09-05 (exclude the 09-03 sizing outliers) | 122 | 54/68 | 44.3% | **+14.41** | [+63.21] | +0.12 |
-| live geometry (≥09-06 17:49, RR 1:2) | 87 | 39/48 | 44.8% | +27.19 | [+61.99] | +0.31 |
-| "new regime" (≥09-09 02:25, tool boundary) | 70 | 31/39 | 44.3% | **+32.20** | [+60.20] | +0.46 |
-| **strictly post-gate (≥09-10)** | 66 | 29/37 | 43.9% | **+31.04** | [+57.44] | +0.47 |
-| 25 closed since the 09-24 snapshot (exits after 09-23 20:35) | 25 | 10/15 | 40.0% | +0.78 | [+10.78] | +0.03 |
-| last 10 | 10 | 6/4 | 60.0% | +14.03 | [+18.03] | +1.40 |
+| from 09-05 (exclude the 09-03 sizing outliers) | 123 | 54/69 | 43.9% | **+12.63** | [+61.83] | +0.10 |
+| live geometry (≥09-06 17:49, RR 1:2) | 88 | 39/49 | 44.3% | +25.41 | [+60.61] | +0.29 |
+| "new regime" (≥09-09 02:25, tool boundary) | 71 | 31/40 | 43.7% | **+30.42** | [+58.82] | +0.43 |
+| **strictly post-gate (≥09-10)** | 67 | 29/38 | 43.3% | **+29.26** | [+56.06] | +0.44 |
+| last 25 closed | 25 | 10/15 | 40.0% | +2.82 | [+12.82] | +0.11 |
+| last 10 | 10 | 6/4 | 60.0% | +13.85 | [+17.85] | +1.39 |
 
-The slices overlap. The 70-trade post-port slice includes four 09-09 rows before
-the gates actually went live; use the 66-trade ≥09-10 slice when judging today's
+The slices overlap. The 71-trade post-port slice includes four 09-09 rows before
+the gates actually went live; use the 67-trade ≥09-10 slice when judging today's
 gates. Do not use a pooled R total or one pooled breakeven rate across the
 09-06 17:49 geometry change.
 
-The raw Profit column sums to **−$331.63 gross** across all 124 rows, giving a
-ledger reconstruction of **−$131.63 from the $200 start before spread costs**.
-The engine ledger reads **$260.19**; the **$391.82** gap is the known 09-03
-sizing monsters (−$197.63 and −$197.21) plus pre-port balance resets, not a new
-live accounting failure. Exclude the two outliers from every strategy P/L
-statistic. The ledger models no cost; the clean 09-05-on book is +$63.21 gross /
-**+$14.41 net** at the measured $0.40 round trip.
+The raw Profit column sums to **−$333.01 gross** across all 125 closed rows,
+giving a ledger reconstruction of **−$133.01 from the $200 start before spread
+costs**. The engine ledger reads **$258.81**; the **$391.82** gap is the known
+09-03 sizing monsters (−$197.63 and −$197.21) plus pre-port balance resets, not
+a new live accounting failure. Exclude the two outliers from every strategy P/L
+statistic. The clean 09-05-on book is **+$61.83 gross / +$12.63 net** at the
+measured $0.40 round trip.
 
-### What changed since the 2026-09-24 re-cut (99 → 124 trades)
+### What changed since the 2026-10-01 snapshot (124 → 125 closed rows; +1,131 M5 bars)
 
-1. **The promising run flattened.** The 25 trades closed since the snapshot are
-   10W/15L, **+$0.78 net** (+$10.78 gross): the first 21 are 6W/15L (−$13.59),
-   then four straight wins on 09-30 (+$14.37). The previous "last 10 = 7W/3L,
-   +$24.45" has rolled off; the last 10 are now 6W/4L, +$14.03. The "very
-   promising" feeling is the four-win tail, which is n = 4.
-2. **The edge is still not distinguishable from zero.** Strictly post-gate n = 66:
-   29W/37L, **43.9 % (Wilson 32.6–55.9), +$31.04 net**, t = +1.22, 95 % CI on
-   net/trade [−0.30, +1.24]; the average trade is positive in 85 % of day-block
-   resamples (a 90 % bar is not met). Confirming an edge this size takes ~350
-   trades (≈ 13 more weeks at 22 trades/week).
-3. **The cost margin is thin and thinning.** At the post-gate median ATR, 1R is
-   **$1.67**; $0.40 is **24.0 % of 1R** (was 22.3 %), approximate cost-adjusted
-   breakeven decisive WR **41.3 %** vs 43.9 % observed. Gross edge is +$0.87/trade,
-   so the **break-even round trip is $0.87 ($87/BTC)**; at $0.80 the 66-trade net
-   is +$4.64. $0.40 is still one Asian-session sample (§5).
-4. **Hypotheses from post-hoc cuts (not parameters).** Best 5 trades = 98 % of
-   net (+$0.51 without them). BUY +$31.36 (n = 32) vs **SELL −$0.32 (n = 34)**.
-   Entry ATR < $60 → 2W/11L; cost share of 1R > 40 % → 1W/9L. Weekends 3W/13L
-   (Fisher p = 0.023, one of ~10 looks). Details and caveats: review §3.
-5. **Wider TP remains a counterfactual, not a change.** On the 70 log-covered
-   trade paths and in the risk-gated census, 5×–6×ATR outscore the live 4×ATR by
-   a wider margin than at 99 trades; BE ratchets disagree between views. The
-   240-minute horizon and single regime keep these below adoption grade (§5).
-6. **Risk-gate evidence moved.** The daily halt's blocked signals remain strongly
-   losing (42 → 3W/36L/3T, −$65.29 net). Blackouts flipped from costly-looking to
-   neutral-protective (21 scorable: 8W/13L, **−$4.38** net); the scorable cooldown
-   slice is still a net winner (11: 8W/3L, +$18.84) but 43 of 117 skips remain
-   unscorable; do not relax gates on these small slices.
-7. **Data has one real incident.** `check_data.py` reports 0 failures / 64
-   warnings, but the log has **one 885-minute (14.8 h) outage, 09-28 17:50 →
-   09-29 08:35**, 183 missing M5 slots in 7 runs (was 6 in 5), and two repeated
-   minutes (09-23 10:50, 09-25 10:10). The cause is not recorded here (check
-   `journalctl` on the box). All 66 post-gate ledger rows pass current
-   trend/RSI/near-EMA conformance.
-8. **The LIVE path was audited for the first time.** `tools/live_path_probe.py`
-   (fake MT5, documented semantics): 4 BLOCKER + 3 HIGH + 1 ADVISORY — SL/TP
-   closes are never detected (`ticket=` vs `position=`), a restart orphans the
-   position, no spread guard, FOK hard-coded, `None` result crashes, no
-   duplicate-position check. The Linux engine cannot import `MetaTrader5` and
-   the smoke test has no LIVE scenario (review §6).
+1. **One new close, one new open trade.** The newly closed ledger row is the
+   SELL entered 10-01 01:15 at $83,602.00; it exited SL at 03:51 for −$1.38
+   gross / −$1.78 net. The current open BUY #125 entered 10-01 07:10 at
+   $84,177.15. Last 25 closed trades are +$2.82 net; last 10 are +$13.85 net.
+2. **The edge remains unproven.** Strictly post-gate n=67: 29W/38L, 43.3%
+   (Wilson 32.1–55.2), **+$56.06 gross / +$29.26 net**, t=+1.14, 95% CI on
+   net/trade [−$0.33, +$1.20], day-block bootstrap 83% positive. Median 1R is
+   $1.66; $0.40 is 24% of 1R; estimated cost-adjusted breakeven WR is 41.4% and
+   break-even round trip is $0.84. The best five trades are 104% of net (−$1.27
+   without them). See the 2026-10-05 review for the full cut.
+3. **BUY #125 appears stuck in the paper state.** Entry $84,177.15, SL
+   $84,008.74, TP $84,513.98. The 07:15 candle low was $84,035.75 (no stop hit);
+   the 07:20:11 candle low was $83,838.25 and close $83,841.65, with high only
+   $84,076.35. The first recorded barrier is therefore SL, yet `status.json`
+   still marks the trade active at 2026-10-05 02:35:03, 91 h 25 min after entry,
+   and there is no closed row for #125. The log subsequently continues and later
+   crosses TP, but that later move cannot supersede the first stop. This is a
+   saved-state/exit-handling anomaly; the bar proves a breach, not an exact fill.
+4. **Likely MT5-mode code path, not confirmed production cause.** In the checked-in
+   engine, `run_mt5_test()` evaluates closed candles without calling
+   `check_position()`; the Twelve Data `on_event()` path does call it per tick.
+   The checkout has no `.env` or production journal, so the deployed
+   `DATA_SOURCE` and revision are unknown. Confirm those on the box before
+   attributing or correcting the close; do not hand-edit status/ledger files.
+5. **Data integrity:** `check_data.py` reports 0 failures / 64 warnings. The log
+   has 7,663 rows through 10-05 02:35:03, 197 missing M5 slots in 14 runs, and
+   three gaps >15 min (885 min on 09-28/29; 35 min on 10-03; 20 min on 10-04).
+   Two duplicated minutes remain (09-23 10:50 and 09-25 10:10). The status and
+   last bar timestamps match, so this checkout shows collection through 02:35;
+   it cannot prove the process is alive after that.
+6. **Gates/readiness:** risk-gate skip evidence is unchanged (117 skips; 43
+   unscorable). `live_readiness.py` passes 3/6 data gates; feed health still fails
+   on the historical 885-minute outage. `pathwalk_sims.py` agrees with all 71
+   log-covered **closed** trades; that agreement does not resolve open #125.
+7. **LIVE path remains blocked.** `tools/live_path_probe.py` reports 4 BLOCKER,
+   3 HIGH and 1 ADVISORY (1/9 clean); the Linux engine cannot import
+   `MetaTrader5`. The smoke suite passes A–L but does not test MT5 forward-test
+   exit handling.
 
 ### Operations
 
@@ -177,17 +178,22 @@ statistic. The ledger models no cost; the clean 09-05-on book is +$63.21 gross /
   Scenario H covers fresh/stale offset estimation. The Bitcoin sidecar must be
   restarted after deployment, and `DATA_SOURCE=MT5` must wait until the first
   post-deploy JSON is verified.
-- Feed health at this snapshot: 6532 M5 rows since 09-07 20:20 UTC, **one
-  885-minute outage (09-28 17:50 → 09-29 08:35)**, 183 missing M5 slots in seven
-  runs, and the two repeated minutes noted above. `status.json` is updated
-  through 03:15 UTC. The forward-test simulator has an open SELL #124 at 83602.0
-  (entered 01:15 UTC; SL 83735.78, TP 83334.43); the daily-loss counter reads
-  0/3. The open trade is not in the closed-trade statistics.
-- **The next milestones are (a) the logger's exit — ≥14 complete UTC days incl.
-  2 complete weekends, read with `python3 tools/xm_quote_report.py` — and (b)
-  100 strictly-post-gate trades (66 today) with the staged gates in review §7 —
-  not a retune.** Keep collecting. The timeframe decision, session spread
-  profile, and stronger per-signal skip logging remain open.
+- Feed health at this snapshot: **7,663 M5 rows** since 09-07 20:20 UTC,
+  through 2026-10-05 02:35:03; 197 missing M5 slots in 14 runs, with the
+  885-minute 09-28/29 outage plus 35-minute (10-03) and 20-minute (10-04) gaps.
+  The status and last-bar timestamps match. The simulator marks BUY #125 open
+  (entry $84,177.15 at 10-01 07:10:10; SL $84,008.74, TP $84,513.98; daily-loss
+  counter 0/3), although the first recorded SL breach is 10-01 07:20:11. It is
+  excluded from closed-trade statistics. See `docs/REVIEW-2026-10-05.md` before
+  relying on the dashboard state. The checked-in MT5 feed loop has no simulated
+  exit check; production `DATA_SOURCE` has not been verified from this checkout.
+- **Next milestones:** first confirm/fix/reconcile the open paper trade and its
+  feed path; then (a) the logger's exit — ≥14 complete UTC days incl. 2 complete
+  weekends, read with `python3 tools/xm_quote_report.py` — and (b) 100
+  strictly-post-gate trades (**67 today**) with the staged gates in review §7 —
+  not a retune. The logger is built but no `xm_data/` output is present in this
+  checkout. Keep collecting. The timeframe decision, session spread profile,
+  and stronger per-signal skip logging remain open.
 
 ## 2. Bot in one paragraph
 
@@ -209,7 +215,7 @@ cannot import `MetaTrader5` on the Linux box — see `docs/REVIEW-2026-10-01.md`
 (gold 1:1.5), wick 0.15 (gold 0.38), %-based ATR bounds (gold absolute $),
 24/7 with no rollover blackout and no quiet hours, and **no breakeven (BE)
 ratchet** — gold's BE stop is *not* ported (`docs/REVIEW-2026-09-15.md` §5
-re-tested it; §5 below has the 124-trade re-read).
+re-tested it; §5 below has the 125-trade re-read).
 
 ## 3. Data feed: Twelve Data (default) / MT5 sidecar (option)
 
@@ -233,8 +239,8 @@ re-tested it; §5 below has the 124-trade re-read).
   `tools/mt5_feed.py` runs under the **Wine** Python in the same prefix as the
   terminal and atomically publishes the latest **closed M5 BTCUSD** candle to
   `/opt/bitcoin/mt5_last_candle.json`; the engine reads and dedupes it by
-  candle timestamp (**but see the server-time caveat below: with XM's +2/+3 h
-  server a restart re-logs the boundary candle once**).
+  candle timestamp. The sidecar must include the UTC timestamp normalization
+  described below; verify its deployed version before switching to MT5 mode.
   Install: `sudo cp deploy/mt5feed.service /etc/systemd/system/mt5feed-btc.service
   && sudo systemctl daemon-reload && sudo systemctl enable --now mt5feed-btc`
   — **note the `-btc` suffix; the gold bot owns plain `mt5feed.service`.**
@@ -308,120 +314,102 @@ that. Phantom scores are horizon-marked counterfactuals, not realized trades.
 exists), a one-position-per-magic check against the broker, and a position-aware
 dead-man alarm.
 
-## 5. Evidence base (124 closed trades, 2026-09-03 → 10-01) — see review 2026-10-01
+## 5. Evidence base (125 closed trades through 2026-10-01; log through 10-05) — see 2026-10-05 delta
 
-Headline: **124 rows, 54W/70L (43.5%)** including two 09-03 pre-port sizing
-monsters. The raw ledger sums to **−$331.63 gross** (−$131.63 from the $200
-start before costs) while `status.json` shows $260.19; the $391.82 discrepancy
-is the known sizing/reset history, not a current engine accounting failure.
-Exclude the 09-03 pair from every strategy statistic. From 09-05 on: **122 rows,
-54W/68L, +$63.21 gross / +$14.41 net** at the measured $0.40 round trip.
-Always name the slice and say gross or net.
+Headline: **125 closed rows, 54W/71L (43.2%)**, including the two 09-03
+pre-port sizing monsters. The raw ledger sums to **−$333.01 gross** (−$133.01
+from the $200 start before costs) while `status.json` shows $258.81; the $391.82
+discrepancy is the known sizing/reset history. Exclude the 09-03 pair from every
+strategy statistic. From 09-05 on: **123 rows, 54W/69L, +$61.83 gross /
++$12.63 net** at the measured $0.40 round trip. The active BUY #125 is not a
+closed row and is excluded from every performance statistic. Its saved state
+conflicts with the price path; see §1 and `docs/REVIEW-2026-10-05.md`.
 
 **Do not pool across geometry.** On 09-06 17:49 UTC the ledger moved from SL
 1.5×ATR / TP 2.5×ATR to 2×/4× (RR 1:1.67 → 1:2). The pre-change slice is
-n=37, 15W/22L, −$393.62 gross; from the change onward it is n=87, 39W/48L,
-+$61.99 gross (+$27.19 net). These are separate rule eras; never quote pooled
+n=37, 15W/22L, −$393.62 gross; from the change onward it is n=88, 39W/49L,
++$60.61 gross (+$25.41 net). These are separate rule eras; never quote pooled
 R totals or breakeven rates across the boundary.
 
 - **Integrity:** `check_data.py` reports 0 fail / 64 warn. Warnings include 21
   duplicate `Trade_Num` values, 9 `Balance_After` continuity breaks, the known
-  +$391.82 engine-ledger/raw-profit drift, **183 missing M5 slots in 7 runs
-  including one 885-minute outage (09-28 17:50 → 09-29 08:35)**, the geometry
-  boundary, two duplicate-minute re-evaluations (09-23 10:50, 09-25 10:10), and
-  the fill warnings: SL overshoots #40/#52 (−1.38R), #65/#101 (−1.22R) and TP
-  overshoot #122 (+3.05R vs +2.00R planned). Every ledger row from the actual
-  gate boundary (09-10) passes today's trend, RSI and near-EMA checks: **66/66**.
-- **Edge and cost.** The strict post-gate slice (≥09-10) is n=66, 29W/37L, 43.9%
-  (Wilson 32.6–55.9), **+$57.44 gross / +$31.04 net**; t = +1.22, 95% CI on
-  net/trade [−0.30, +1.24], day-block bootstrap 85% positive (iid 90%); in R:
-  +0.33 gross, +0.06 net per trade. Median entry ATR gives median 1R ≈ $1.67 ⇒
-  $0.40 is **24.0% of 1R** ⇒ approximate cost-adjusted breakeven decisive WR
-  **41.3%**; the **break-even round trip is $0.87 ($87/BTC)**. The best 5 trades
-  are 98% of net (+$0.51 without them). Stability: first 33 trades +$7.12, last
-  33 +$23.92; the last 25 closed +$0.78. M5/M15/H1/H4 timeframe comparison is
-  still the dominant unresolved economics question.
+  +$391.82 engine-ledger/raw-profit drift, **197 missing M5 slots in 14 runs**
+  (one 885-minute outage on 09-28/29, plus 35 minutes on 10-03 and 20 minutes
+  on 10-04), the geometry boundary, two duplicate-minute re-evaluations
+  (09-23 10:50, 09-25 10:10), and the existing fill warnings (#40/#52 −1.38R,
+  #65/#101 −1.22R, #122 TP +3.05R vs +2.00R planned). All 67 ledger rows from
+  the actual gate boundary (09-10) pass today's trend, RSI and near-EMA checks.
+  The checker does **not** detect an active trade whose saved price path already
+  crossed SL/TP; it is a separate operational finding.
+- **Edge and cost.** Strictly post-gate (entries ≥09-10): n=67, 29W/38L, 43.3%
+  (Wilson 32.1–55.2), **+$56.06 gross / +$29.26 net**; t=+1.14, 95% CI on
+  net/trade [−$0.33, +$1.20], day-block bootstrap 83% positive. Median 1R is
+  $1.66, so $0.40 is **24% of 1R**; approximate cost-adjusted breakeven WR is
+  **41.4%**, and the break-even round trip is **$0.84 ($84/BTC)**. Best 5 trades
+  are 104% of net (net −$1.27 without them). Last 25 closed: +$2.82 net; last
+  10: +$13.85 net. This remains a positive but unproven point estimate; the
+  M5/M15/H1/H4 timeframe comparison is still a dominant economics question.
 - **Book by direction (strictly post-gate):** BUY n=32, 16W/16L, +$44.16 gross /
-  +$31.36 net (Wilson 33.6–66.4); SELL n=34, 13W/21L, +$13.28 gross / **−$0.32
-  net** (Wilson 23.9–55.0). SELL has not paid for its cost yet, but 34 trades do
-  not justify switching it off. The unfiltered 4× signal census (all 320 signals,
-  live geometry) also favours BUY: −$3.31 net vs SELL −$49.25; it ignores
-  cascade/risk gates.
-- **Signal census and cascade:** 6518 logged M5 bars reconstruct 320 full
-  signals (133 BUY, 187 SELL); 35 occur in blackouts, leaving 285 takeable. At
-  live geometry the unfiltered, cascade-ignorant stream is 101W/189L/30T,
-  −$52.57 net (−$52.24 for the 285 takeable). With one-position-at-a-time,
-  cooldown, daily halt and blackout replay, the takeable census selects 77
-  trades at TP 4×: 28W/42L/7T, **+$16.17 net**. This is a modelled stream, not 77
-  additional real trades. Indicator reconstruction matches logged values: floor
-  6498/6498; ATR and RSI 6503/6503.
-- **Exit geometry** (`pathwalk_sims.py --spread 0.40 --census`): actual-outcome
-  replay agrees **70/70** for the log-covered trades. In the 240-minute
-  counterfactual walk and the risk-gated cascade census (all net of $0.40):
-
-  | Rule | 70 trade paths | gated census |
-  |---|---:|---:|
-  | TP 4×ATR (live) | +$15.43 | +$16.17 (77 taken) |
-  | TP 5×ATR | +$30.00 | +$25.21 (72 taken) |
-  | TP 6×ATR | +$36.20 | +$36.27 (71 taken) |
-  | BE +0.50R | +$6.01 | −$10.04 (98 taken) |
-  | BE +0.75R | +$4.79 | +$0.25 (92 taken) |
-  | BE +1.00R | +$16.18 | +$18.43 (84 taken) |
-
-  `TIME` is marked to market at 240 minutes; target changes also alter holding
-  time and the cascade. Wider TP keeps beating live 4× in both views, by more than
-  at 99 trades — but it is a counterfactual on one regime, and TP6 means a ~33%
-  hit rate and bigger drawdowns. +1.0R beats live only slightly; +0.50R/+0.75R do
-  not agree across views. **Keep live 4× TP and no BE ratchet for now** (and
-  change nothing before the demo stage: one variable at a time).
-- **Excursions and fills:** on the 70 covered trades, TP winners have median MFE
-  +2.21R / MAE −0.38R; SL losers median MFE +0.49R / MAE −1.17R. A +0.50R
-  ratchet would arm on 19/39 eventual losers and all 31/31 winners. On 2×/4×
-  geometry, SL slippage median is −3.6% of 1R (worst −37.9%); TP overshoot median
-  +2.7% (worst +52.7%, #122). Four SLs exceed 20% of planned risk (#40/#52 at
-  −1.38R, #65/#101 at −1.22R) — consistent with fast-move fills, not a sizing drift.
-- **Filter candidates (net at $0.40) — all monitor-only:** ATR% ≥0.06 remains a
-  day-confounded split (census own-day keep n=37 −$39.59 vs skip n=36 −$32.20,
-  while the 122-trade ledger split keeps +$39.82 vs −$25.41). RSI ≥45 remains
-  unsupported (census keep −$33.73 vs skip −$18.52; ledger +$8.16 vs +$6.25).
-  **Wick ratio ≤0.40 now agrees in sign across views** (census keep 153 +$3.07 vs
-  skip 132 −$55.32; ledger keep 47 +$12.48 vs skip 75 +$1.93; they conflicted at
-  99 trades) — still one regime, log it, don't gate. The two-sided EMA50 band
-  stays monitor-only (census ≤0.15 ATR keep 37 +$2.44 vs skip 248 −$54.68;
-  post-gate ledger ≤0.50 ATR keep 25 at 52.0% WR +$23.02 vs skip 41 at 39.0%
-  +$8.02). Tightening the live one-sided `MAX_BELOW_EMA_ATR` 0.30→0.15 is
-  unresolved (ledger: would block 4 losing rows, −$2.52; census: skips +$1.14).
-  Cut-dependent, small samples; do not conflate these tests. A **cost-share-of-1R**
-  cut is monotone on the post-gate ledger (≤20% → 54% WR, +$1.26/trade; >40% →
-  10% WR, −$0.92/trade) and is the one cut with a first-principles reason — it
-  belongs in the live spread guard (review §3.1), not in a win-rate filter.
+  **+$31.36 net**; SELL n=35, 13W/22L, +$11.90 gross / **−$2.10 net**. SELL
+  has not paid for its cost yet, but 35 trades do not justify switching it off.
+  The unfiltered signal census is a separate, cascade-ignorant diagnostic; it
+  is not the traded book.
+- **Signal census and cascade:** 7,663 logged M5 rows reconstruct 418 full
+  signals (204 BUY, 214 SELL); 50 occur in blackout windows, leaving 368
+  takeable. At TP 4×, the raw takeable entry stream is 117W/219L/32T and
+  −$83.15 net before the one-position/cooldown/daily-halt cascade. Applying
+  those gates selects 95 modeled trades (36W/51L/8T, **+$14.10 net**). This is
+  a replay estimate, not additional observed trades. Indicator reconstruction
+  matches floor 7,643/7,643 and ATR/RSI 7,648/7,648.
+- **Exit geometry** (`pathwalk_sims.py --spread 0.40 --census`): replay agrees
+  **71/71** for the log-covered closed trades. On the 240-minute counterfactual
+  paths (all net of $0.40), TP 4× (live) is +$13.69, TP 5× +$28.26 and TP 6×
+  +$34.46. In the gated census, TP 4× is +$14.10 (95 taken), TP 5× +$24.89
+  (89 taken), TP 6× +$35.38 (87 taken). Wider TP continues to look better in
+  these limited views; horizon and regime dependence mean this is not
+  adoption-grade. **Keep live 4× TP and no BE ratchet for now.**
+- **Excursions and fills:** 71 covered closed trades: TP winners n=31 have median
+  MFE +2.21R / MAE −0.38R; SL losers n=40 have median MFE +0.51R / MAE −1.16R.
+  A +0.50R ratchet would arm on 20/40 eventual losers and all 31/31 winners.
+  On 2×/4× geometry, median SL slippage is −3.5% of 1R (worst −37.9%); TP
+  overshoot median +2.7% (worst +52.7%, #122). These are simulated-feed fills,
+  not XM execution measurements.
+- **Filter candidates — all monitor-only:** ATR% ≥0.06 remains day-confounded
+  (within-day census keep/skip −$48.95/−$30.06; clean ledger keep/skip
+  +$38.04/−$25.41). RSI ≥45 remains unsupported (clean ledger +$6.38 vs
+  +$6.25). Wick ratio ≤0.40 leans toward keeping the trade in both views, but
+  remains one-regime evidence (clean ledger +$10.70 vs +$1.93). The two-sided
+  EMA50 band is still monitor-only (post-gate ≤0.50 ATR: n=25 +$23.02 vs n=42
+  +$6.24). Tightening the one-sided `MAX_BELOW_EMA_ATR` 0.30→0.15 would block
+  four losing ledger rows (−$2.52), but the signal-census view disagrees; no
+  gate change. A **cost-share-of-1R** cap belongs in the LIVE spread guard, not
+  in a win-rate filter.
 - **Blocked-signal phantoms** (`phantom_trades.py --spread 0.40`, 117 skips):
   daily halt 42 scorable → 3W/36L/3T, −$48.49 gross / −$65.29 net (protective);
-  blackout 21/25 scorable → 8W/13L, +$4.02 / −$4.38 net (neutral-protective now);
-  cooldown 11/44 scorable → 8W/3L, +$23.24 / +$18.84 net (costly-looking, small);
-  ATR 0/6 scorable. Overall 74 scorable, 19W/52L/3T, −$21.23 gross / −$50.83
-  net; **43/117 remain unscorable**. Sequential dedup is 45 estimated trades,
-  +$3.71 gross / −$14.29 net — not a factual counterfactual. Keep the halt and
+  blackout 21/25 scorable → 8W/13L, +$4.02 gross / −$4.38 net (neutral-to-
+  protective); cooldown 11/44 scorable → 8W/3L, +$23.24 gross / +$18.84 net
+  (costly-looking, small); ATR 0/6 scorable. Overall 74 scorable, 19W/52L/3T,
+  −$21.23 gross / −$50.83 net; **43/117 remain unscorable**. Keep the halt and
   do not loosen cooldown/blackouts on these samples.
 - **Cost and real-world constraints:** $0.40 is one XM Asian-session sample
-  (09-15 04:06 UTC), not a London/NY/weekend profile; third-party guides
-  (unverified) quote $100–300 in high volatility and $100–200 at weekends against
-  an $87 break-even. The forward test fills at the feed's last tick with a flat
-  haircut; XM executes on its own quotes (the paper feed looks like a ~1 Hz
-  spot-style stream — confirm `DATA_SOURCE`). Entry latency is *not* a problem:
-  a fill 1–5 minutes late leaves the M5 re-walk flat within noise (review §5.3).
-  BTC remains forward-test simulated; do not enable `TRADING_MODE=LIVE` (§7).
+  (09-15 04:06 UTC), not a London/NY/weekend profile. The forward test uses the
+  feed's last tick with a flat haircut; XM executes on its own CFD quotes and
+  signal parity is unproven. `xm_data/` is absent in this checkout, so the quote
+  logger's ≥14-day / two-weekend measurement has not started here. Keep
+  `TRADING_MODE=FORWARD_TEST`; the LIVE path is not ready (§7 and
+  `docs/REVIEW-2026-10-01.md` §6–7).
 
 ### What this data has not settled
 
 | Question | Current evidence | What would settle it |
 |---|---|---|
-| **Live readiness** | edge t = +1.22 at n = 66; best 5 trades = 98% of net; break-even spread $0.87; order path fails 8/9 probes; no Linux MT5 | Stages A–E in review 2026-10-01 §7 (fix → measure → XM demo → micro-live → scale) |
-| Bar timeframe / execution cost | M5 cost ≈ 24.0% of median post-gate 1R; $0.40 is one Asian-session sample | the XM quote logger (`docs/XM-LOGGER.md`; **built, awaiting install** — ≥14 days incl. 2 weekends, read with `tools/xm_quote_report.py`) + a multi-regime M5/M15/H1 backtest on older BTC history |
-| BUY vs SELL | post-gate BUY +$31.36 / SELL −$0.32 net; raw census BUY −$3.31 / SELL −$49.25 | per-side data from the demo stage; do not use the unfiltered census alone |
+| **Live readiness** | t=+1.14 at n=67; best 5 trades = 104% of net; break-even spread $0.84; LIVE path probe 1/9 clean | Stages A–E in review 2026-10-01 §7 (fix → measure → XM demo → micro-live → scale) |
+| **Open paper-trade exit handling** | BUY #125 remains active despite first logged SL breach; MT5 forward-test loop has no position check; production feed mode unknown | Confirm deployed mode/revision and journal; add/test bar-based exit management if MT5; reconcile from ordered history (review 2026-10-05) |
+| Bar timeframe / execution cost | M5 cost ≈24% of median post-gate 1R; $0.40 is one Asian-session sample | XM quote logger (`docs/XM-LOGGER.md`; built, awaiting install) for ≥14 days incl. 2 weekends, plus multi-regime M5/M15/H1 backtest |
+| BUY vs SELL | post-gate BUY +$31.36 / SELL −$2.10 net; raw census is cascade-ignorant | per-side data from the demo stage; do not use the unfiltered census alone |
 | Cooldown and blackouts | cooldown +$18.84 on 11 scorable; blackout −$4.38 on 21; 43 of 117 skips unscorable | more log coverage before changing either gate |
-| TP / BE | TP 5–6× beats live in both replay views (+$30.00/+$36.20 vs +$15.43; census +$25.21/+$36.27 vs +$16.17); BE views disagree | prospective collection and a multi-regime re-cut |
-| EMA50 band / wick | wick ≤0.40 now agrees in sign; band results vary by cutoff/view | continue monitor-only logging; no gate change |
+| TP / BE | TP 5–6× beats live in both current replay views; BE views disagree | prospective collection and a multi-regime re-cut |
+| EMA50 band / wick | modest ledger splits; views/cutoffs remain sensitive | continue monitor-only logging; no gate change |
 
 ## 6. Tooling (run in this order on every data drop)
 
@@ -453,10 +441,10 @@ Expected first lines at the snapshot (a mismatch means the data moved — refres
 the block, then re-read the prose):
 
 ```
-win_rate_report - 124 trades, 6532 M5 bars (2026-09-07 20:20:00 -> 2026-10-01 03:15:00), spread $0.40/trade
-pathwalk_sims  - 124 trades, 6532 M5 bars (...), horizon 240 min, spread $0.40/trade
-analyze_losers - 124 trades (122 from 09-05), 70 log-covered, 6532 M5 bars
-live_readiness - 66 post-gate trades (entries >= 2026-09-10) of 124 total, 6532 M5 bars, spread $0.40/trade, seed 2026
+win_rate_report - 125 trades, 7663 M5 bars (2026-09-07 20:20:00 -> 2026-10-05 02:35:03), spread $0.40/trade
+pathwalk_sims  - 125 trades, 7663 M5 bars (...), horizon 240 min, spread $0.40/trade
+analyze_losers - 125 trades (123 from 09-05), 71 log-covered, 7663 M5 bars
+live_readiness - 67 post-gate trades (entries >= 2026-09-10) of 125 total, 7663 M5 bars, spread $0.40/trade, seed 2026
 == result: 0 fail, 64 warn ==
 ```
 
@@ -467,30 +455,35 @@ All read-only except the engine's own self-healing migration and
 replay) that every tool imports. **Never hand-roll a bar walk**: gold's
 equivalent tool shipped with a SELL excursion inversion that made it validate
 itself against its own bug. `pathwalk_sims.py` prints its agreement rate with the
-engine *first* (70/70 for the log-covered trades) and `smoke_test.py` Scenario I
+engine *first* (71/71 for the log-covered closed trades) and `smoke_test.py` Scenario I
 locks the direction/ratchet/horizon rules.
 
 ## 7. Next steps (in order)
 
-> **Status of the recommended order (updated by the logger session, 2026-10-01).**
-> The user accepted the order in the review PR and started with step 1:
-> - **(1) Stage B-i logger — built, awaiting install.** Draft PR from this session's
->   branch until the user signs off; **nothing on the box changes until it merges
->   and the sidecar is installed** (`docs/XM-LOGGER.md` §3). The PR touches only
->   `tools/`, `deploy/` and `docs/`, so autosync runs the smoke gate but does
->   **not** restart the engine.
-> - **(2) Stage A — next, in its own session/PR.** It edits `engine.py`, so merging
->   it restarts the engine. Fold the MT5-mode server-time dedup fix (item 9) into
->   whichever PR is allowed to restart the engine.
-> - **(3)** No real-money order before Stage A's probe exits 0 and Stage B has ≥14
->   days. The staged-path **thresholds** in review §7 remain proposals until the
->   user says otherwise.
-> - **Still needed from the user (nothing in the repo records it):** which
->   `DATA_SOURCE` the box runs and whether the Wine MT5 terminal and the
->   `mt5feed-btc` sidecar are installed —
->   `grep DATA_SOURCE /opt/bitcoin/.env` and `systemctl list-units | grep -i mt5`.
->   The logger's install checklist needs both answers. (Delete this block once the
->   logger is validated on the box.)
+> **Status (re-checked 2026-10-05).**
+> - **Immediate: triage the open paper trade #125.** The saved M5 path records an
+>   SL breach on 10-01 07:20 while status remains active through 10-05 02:35;
+>   `DATA_SOURCE` and the running service are not present in this checkout. Check
+>   the deployed revision, the single `DATA_SOURCE` setting and the engine
+>   journal. If using MT5, the checked-in `run_mt5_test()` lacks an exit check;
+>   add an OHLC-aware, stop-first exit and a regression scenario before relying
+>   on that mode. If using Twelve Data, inspect the per-tick callback and its
+>   suppressed exceptions. Do not hand-edit the live ledger/status to guess an
+>   outcome; see `docs/REVIEW-2026-10-05.md`.
+> - **Stage B-i logger — built, awaiting on-box validation.** No `xm_data/` is
+>   present in this checkout. The ≥14-day clock (including 2 weekends) starts
+>   at the first real `OK` row (`docs/XM-LOGGER.md` §3).
+> - **Stage A — next engine-changing PR.** It restarts the engine; include the
+>   existing MT5 server-time dedup fix (item 9) and test the MT5 forward-test
+>   exit path in the same controlled change, after current state is reconciled.
+> - **No real-money order** before Stage A's LIVE probe exits 0 and Stage B has
+>   ≥14 days. The staged-path thresholds in review §7 remain proposals until
+>   the user says otherwise.
+> - **Still needed from the user/host:** which `DATA_SOURCE` is deployed and
+>   whether the Wine MT5 terminal plus `mt5feed-btc` sidecar are installed. Check
+>   only the setting (do not print secrets): `grep '^DATA_SOURCE=' /opt/bitcoin/.env`;
+>   identify the engine unit and inspect its journal around 2026-10-01 07:10–07:25
+>   UTC. The logger's install checklist needs these same host facts.
 
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
@@ -526,10 +519,10 @@ locks the direction/ratchet/horizon rules.
    sandbox); (iv) log spread-to-1R, weekend flag and side on every
    signal/skip row (monitor-only).
 3. **Bar timeframe decision (M5 vs M15 vs H1 vs H4) — still the primary
-   economics blocker.** On the 66-trade post-gate slice, the $0.40 round trip is
-   24.0% of median 1R (about $1.67), with a 41.3% approximate cost-adjusted
-   breakeven rate versus 43.9% observed (Wilson 32.6–55.9); the break-even
-   round trip is $0.87. That interval is not proof of an edge. Item 2(iii) is
+   economics blocker.** On the 67-trade post-gate slice, the $0.40 round trip is
+   24% of median 1R (about $1.66), with a 41.4% approximate cost-adjusted
+   breakeven rate versus 43.3% observed (Wilson 32.1–55.2); the break-even
+   round trip is $0.84. That interval is not proof of an edge. Item 2(iii) is
    the way to settle it; do not tune M5 first.
 4. **Confirm swap/commission and the full contract spec on the XM terminal.**
    Partly automated now: the logger's `symbol_spec.json` records execution and
@@ -540,7 +533,7 @@ locks the direction/ratchet/horizon rules.
    stale quotes). Sources disagree on crypto swap; the $0.40 model assumes
    spread-only.
 5. **Keep collecting rather than retuning.** The next milestone is 100 strictly
-   post-gate trades (66 today, ~22/week): re-run `python3 tools/live_readiness.py
+   post-gate trades (67 today, ~22/week): re-run `python3 tools/live_readiness.py
    --spread 0.40` and read the gates. No exit or entry parameter change is
    justified by the current sample.
 6. **Keep the two-sided EMA50 distance and the wick ratio monitor-only.** Both
@@ -567,11 +560,12 @@ locks the direction/ratchet/horizon rules.
 ### Explicitly NOT queued (with the evidence that closed them)
 
 - **Tightening `MAX_BELOW_EMA_ATR` (0.30 → 0.15 / 0.00)** — unresolved and not
-  worth acting on: the post-gate ledger would block four losing rows (−$2.52 net)
-  but the census view says the same cut skips +$1.14 (0.15) / +$5.23 (0.00).
-  The two-sided band is a different monitor-only hypothesis.
-- **RSI ≥45** — still unsupported by the census/within-day control (census keep
-  −$33.73 vs skip −$18.52); no transfer from gold.
+  worth acting on: the post-gate ledger would block four losing rows (−$2.52 net),
+  while the current cascade-ignorant signal-census cuts skip +$1.52 (0.15) /
+  +$3.93 (0.00). The two-sided band is a different monitor-only hypothesis.
+- **RSI ≥45** — still unsupported: the current takeable-signal census split is
+  negative on both sides (−$58.90 keep / −$24.25 skip), and the clean ledger is
+  essentially flat (+$6.38 / +$6.25); no transfer from gold.
 - **ATR floor by win rate** — still day-confounded; do not treat it as spread
   control. (The cost-share-of-1R guard in item 1 is a different, first-principles
   mechanism and *is* queued — as a live safeguard, validated prospectively.)
@@ -579,7 +573,7 @@ locks the direction/ratchet/horizon rules.
   (keep better) but on one regime; monitor only.
 - **TP/BE changes on M5** — wider TP and BE +1.0R look better in counterfactual
   paths, but are not adoption-grade; live remains TP4 with no ratchet.
-- **Switching SELL off, or a hard weekend pause** — SELL is −$0.32 on n = 34 and
+- **Switching SELL off, or a hard weekend pause** — SELL is −$2.10 on n = 35 and
   weekends are 3W/13L on n = 16, post-hoc cuts of one regime. Test both on the
   demo account (trade everything there); pause weekends only in the micro-live
   phase, as a risk limit rather than an optimisation.
@@ -607,7 +601,7 @@ is where stale numbers actually hide.
 
 - **The two 09-03 trades (−$197.63, −$197.21) are not comparable to anything
   else** — pre-port sizing (~100× lot). Exclude them from every strategy P/L
-  statistic and say so. The current 124-row raw Profit sum is −$331.63 gross;
+  statistic and say so. The current 125-row raw Profit sum is −$333.01 gross;
   it is not the performance of the current strategy.
 - **There are THREE era boundaries, not one.** (a) 09-05: the outliers stop.
   (b) 09-06 17:49: geometry 1.5×/2.5× → 2×/4×. (c) **the gates went live
@@ -628,10 +622,10 @@ is where stale numbers actually hide.
   self-heals drift on start and before every append (keeps a
   `.bak-pre-migration` backup) and `trade_filter.load_recent_trades()` has a
   loud drift tripwire.
-- **The price log starts 2026-09-07 20:20 UTC** (6532 M5 rows through
-  2026-10-01 03:15 UTC; 183 missing slots in 7 runs, **dominated by one
-  885-minute outage, 09-28 17:50 → 09-29 08:35** — the only gap >15 minutes, cause
-  unrecorded). **Only 70 of 124 closed trades are log-covered**; 54 predate the
+- **The price log starts 2026-09-07 20:20 UTC** (7,663 M5 rows through
+  2026-10-05 02:35 UTC; 197 missing slots in 14 runs, including the 885-minute
+  09-28/29 outage plus 35-minute 10-03 and 20-minute 10-04 gaps; causes
+  unrecorded). **Only 71 of 125 closed trades are log-covered**; 54 predate the
   log, limiting any log-joined replay to the covered tail. Two minutes are
   duplicated (09-23 10:50 and 09-25 10:10: two same-OHLC rows a second apart
   with updated indicators); treat them as restart/re-evaluation warnings, not
@@ -645,13 +639,13 @@ is where stale numbers actually hide.
   unproven (review 2026-10-01 §5.2).
 - **Log indicators are PRE-update for that bar; ledger `*_At_Entry` values are
   POST-update** (the engine gates on post-update values). The current
-  `replay_lib.enrich_log()` reconstruction matches floor 6498/6498 and ATR/RSI
-  6503/6503. If the match rate is not ~100%, treat every census number as
+  `replay_lib.enrich_log()` reconstruction matches floor 7643/7643 and ATR/RSI
+  7648/7648. If the match rate is not ~100%, treat every census number as
   suspect. Never compare a raw log indicator column against a ledger entry
   column directly.
 - **Dashboard funnel counters are since-restart, not lifetime.** Current
-  `status.json` has `candles_evaluated = 413`, `all_confirmed = 2` BUY and
-  `sell_all_confirmed = 5`; use them only for post-restart context, not a
+  `status.json` has `candles_evaluated = 1113`, `all_confirmed = 1` BUY and
+  `sell_all_confirmed = 0`; use them only for post-restart context, not a
   lifetime signal census. Use `win_rate_report.py` for the reconstructed census.
 - Per-trade replay must use **±6 min** windows (M5 cadence); gold uses ±2 min on
   M1. Gap threshold is >15 min (gold: >5).
@@ -664,7 +658,7 @@ is where stale numbers actually hide.
 - **Cost haircut:** the live terminal spread is measured at **$40.00/BTC =
   $0.40/trade at 0.01 lot** (XM, 2026-09-15 04:06 UTC, Asian session — one
   sample). Always pass `--spread 0.40`; tools default to gross (`--spread 0`).
-  From 09-05 on the current clean slice is +$63.21 gross / +$14.41 net at this
+  From 09-05 on the current clean slice is +$61.83 gross / +$12.63 net at this
   assumed flat cost. `phantom_trades.py` uses the same scaling and its outcomes
   are upper-bound counterfactuals, not fills.
 - **Symbol / contract:** `BTCUSD` exists on XM MT5 with contract 1.0 / min lot
@@ -676,8 +670,8 @@ is where stale numbers actually hide.
   server DST change (next: Sun 25 Oct 2026) can leave bars stamped one hour off
   — `xm_quote_report.py`'s time-shift scan flags the day. `xm_data/` rows are
   live-collected data: never hand-edit them.
-- `status.json` equity ($260.19) is the **engine ledger**, not the raw sum of
-  Profit (−$331.63 gross, −$131.63 from $200 before spread costs). `check_data.py`
+- `status.json` equity ($258.81) is the **engine ledger**, not the raw sum of
+  Profit (−$333.01 gross, −$133.01 from $200 before spread costs). `check_data.py`
   reports the +$391.82 drift by design; see the outlier/reset notes above.
 
 ## 10. How to keep this file honest (do this every session)
@@ -736,8 +730,9 @@ rules apply to every session, from the first commit:
    to §7's "Explicitly NOT queued" *with the evidence that closed it*.
 5. Write the analysis itself in `docs/REVIEW-YYYY-MM-DD.md`; this file only
    carries the *conclusion* and a pointer. The current one is
-   `docs/REVIEW-2026-10-01.md` (the **live-readiness** question) — keep adding
-   dated deltas there unless the question changes again.
+   `docs/REVIEW-2026-10-05.md` (the latest **data/exit-state delta**) and
+   `docs/REVIEW-2026-10-01.md` (the full **live-readiness** review). Add future
+   deltas to the dated data review unless the question changes again.
    `docs/REVIEW-2026-09-15.md` (§13 = the 99-trade re-cut) is the earlier
    "is there an edge / what do we tune" review.
 6. Never quote a pooled R total or a breakeven WR across the era boundaries in
@@ -759,7 +754,8 @@ order-path probe (fake MT5) · `tools/mt5_quotes.py` + `tools/xm_quote_report.py
 quote/spec logger sidecar and its reader (`xm_data/` = its output, `docs/XM-LOGGER.md`
 = its runbook) · `tools/` analysis + tests · `deploy/mt5feed.service` +
 `deploy/mt5quotes.service` sidecar units · `docs/PORT-2026-09-10.md` what came from gold and why ·
-`docs/REVIEW-2026-10-01.md` **live-readiness review (current)** ·
+`docs/REVIEW-2026-10-05.md` **latest data/exit-state delta** ·
+`docs/REVIEW-2026-10-01.md` **live-readiness review** ·
 `docs/REVIEW-2026-09-15.md` first data review (**§13 = the 99-trade re-cut; §12
 is historical**) · `docs/AUTOSYNC.md` the unattended deploy loop +
 digest guide · `archive/PROJECT_LOG.md` full history · **this file** =
@@ -768,8 +764,8 @@ executive summary.
 ## 12. Reading order for a brand-new agent
 
 1. **`docs/HANDOFF.md`** (this file) — snapshot block, §1, then §5's tables
-2. `docs/REVIEW-2026-10-01.md` — the live-readiness review: newest numbers, the
-   LIVE-path findings (§6) and the staged path to live (§7)
+2. `docs/REVIEW-2026-10-05.md` — latest data/exit-state delta and open-trade
+   finding; `docs/REVIEW-2026-10-01.md` — full live-readiness review and staged path
 3. `archive/PROJECT_LOG.md` — changelog + current strategy state
 4. `docs/PORT-2026-09-10.md` — what the gold port changed and why
 5. `docs/REVIEW-2026-09-15.md` §13 (99-trade re-cut) and §1–§11 — the full first review (73 trades)

@@ -24,14 +24,15 @@ deliberately adapted for BTC).
 | `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
 | `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
-| `docs/REVIEW-2026-10-01.md` | **Live-readiness review (124 trades)** — is the edge real, how thin is the cost margin, what is wrong in the LIVE order path, and the staged path (fix → measure → XM demo → micro-live) to a capped pilot. Verdict: not ready for real money. |
+| `docs/REVIEW-2026-10-05.md` | Latest data/exit-state recheck (125 closed rows): documents the open paper BUY #125 whose saved path already crosses SL, the conditional MT5 forward-test exit gap, updated metrics, and the need to confirm the production feed/runtime before reconciliation. |
+| `docs/REVIEW-2026-10-01.md` | **Live-readiness review (124 trades)** — is the edge real, how thin is the cost margin, what is wrong in the LIVE order path, and the staged path (fix → measure → XM demo → micro-live) to a capped pilot. Historical data snapshot; verdict remains not ready for real money. |
 | `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). §12 is the 2026-09-16 re-cut at 78 trades and **§13 the 2026-09-24 re-cut at 99 trades**; the body is the provenance behind them. |
 | `docs/AUTOSYNC.md` | The unattended sync/deploy loop: cron assumptions, branch rule, Telegram digest legend, what a deploy does to a running trade. |
 | `docs/XM-LOGGER.md` | Runbook for the XM quote + contract-spec logger: column dictionary, the on-box install/validation checklist, how to read its report, design traps (broker server time ≠ UTC, DST, privacy). |
 | `tools/handoff_check.py` | Freshness gate for `docs/HANDOFF.md`: recomputes its snapshot block from the live CSVs, says `HANDOFF FRESH`/`STALE`, and rewrites the block with `--update`. |
 | `tools/live_readiness.py` | Evidence + go/no-go gates for LIVE: edge significance, cost margin, fragility, Monte Carlo risk, entry-latency stress, feed health (defaults to `--spread 0.40`). |
 | `tools/live_path_probe.py` | Offline probe of `engine.py`'s LIVE order path against a fake MT5 (no terminal, network or Telegram); exits 1 until the findings in the live-readiness review are fixed. |
-| `tools/mt5_quotes.py` | **Read-only** Wine sidecar (never touches orders or `engine.py`): logs XM BTCUSD bid/ask/spread, a contract-spec snapshot and shadow XM M5 candles into `xm_data/` so the cost assumption ($0.40 vs $0.87 break-even) and feed parity are measured. Unit: `deploy/mt5quotes.service`. |
+| `tools/mt5_quotes.py` | **Read-only** Wine sidecar (never touches orders or `engine.py`): logs XM BTCUSD bid/ask/spread, a contract-spec snapshot and shadow XM M5 candles into `xm_data/` so the cost assumption ($0.40 vs current $0.84 break-even) and feed parity are measured. Unit: `deploy/mt5quotes.service`. |
 | `tools/xm_quote_report.py` | Reads `xm_data/`: logger progress vs the ≥14-day/2-weekend exit, spread by session/weekend/blackout/hour, the cost on the ledger's real trades, candle parity vs `forward_test_log.csv`, the contract spec. `--quiet` = one advisory line (autosync digest). |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
 
