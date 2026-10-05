@@ -20,8 +20,8 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-05 02:35 |
-| data_collection | 2323 |
+| as_of_utc | 2026-10-05 03:02 |
+| data_collection | 2326 |
 | closed_trades | 125 |
 | wins_losses | 54W/71L |
 | win_rate_pct | 43.2 |
@@ -30,8 +30,8 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 | live_era_trades | 71 |
 | live_era_net_usd | +30.42 |
 | log_covered_trades | 71 |
-| log_bars | 7663 |
-| log_last_bar_utc | 2026-10-05 02:35 |
+| log_bars | 7668 |
+| log_last_bar_utc | 2026-10-05 03:00 |
 | skip_rows | 117 |
 | open_trade | BUY #125 @ 84177.15 |
 | spread_usd_per_trade | 0.40 |
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (data through 2026-10-05 02:35 UTC; delta review 2026-10-05 at 125 closed trades)
+## 1. Where things stand (local data through 2026-10-05 03:00:03 UTC; host status through 03:02:16 UTC; delta review 2026-10-05 at 125 closed trades)
 
 - Repo: `shashidaren/bitcoin-trading-bot`, default branch `main`. Work happens on
   the **session branch** (`arena/<session>-bitcoin-trading-bot`) — read it with
@@ -100,7 +100,7 @@ a new live accounting failure. Exclude the two outliers from every strategy P/L
 statistic. The clean 09-05-on book is **+$61.83 gross / +$12.63 net** at the
 measured $0.40 round trip.
 
-### What changed since the 2026-10-01 snapshot (124 → 125 closed rows; +1,131 M5 bars)
+### What changed since the 2026-10-01 snapshot (124 → 125 closed rows; 6,518 → 7,668 M5 rows, +1,150)
 
 1. **One new close, one new open trade.** The newly closed ledger row is the
    SELL entered 10-01 01:15 at $83,602.00; it exited SL at 03:51 for −$1.38
@@ -112,26 +112,31 @@ measured $0.40 round trip.
    $1.66; $0.40 is 24% of 1R; estimated cost-adjusted breakeven WR is 41.4% and
    break-even round trip is $0.84. The best five trades are 104% of net (−$1.27
    without them). See the 2026-10-05 review for the full cut.
-3. **BUY #125 appears stuck in the paper state.** Entry $84,177.15, SL
-   $84,008.74, TP $84,513.98. The 07:15 candle low was $84,035.75 (no stop hit);
-   the 07:20:11 candle low was $83,838.25 and close $83,841.65, with high only
-   $84,076.35. The first recorded barrier is therefore SL, yet `status.json`
-   still marks the trade active at 2026-10-05 02:35:03, 91 h 25 min after entry,
-   and there is no closed row for #125. The log subsequently continues and later
-   crosses TP, but that later move cannot supersede the first stop. This is a
-   saved-state/exit-handling anomaly; the bar proves a breach, not an exact fill.
-4. **Likely MT5-mode code path, not confirmed production cause.** In the checked-in
-   engine, `run_mt5_test()` evaluates closed candles without calling
-   `check_position()`; the Twelve Data `on_event()` path does call it per tick.
-   The checkout has no `.env` or production journal, so the deployed
-   `DATA_SOURCE` and revision are unknown. Confirm those on the box before
-   attributing or correcting the close; do not hand-edit status/ledger files.
-5. **Data integrity:** `check_data.py` reports 0 failures / 64 warnings. The log
-   has 7,663 rows through 10-05 02:35:03, 197 missing M5 slots in 14 runs, and
-   three gaps >15 min (885 min on 09-28/29; 35 min on 10-03; 20 min on 10-04).
-   Two duplicated minutes remain (09-23 10:50 and 09-25 10:10). The status and
-   last bar timestamps match, so this checkout shows collection through 02:35;
-   it cannot prove the process is alive after that.
+3. **BUY #125 remains open in the simulator after a logged stop breach.** Entry
+   $84,177.15, SL $84,008.74, TP $84,513.98. The 07:15 candle low was $84,035.75
+   (no stop hit); the 07:20:11 candle low was $83,838.25 and close $83,841.65,
+   with high only $84,076.35. The first recorded barrier is SL. Local
+   `status.json` at 03:02:16 and the operator-pasted host status after restart
+   both show #125 active, 91 h 52 min after entry, with no close row. The supplied
+   engine excerpt has no close/SL event; later prices rise above TP, which cannot
+   supersede the first stop. OHLC proves a breach, not an exact executable fill.
+   The MT5 forward-test startup is a simulator, not evidence of a broker position.
+4. **The MT5-mode exit omission is plausible, not a confirmed production cause.**
+   Checked-in `run_mt5_test()` evaluates closed candles without calling
+   `check_position()`; the Twelve Data `on_event()` path checks per tick but
+   suppresses callback exceptions. The operator reports `DATA_SOURCE=MT5` and an
+   active `bitcoin-engine.service` with a `FORWARD TEST (MT5 feed)` startup on
+   Oct 5. That sample does not prove the Oct 1 feed mode; the source-switch date
+   and deployed Git SHA remain unknown. Restart restored #125 but did not
+   reconcile the earlier breach. Do not attribute a root cause or hand-edit
+   status/ledger files until the read-only host checks in the review are complete.
+5. **Data integrity:** `check_data.py` reports 0 failures / 64 warnings. The local
+   log has 7,668 rows through 10-05 03:00:03, 197 missing M5 slots in 14 runs,
+   and three gaps >15 min (885 min on 09-28/29; 35 min on 10-03; 20 min on
+   10-04). Two duplicated minutes remain (09-23 10:50 and 09-25 10:10). The
+   status update at 03:02:16 is 2 min 13 s after the last bar; ledger counts
+   agree, but timestamps do not match. The host also reported 7,668 rows. The
+   sampled service was active then; this does not prove it is still alive later.
 6. **Gates/readiness:** risk-gate skip evidence is unchanged (117 skips; 43
    unscorable). `live_readiness.py` passes 3/6 data gates; feed health still fails
    on the historical 885-minute outage. `pathwalk_sims.py` agrees with all 71
@@ -178,15 +183,21 @@ measured $0.40 round trip.
   Scenario H covers fresh/stale offset estimation. The Bitcoin sidecar must be
   restarted after deployment, and `DATA_SOURCE=MT5` must wait until the first
   post-deploy JSON is verified.
-- Feed health at this snapshot: **7,663 M5 rows** since 09-07 20:20 UTC,
-  through 2026-10-05 02:35:03; 197 missing M5 slots in 14 runs, with the
+- Feed health at this snapshot: **7,668 local M5 rows** since 09-07 20:20 UTC,
+  through 2026-10-05 03:00:03; 197 missing M5 slots in 14 runs, with the
   885-minute 09-28/29 outage plus 35-minute (10-03) and 20-minute (10-04) gaps.
-  The status and last-bar timestamps match. The simulator marks BUY #125 open
-  (entry $84,177.15 at 10-01 07:10:10; SL $84,008.74, TP $84,513.98; daily-loss
-  counter 0/3), although the first recorded SL breach is 10-01 07:20:11. It is
-  excluded from closed-trade statistics. See `docs/REVIEW-2026-10-05.md` before
-  relying on the dashboard state. The checked-in MT5 feed loop has no simulated
-  exit check; production `DATA_SOURCE` has not been verified from this checkout.
+  Local status was updated at 03:02:16 (2 min 13 s after the last bar), and the
+  operator reported the same 7,668-row host log. Host output says `/opt/bitcoin/.env`
+  currently selects `DATA_SOURCE=MT5`; `bitcoin-engine.service` was active and
+  started as `FORWARD TEST (MT5 feed)`. After restart the engine restored BUY
+  #125 (entry $84,177.15 at 10-01 07:10:10; SL $84,008.74, TP $84,513.98;
+  daily-loss counter 0/3) while still showing 125 closed trades. This confirms
+  simulator state, not a broker position, and restart did not reconcile the
+  10-01 07:20:11 stop breach. See `docs/REVIEW-2026-10-05.md` before relying on
+  the dashboard state. The checked-in MT5 loop lacks a simulated exit check, but
+  the Oct 1 feed mode and deployed SHA are still unknown. The unit scan was
+  limited to units referencing `/opt/bitcoin`; query `mt5feed-btc.service`
+  directly rather than infer that it is absent.
 - **Next milestones:** first confirm/fix/reconcile the open paper trade and its
   feed path; then (a) the logger's exit — ≥14 complete UTC days incl. 2 complete
   weekends, read with `python3 tools/xm_quote_report.py` — and (b) 100
@@ -354,18 +365,18 @@ R totals or breakeven rates across the boundary.
   has not paid for its cost yet, but 35 trades do not justify switching it off.
   The unfiltered signal census is a separate, cascade-ignorant diagnostic; it
   is not the traded book.
-- **Signal census and cascade:** 7,663 logged M5 rows reconstruct 418 full
-  signals (204 BUY, 214 SELL); 50 occur in blackout windows, leaving 368
-  takeable. At TP 4×, the raw takeable entry stream is 117W/219L/32T and
-  −$83.15 net before the one-position/cooldown/daily-halt cascade. Applying
-  those gates selects 95 modeled trades (36W/51L/8T, **+$14.10 net**). This is
+- **Signal census and cascade:** 7,668 logged M5 rows reconstruct 419 full
+  signals (205 BUY, 214 SELL); 50 occur in blackout windows, leaving 369
+  takeable. At TP 4×, the raw takeable entry stream is 117W/219L/33T and
+  −$83.55 net before the one-position/cooldown/daily-halt cascade. Applying
+  those gates selects 96 modeled trades (36W/51L/9T, **+$13.70 net**). This is
   a replay estimate, not additional observed trades. Indicator reconstruction
-  matches floor 7,643/7,643 and ATR/RSI 7,648/7,648.
+  matches floor 7,648/7,648 and ATR/RSI 7,653/7,653.
 - **Exit geometry** (`pathwalk_sims.py --spread 0.40 --census`): replay agrees
   **71/71** for the log-covered closed trades. On the 240-minute counterfactual
   paths (all net of $0.40), TP 4× (live) is +$13.69, TP 5× +$28.26 and TP 6×
-  +$34.46. In the gated census, TP 4× is +$14.10 (95 taken), TP 5× +$24.89
-  (89 taken), TP 6× +$35.38 (87 taken). Wider TP continues to look better in
+  +$34.46. In the gated census, TP 4× is +$13.70 (96 taken), TP 5× +$24.49
+  (90 taken), TP 6× +$34.98 (88 taken). Wider TP continues to look better in
   these limited views; horizon and regime dependence mean this is not
   adoption-grade. **Keep live 4× TP and no BE ratchet for now.**
 - **Excursions and fills:** 71 covered closed trades: TP winners n=31 have median
@@ -404,7 +415,7 @@ R totals or breakeven rates across the boundary.
 | Question | Current evidence | What would settle it |
 |---|---|---|
 | **Live readiness** | t=+1.14 at n=67; best 5 trades = 104% of net; break-even spread $0.84; LIVE path probe 1/9 clean | Stages A–E in review 2026-10-01 §7 (fix → measure → XM demo → micro-live → scale) |
-| **Open paper-trade exit handling** | BUY #125 remains active despite first logged SL breach; MT5 forward-test loop has no position check; production feed mode unknown | Confirm deployed mode/revision and journal; add/test bar-based exit management if MT5; reconcile from ordered history (review 2026-10-05) |
+| **Open paper-trade exit handling** | BUY #125 remains active after an OHLC stop breach and an Oct 5 restart; host sampled MT5 forward-test mode, but Oct 1 mode and deployed SHA are unknown | Read-only revision/feed-unit/candle-metadata/journal checks in review 2026-10-05; then test the confirmed exit path and reconcile from ordered history |
 | Bar timeframe / execution cost | M5 cost ≈24% of median post-gate 1R; $0.40 is one Asian-session sample | XM quote logger (`docs/XM-LOGGER.md`; built, awaiting install) for ≥14 days incl. 2 weekends, plus multi-regime M5/M15/H1 backtest |
 | BUY vs SELL | post-gate BUY +$31.36 / SELL −$2.10 net; raw census is cascade-ignorant | per-side data from the demo stage; do not use the unfiltered census alone |
 | Cooldown and blackouts | cooldown +$18.84 on 11 scorable; blackout −$4.38 on 21; 43 of 117 skips unscorable | more log coverage before changing either gate |
@@ -441,10 +452,10 @@ Expected first lines at the snapshot (a mismatch means the data moved — refres
 the block, then re-read the prose):
 
 ```
-win_rate_report - 125 trades, 7663 M5 bars (2026-09-07 20:20:00 -> 2026-10-05 02:35:03), spread $0.40/trade
-pathwalk_sims  - 125 trades, 7663 M5 bars (...), horizon 240 min, spread $0.40/trade
-analyze_losers - 125 trades (123 from 09-05), 71 log-covered, 7663 M5 bars
-live_readiness - 67 post-gate trades (entries >= 2026-09-10) of 125 total, 7663 M5 bars, spread $0.40/trade, seed 2026
+win_rate_report - 125 trades, 7668 M5 bars (2026-09-07 20:20:00 -> 2026-10-05 03:00:03), spread $0.40/trade
+pathwalk_sims  - 125 trades, 7668 M5 bars (...), horizon 240 min, spread $0.40/trade
+analyze_losers - 125 trades (123 from 09-05), 71 log-covered, 7668 M5 bars
+live_readiness - 67 post-gate trades (entries >= 2026-09-10) of 125 total, 7668 M5 bars, spread $0.40/trade, seed 2026
 == result: 0 fail, 64 warn ==
 ```
 
@@ -462,14 +473,15 @@ locks the direction/ratchet/horizon rules.
 
 > **Status (re-checked 2026-10-05).**
 > - **Immediate: triage the open paper trade #125.** The saved M5 path records an
->   SL breach on 10-01 07:20 while status remains active through 10-05 02:35;
->   `DATA_SOURCE` and the running service are not present in this checkout. Check
->   the deployed revision, the single `DATA_SOURCE` setting and the engine
->   journal. If using MT5, the checked-in `run_mt5_test()` lacks an exit check;
->   add an OHLC-aware, stop-first exit and a regression scenario before relying
->   on that mode. If using Twelve Data, inspect the per-tick callback and its
->   suppressed exceptions. Do not hand-edit the live ledger/status to guess an
->   outcome; see `docs/REVIEW-2026-10-05.md`.
+>   SL breach on 10-01 07:20 while local and host status still show #125 active
+>   at 10-05 03:02:16 after restart. Host output reports current
+>   `DATA_SOURCE=MT5` and an active FORWARD_TEST (MT5 feed) engine, but that does
+>   not prove the Oct 1 feed mode or deployed revision. The checked-in
+>   `run_mt5_test()` lacks an exit check; Twelve Data checks each accepted price
+>   but suppresses callback exceptions. Run the review's read-only checks for the
+>   deployed SHA, `mt5feed-btc.service`, current candle timestamps and Oct 1
+>   startup/feed-mode journal lines. Do not hand-edit the ledger/status or infer
+>   a fill; see `docs/REVIEW-2026-10-05.md`.
 > - **Stage B-i logger — built, awaiting on-box validation.** No `xm_data/` is
 >   present in this checkout. The ≥14-day clock (including 2 weekends) starts
 >   at the first real `OK` row (`docs/XM-LOGGER.md` §3).
@@ -479,11 +491,13 @@ locks the direction/ratchet/horizon rules.
 > - **No real-money order** before Stage A's LIVE probe exits 0 and Stage B has
 >   ≥14 days. The staged-path thresholds in review §7 remain proposals until
 >   the user says otherwise.
-> - **Still needed from the user/host:** which `DATA_SOURCE` is deployed and
->   whether the Wine MT5 terminal plus `mt5feed-btc` sidecar are installed. Check
->   only the setting (do not print secrets): `grep '^DATA_SOURCE=' /opt/bitcoin/.env`;
->   identify the engine unit and inspect its journal around 2026-10-01 07:10–07:25
->   UTC. The logger's install checklist needs these same host facts.
+> - **Still needed from the user/host:** the deployed engine Git SHA, direct
+>   `mt5feed-btc.service` state, safe timestamp metadata from
+>   `mt5_last_candle.json`, and engine startup/feed-mode lines around Oct 1. The
+>   current host `DATA_SOURCE=MT5` and FORWARD_TEST startup are already reported,
+>   but the source-switch date is unknown. Run the read-only block in
+>   `docs/REVIEW-2026-10-05.md`; it prints no `.env` secrets. The feed-unit scan
+>   only matched `/opt/bitcoin` and cannot establish that the sidecar is absent.
 
 1. **Do not enable LIVE. Follow the staged path** (`docs/REVIEW-2026-10-01.md`
    §7; thresholds there are proposals the user has not yet accepted):
@@ -622,8 +636,8 @@ is where stale numbers actually hide.
   self-heals drift on start and before every append (keeps a
   `.bak-pre-migration` backup) and `trade_filter.load_recent_trades()` has a
   loud drift tripwire.
-- **The price log starts 2026-09-07 20:20 UTC** (7,663 M5 rows through
-  2026-10-05 02:35 UTC; 197 missing slots in 14 runs, including the 885-minute
+- **The price log starts 2026-09-07 20:20 UTC** (7,668 M5 rows through
+  2026-10-05 03:00 UTC; 197 missing slots in 14 runs, including the 885-minute
   09-28/29 outage plus 35-minute 10-03 and 20-minute 10-04 gaps; causes
   unrecorded). **Only 71 of 125 closed trades are log-covered**; 54 predate the
   log, limiting any log-joined replay to the covered tail. Two minutes are
@@ -643,10 +657,11 @@ is where stale numbers actually hide.
   7648/7648. If the match rate is not ~100%, treat every census number as
   suspect. Never compare a raw log indicator column against a ledger entry
   column directly.
-- **Dashboard funnel counters are since-restart, not lifetime.** Current
-  `status.json` has `candles_evaluated = 1113`, `all_confirmed = 1` BUY and
-  `sell_all_confirmed = 0`; use them only for post-restart context, not a
-  lifetime signal census. Use `win_rate_report.py` for the reconstructed census.
+- **Dashboard funnel counters are since-restart, not lifetime.** The latest
+  `status.json` snapshot (03:02:16, after restart) has
+  `candles_evaluated = 0`, `all_confirmed = 0` and `sell_all_confirmed = 0`;
+  use them only for post-restart context, not a lifetime signal census. Use
+  `win_rate_report.py` for the reconstructed census.
 - Per-trade replay must use **±6 min** windows (M5 cadence); gold uses ±2 min on
   M1. Gap threshold is >15 min (gold: >5).
 - `archive/forward_test_log_m1.csv` (8,537 rows, Sep 1) is **M1** data from the
