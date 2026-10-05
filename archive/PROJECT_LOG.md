@@ -54,6 +54,25 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-10-05] BUY #125 explicitly reconciled from the OHLC path (SL) — not a guessed fill.**
+  A later run had force-closed simulated BUY #125 in `trades.csv` as a *guessed*
+  TP at the target with a wall-clock `Exit_Time` (2026-10-05 03:50:10, +$3.37) —
+  the guessed close the 2026-10-05 review explicitly forbade. This change
+  reconciles #125 from the ordered closed-candle OHLC path under the **same
+  conservative convention** as the MT5 forward-test fix
+  (`engine.check_position_on_closed_candle`): the 07:15:11 candle touched neither
+  barrier, and the 07:20:11 candle (L 83838.25 <= SL 84008.74, H 84076.35 < TP
+  84513.98) proves the first barrier is the stop; that bar opened at 84034.75
+  (not through the stop), so it fills at the stop level. The entry candle's own
+  range is not applied. Reconciled exit: `Exit_Time` 2026-10-01 07:20:11,
+  `Exit_Reason` SL, `Exit_Price` 84008.74, `Profit` -1.68, `Balance_After`
+  257.13. `status.json` now reads 126 closed, 54W/72L (42.9%), equity $257.13,
+  `trade_active=false`, `next_trade_num=126`. New tool
+  `tools/reconcile_stale_trade.py` (report-only by default; `--apply` backs up
+  `trades.csv`/`status.json` first and refuses to fabricate a fill). Updated
+  `docs/HANDOFF.md`, `docs/REVIEW-2026-10-05.md` and this log. Unmerged and
+  undeployed pending review; `check_data.py` 0 fail, `handoff_check.py` FRESH,
+  `smoke_test.py` A-M pass.
 - **[2026-10-05] MT5 forward-test candle exits fixed for future simulated trades; historical #125 left untouched.**
   Implemented a narrowly scoped `engine.py` change for `TRADING_MODE=FORWARD_TEST`
   with `DATA_SOURCE=MT5`: every newly accepted closed M5 candle now checks an
@@ -281,8 +300,7 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 
 ## Forward Test Observations
 
-Current local snapshot/review: CSV data through **2026-10-05 03:00:03 UTC**
-(7,668 M5 rows), with `status.json` updated at 03:02:16; see `docs/HANDOFF.md`
+Current local snapshot/review: CSV data through **2026-10-05 03:50:11 UTC** (7,676 M5 rows), with `status.json` updated at 2026-10-05 04:06 (after the #125 reconciliation); see `docs/HANDOFF.md`
 and the 2026-10-05 data/exit-state delta `docs/REVIEW-2026-10-05.md`.
 `docs/REVIEW-2026-10-01.md` remains the full live-readiness review and staged
 LIVE path. These are paper-forward-test results, not realized brokerage P/L.
@@ -290,8 +308,7 @@ The checkout does not contain `/opt/bitcoin/.env`, systemd state or journals;
 the operator has pasted a limited host snapshot (current MT5 forward-test mode
 and restart state), which cannot establish the Oct 1 feed or deployed revision.
 
-- **Important operations finding — simulated BUY #125 remains open after a logged
-  stop breach.** Local `status.json` at 2026-10-05 03:02:16 and the operator's
+- **Operations finding (RESOLVED 2026-10-05) — simulated BUY #125 had remained open after a logged stop breach, and has since been reconciled to an SL close.** Local `status.json` at 2026-10-05 03:02:16 and the operator's
   host snapshot both show BUY #125 active (entry 2026-10-01 07:10:10 at
   $84,177.15; SL $84,008.74; TP $84,513.98), with no close row. The 07:15 M5
   low ($84,035.75) stayed above the stop; the 07:20:11 candle low was $83,838.25
@@ -304,14 +321,8 @@ and restart state), which cannot establish the Oct 1 feed or deployed revision.
   explanation only if the deployed revision and historical feed match; the
   deployed Git SHA and source-switch date remain unknown. The Twelve Data path
   checks ticks but silently catches callback exceptions. The supplied journal
-  excerpt has no close/SL event at the breach. Run the read-only checks in
-  `docs/REVIEW-2026-10-05.md`; do not guess a fill or edit status/ledger. Keep
-  `TRADING_MODE=FORWARD_TEST`; no broker position is evidenced.
-- **Current ledger:** 125 closed rows, 54W/71L (43.2%). Raw Profit totals
-  −$333.01 gross, or −$133.01 from the $200 start before spread costs; engine
-  equity $258.81, a +$391.82 history/reset gap. Exclude the two 09-03 sizing
-  outliers (−$197.63 and −$197.21) from strategy statistics. From 09-05 onward:
-  123 trades, 54W/69L, +$61.83 gross / **+$12.63 net** at $0.40/trade.
+  excerpt has no close/SL event at the breach. On 2026-10-05 #125 was explicitly reconciled from the OHLC path under the documented conservative convention (SL at 07:20:11 @ $84,008.74, -$1.68) via `tools/reconcile_stale_trade.py` — not a guessed fill; the historical investigation above stands, only the saved exit state was corrected. Keep `TRADING_MODE=FORWARD_TEST`; no broker position is evidenced.
+- **Current ledger:** 126 closed rows, 54W/72L (42.9%). Raw Profit totals −$334.69 gross, or −$134.69 from the $200 start before spread costs; engine equity $257.13, a +$391.82 history/reset gap (unchanged by the #125 reconciliation — both sides moved -$1.68). Exclude the two 09-03 sizing outliers (−$197.63 and −$197.21) from strategy statistics. From 09-05 onward: 124 trades, 54W/70L, +$60.15 gross / **+$10.55 net** at $0.40/trade. (Per-slice figures below were computed before the reconciliation.)
 - **Current gates have 67 strictly post-gate trades** (entries ≥09-10):
   29W/38L, 43.3%, +$56.06 gross / **+$29.26 net**. Wilson 95% interval
   32.1–55.2%; t=+1.14; day-block bootstrap 83% positive; estimated
