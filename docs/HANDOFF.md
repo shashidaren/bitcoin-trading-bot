@@ -64,6 +64,9 @@ edited it — that is what §10's ritual is for.
   remains the full live-readiness review and staged path; its detailed data
   snapshot is historical. `docs/REVIEW-2026-09-15.md` §13 is the 99-trade
   historical re-cut (§12 the 78-trade one).
+- **Current session:** the documentation-only verification is in open draft PR #13;
+  the read-only host results in the 2026-10-05 review are still pending. Keep the
+  PR draft and do not merge until those results are reviewed and the user approves.
 
 **LIVE verdict (2026-10-05): not ready for real money.** The strictly post-gate
 sample is 67 trades (29W/38L), with t = +1.14 and an 83% day-block bootstrap

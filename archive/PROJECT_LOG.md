@@ -68,7 +68,8 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
   The review includes read-only host checks for the deployed SHA, direct
   `mt5feed-btc.service` state, safe candle timestamps and Oct 1 startup/feed-mode
   journal lines. Do not edit the status/ledger, deploy a fix or enable LIVE while
-  those checks are pending.
+  those checks are pending. This documentation-only change is in open draft PR #13;
+  do not merge until the host output is reviewed and the user approves.
 - **[2026-10-01] XM quote + contract-spec logger (review §7 Stage B-i) — new read-only Wine sidecar; no engine,
   strategy, parameter or `DATA_SOURCE` change** (`docs/XM-LOGGER.md`, `tools/mt5_quotes.py`,
   `tools/xm_quote_report.py`, `deploy/mt5quotes.service`). Built because the whole edge rests on an
