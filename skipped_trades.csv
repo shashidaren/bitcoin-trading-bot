@@ -123,3 +123,4 @@ Timestamp,Reason,Price,ATR
 2026-10-06 12:35:13,Blackout: NY Early Pre-Market,86167.65,94.40
 2026-10-06 12:40:14,Blackout: NY Early Pre-Market,86244.95,95.79
 2026-10-06 14:10:15,Blackout: NY Open & US High-Impact Macro Releases,86179.05,155.76
+2026-10-07 06:50:07,SL Cooldown: 55 min remaining (2 consecutive SLs -> 60m cooldown),84280.05,72.52
