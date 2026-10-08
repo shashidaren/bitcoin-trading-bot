@@ -133,3 +133,4 @@ Timestamp,Reason,Price,ATR
 2026-10-07 23:20:11,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83227.65,60.09
 2026-10-07 23:25:02,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,83260.45,60.24
 2026-10-08 01:20:06,SL Cooldown: 45 min remaining (2 consecutive SLs -> 60m cooldown),83306.25,85.67
+2026-10-08 13:25:11,Blackout: NY Open & US High-Impact Macro Releases,82505.55,145.80
