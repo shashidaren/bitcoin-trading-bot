@@ -142,3 +142,5 @@ Timestamp,Reason,Price,ATR
 2026-10-10 12:10:13,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,82846.35,22.83
 2026-10-10 12:30:14,Blackout: NY Early Pre-Market,82831.25,23.53
 2026-10-10 13:25:15,Blackout: NY Open & US High-Impact Macro Releases,82826.15,20.14
+2026-10-10 14:25:07,Blackout: NY Open & US High-Impact Macro Releases,82800.25,27.36
+2026-10-10 14:35:08,Blackout: NY Open & US High-Impact Macro Releases,82958.05,39.61
