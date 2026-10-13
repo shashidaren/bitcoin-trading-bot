@@ -30,6 +30,8 @@ deliberately adapted for BTC).
 | `docs/AUTOSYNC.md` | The unattended sync/deploy loop: cron assumptions, branch rule, Telegram digest legend, what a deploy does to a running trade. |
 | `docs/XM-LOGGER.md` | Runbook for the XM quote + contract-spec logger: column dictionary, the on-box install/validation checklist, how to read its report, design traps (broker server time ≠ UTC, DST, privacy). |
 | `tools/handoff_check.py` | Freshness gate for `docs/HANDOFF.md`: recomputes its snapshot block from the live CSVs, says `HANDOFF FRESH`/`STALE`, and rewrites the block with `--update`. |
+| `tools/history_to_log.py` | Turns a long raw M5 OHLC csv (`Timestamp,Open,High,Low,Close[,Volume]`) into an engine-faithful `forward_test_log.csv` (reproduces the engine's EMA/RSI/ATR/floor; `--selfcheck` proves it). The "long history in" half of the fast back-test path. |
+| `tools/backtest.py` | Large-N historical **cross-check** of the frozen gates over a long history (raw OHLC or a log): net/trade, t-stat, day-block bootstrap P, cost cover, per-side and fragility — reuses `replay_lib` + `live_readiness`, changes no strategy logic. The fast path around the ~30-week forward test for the statistical gates. See `docs/ACCELERATE-TESTING.md`. |
 | `tools/live_readiness.py` | Evidence + go/no-go gates for LIVE: edge significance, cost margin, fragility, Monte Carlo risk, entry-latency stress, feed health (defaults to `--spread 0.40`). |
 | `tools/live_path_probe.py` | Offline probe of `engine.py`'s LIVE order path against a fake MT5 (no terminal, network or Telegram); exits 1 until the findings in the live-readiness review are fixed. |
 | `tools/mt5_quotes.py` | **Read-only** Wine sidecar (never touches orders or `engine.py`): logs XM BTCUSD bid/ask/spread, a contract-spec snapshot and shadow XM M5 candles into `xm_data/` so the cost assumption ($0.40 vs current $0.84 break-even) and feed parity are measured. Unit: `deploy/mt5quotes.service`. |
@@ -50,6 +52,11 @@ python3 tools/smoke_test.py                           # 7. engine + sidecar regr
 python3 tools/live_readiness.py --spread 0.40         # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
 python3 tools/live_path_probe.py                      # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
 python3 tools/xm_quote_report.py                      # 10. XM logger: spread by session, real-trade cost, feed parity (needs xm_data/)
+
+# Optional fast path — cross-check the statistical gates on a LONG history in
+# seconds instead of waiting ~30 weeks (see docs/ACCELERATE-TESTING.md):
+python3 tools/history_to_log.py long_history.csv --selfcheck   # prove the converter on trusted data
+python3 tools/backtest.py long_history.csv --spread 0.40 --save-log bt_log.csv
 ```
 
 `--spread 0.40` is the measured XM BTCUSD round trip at `LOT_SIZE = 0.01`; the tools default to

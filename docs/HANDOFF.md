@@ -67,7 +67,11 @@ edited it — that is what §10's ritual is for.
   snapshot is historical. `docs/REVIEW-2026-09-15.md` §13 is the 99-trade
   historical re-cut (§12 the 78-trade one).
 - **Current session (2026-10-13):** docs-only refresh of the handoff snapshot and
-  prose to the 157-trade / 10,030-bar mark. No code, params, or gates changed.
+  prose to the 157-trade / 10,030-bar mark, **plus** a code addition that changes
+  no params, gates, or conclusions: `tools/history_to_log.py` +
+  `tools/backtest.py` (§8, §7) — a large-N historical cross-check for the
+  statistical gates, added because "the forward test takes too long"
+  (`docs/ACCELERATE-TESTING.md`).
   Post-gate sample is now **99 trades** (was 83 on 10-09). **Outstanding decision
   for the user:** approve starting Stage A (order-path PR) and installing the XM
   logger sidecar — those two starts are what move the micro-live date (see §7).
@@ -238,6 +242,8 @@ re-tested it; §5 below has the prior re-read).
 
 Earliest realistic micro-live: **early-to-mid December 2026** if Stage A and the logger start immediately. Otherwise later. See `docs/REVIEW-2026-10-09.md` §7 for the dated table; the 2026-10-13 numbers do not move the critical path.
 
+**Accelerating the statistical gates (added 2026-10-13, no params/gates/conclusions changed):** Stage C's binding gates (edge, cost cover, fragility) are statistical and are what make the forward test feel endless. `tools/backtest.py` + `tools/history_to_log.py` now cross-check them on a long M5 history in seconds (`docs/ACCELERATE-TESTING.md`). This does **not** move any gate or change the verdict — it only makes the trade-off visible sooner, and it does not replace the ≥100-post-gate forward sample or the logger clock. The two calendar levers that *do* move the date remain starting the logger (14-day clock) and Stage A now.
+
 ## 8. Tools
 
 - `tools/win_rate_report.py --spread 0.40` — slices, t-stats, bootstrap, cost cover.
@@ -247,6 +253,12 @@ Earliest realistic micro-live: **early-to-mid December 2026** if Stage A and the
 - `tools/live_path_probe.py` — LIVE order-path probes.
 - `tools/xm_quote_report.py` — logger health (once installed).
 - `tools/autosync.sh` — 15-min data commit + deploy gate + Telegram.
+- `tools/history_to_log.py` / `tools/backtest.py` — **fast path for the statistical
+  gates**: replay the frozen gates over a long M5 history (raw OHLC → engine-faithful
+  log → net/trade, t-stat, day-block bootstrap, cost cover, per-side, fragility) in
+  seconds, reusing `replay_lib` + `live_readiness`. A cross-check, not a go-live
+  substitute — see `docs/ACCELERATE-TESTING.md`. (`history_to_log.py --selfcheck`
+  proves the converter reproduces the engine.)
 
 ## 9. Geometry change (do not pool)
 
