@@ -18,8 +18,9 @@ Do **not** flip `TRADING_MODE` to `LIVE` at any point in this runbook.
 
 ## Part A — XM quote + contract-spec logger (start the ≥14-day clock)
 
-**Why:** the paper P/L nets a flat **$0.40** round trip, but the measured
-break-even is **$0.87** and the $0.40 is one Asian-session sample. The logger
+**Why:** the paper P/L nets a flat **$0.40** round trip, but the estimated
+break-even is ~**$0.63** (1.6× vs the 2.0× gate) and the $0.40 is one
+Asian-session sample. The logger
 measures XM's real BTCUSD spread + contract spec for 14 days so the cost model
 stops being a guess. It is **read-only** — it never sends an order and never
 touches `engine.py`/`DATA_SOURCE`.
@@ -112,12 +113,12 @@ keep the probe green, **then** go to demo (Stage C). Findings are from
 
 | # | Sev | Where | Defect | Fix |
 |---|---|---|---|---|
-| 1 | BLOCKER | `check_live_exits` ~L1020 | `history_deals_get(ticket=<ENTRY order>)`; the SL/TP close runs under a **new** order, so it never matches → closes never logged, `trade_active_live` sticks, gates go blind | Query by `position=` (position id from the entry deal / `positions_get`); sum `profit+commission+swap+fee`; confirm closure with `positions_get` |
-| 2 | BLOCKER | `restore_open_trade_from_status` L362, `run_live` L1075 | Restart restores the simulated flag but leaves `active_ticket=None`; `run_live` never calls `check_position` → every deploy orphans an open position | On LIVE start, reconcile with `positions_get(symbol=…)` filtered by `MAGIC_NUMBER` and re-attach **or flatten** |
+| 1 | BLOCKER | `check_live_exits` ~L1062 | `history_deals_get(ticket=<ENTRY order>)`; the SL/TP close runs under a **new** order, so it never matches → closes never logged, `trade_active_live` sticks, gates go blind | Query by `position=` (position id from the entry deal / `positions_get`); sum `profit+commission+swap+fee`; confirm closure with `positions_get` |
+| 2 | BLOCKER | `restore_open_trade_from_status` L363, `run_live` L1112 | Restart restores the simulated flag but leaves `active_ticket=None`; `run_live` never calls `check_position` → every deploy orphans an open position | On LIVE start, reconcile with `positions_get(symbol=…)` filtered by `MAGIC_NUMBER` and re-attach **or flatten** |
 | 3 | BLOCKER | `execute_live_trade` | No spread guard — an order is sent even at a $500 spread | Add a live spread check before dispatch (size from the logger's data once Stage B-i exits) |
-| 4 | BLOCKER | `from MetaTrader5 import` L187–188 | No Linux wheel; `TRADING_MODE=LIVE` can't start on the box | **Wine order-executor sidecar** mirroring `mt5_feed.py`: engine writes an order *intent*; the executor owns spread guard, fill mode, reconciliation and kill-switch, and returns fills — keeps the engine Linux-native and testable |
-| 5 | HIGH | ~L900 | `type_filling` hard-coded **FOK** → retcode 10030 `INVALID_FILL` | Pick from `symbol_info().filling_mode`; `order_check()` first |
-| 6 | HIGH | ~L907 | `order_send` `None` result not handled → `AttributeError`; a second position can open | Handle `None`; reconcile via `positions_get` **before** any retry |
+| 4 | BLOCKER | `import MetaTrader5` L188–189 | No Linux wheel; `TRADING_MODE=LIVE` can't start on the box | **Wine order-executor sidecar** mirroring `mt5_feed.py`: engine writes an order *intent*; the executor owns spread guard, fill mode, reconciliation and kill-switch, and returns fills — keeps the engine Linux-native and testable |
+| 5 | HIGH | ~L977 | `type_filling` hard-coded **FOK** → retcode 10030 `INVALID_FILL` | Pick from `symbol_info().filling_mode`; `order_check()` first |
+| 6 | HIGH | ~L981 | `order_send` `None` result not handled → `AttributeError`; a second position can open | Handle `None`; reconcile via `positions_get` **before** any retry |
 | 7 | HIGH | `execute_live_trade` | Never calls `positions_get`; `MAGIC_NUMBER` only tags orders → double exposure after a restart/None | One-position-per-magic check before sending |
 
 **Kill switches to build in (Stage A, `REVIEW-2026-10-01.md` §7):** equity floor
@@ -239,8 +240,5 @@ unchanged: probe 0 BLOCKER/HIGH + a LIVE smoke scenario → then Stage C demo.
 Logger install/validation: `docs/XM-LOGGER.md` §3 (checklist) + §4 (report) +
 §5 (DST/offset traps). Service unit: `deploy/mt5quotes.service`. Order-path
 findings + Stage A scope + kill switches: `docs/REVIEW-2026-10-01.md` §6–§7.
-Probe checks: `tools/live_path_probe.py`. Cost assumptions ($0.40 / $0.87
-break-even): `docs/HANDOFF.md` §5.
-
-> **Note:** this session's GitHub access is closed (PR #18 merged). This draft is
-> saved locally; commit/push it from a new coding session.
+Probe checks: `tools/live_path_probe.py`. Cost assumptions ($0.40 assumed /
+~$0.63 break-even, 1.6×): `docs/HANDOFF.md` §5.
