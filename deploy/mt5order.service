@@ -1,0 +1,49 @@
+# Bitcoin MT5 order executor (Wine Python -> /opt/bitcoin/mt5_order_bridge/)
+#
+# SECURITY: dormant by default. Do not change MT5_ORDER_ENABLED=0 until the
+# operator has explicitly approved a demo-account trial and completed the
+# checklist in docs/MT5-ORDER-EXECUTOR.md. This unit cannot trade a real account.
+# The starting-equity value below is only an example; it must match the demo
+# account's equity (within $1) on first start or the executor refuses to arm.
+# Never put a broker password or login in this unit, an env file, or the repo.
+#
+# Install as mt5order-btc.service only after the Stage A integration/review:
+#   sudo cp deploy/mt5order.service /etc/systemd/system/mt5order-btc.service
+#   sudo systemctl daemon-reload
+# Do NOT enable/start it during installation. For a later, explicitly approved
+# demo-only test, set the validated account baseline and MT5_ORDER_ENABLED=1 first.
+#
+# The MT5 terminal must already be running, logged in to a DEMO account, and in
+# the same Wine prefix. Only one executor process may watch this file queue.
+
+[Unit]
+Description=Bitcoin MT5 order executor (demo-only Wine sidecar)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+UMask=0007
+Environment=WINEPREFIX=/root/.mt5
+Environment=PYTHONUNBUFFERED=1
+Environment=MT5_ORDER_ENABLED=0
+Environment=MT5_ORDER_ACCOUNT_KIND=demo
+Environment=MT5_ORDER_STARTING_EQUITY=200
+Environment=MT5_ORDER_SYMBOL=BTCUSD
+Environment=MT5_ORDER_MAGIC=987655
+Environment=MT5_ORDER_VOLUME=0.01
+Environment=MT5_ORDER_DIR=Z:/opt/bitcoin/mt5_order_bridge
+Environment=MT5_ORDER_HALT_FILE=Z:/opt/bitcoin/MT5_ORDER_HALT
+Environment=MT5_ORDER_MAX_SPREAD_USD=60
+Environment=MT5_ORDER_MAX_SPREAD_TO_1R=0.70
+Environment=MT5_ORDER_MAX_DRAWDOWN_USD=30
+Environment=MT5_ORDER_MAX_DAILY_SL=3
+Environment=MT5_ORDER_MAX_DAILY_LOSS_USD=10
+ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:\\Python312\\python.exe Z:\\opt\\bitcoin\\tools\\mt5_order_executor.py
+WorkingDirectory=/root
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target

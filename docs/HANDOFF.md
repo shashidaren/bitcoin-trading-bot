@@ -20,7 +20,7 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-13 09:05 |
+| as_of_utc | 2026-10-13 12:55 |
 | data_collection | unknown |
 | closed_trades | 157 |
 | wins_losses | 66W/91L |
@@ -30,8 +30,8 @@ win rate across the 2026-09-06 17:49 UTC geometry change (§9).
 | live_era_trades | 103 |
 | live_era_net_usd | +24.15 |
 | log_covered_trades | 103 |
-| log_bars | 10030 |
-| log_last_bar_utc | 2026-10-13 09:05 |
+| log_bars | 10076 |
+| log_last_bar_utc | 2026-10-13 12:55 |
 | skip_rows | 190 |
 | open_trade | none |
 | spread_usd_per_trade | 0.40 |
@@ -47,7 +47,7 @@ edited it — that is what §10's ritual is for.
 
 ---
 
-## 1. Where things stand (local data through 2026-10-13 09:05:09 UTC; **157 closed trades, no open trade; win-rate re-read 2026-10-13**)
+## 1. Where things stand (local data through 2026-10-13 12:55:15 UTC; **157 closed trades, no open trade; win-rate re-read 2026-10-13**)
 
 > **RESOLVED 2026-10-05 — simulated BUY #125 reconciled from the OHLC path (NOT a guessed fill).** #125 (BUY, entry 2026-10-01 07:10:10 @ $84,177.15, SL $84,008.74, TP $84,513.98) had been force-closed in `trades.csv` as a *guessed* TP at the target with a wall-clock `Exit_Time` (2026-10-05 03:50:10, +$3.37) — exactly the "append a guessed close" the 2026-10-05 review forbids. It is now **explicitly reconciled from the ordered closed-candle OHLC path** under the same conservative convention as the MT5 forward-test fix (`engine.check_position_on_closed_candle`): the 07:15:11 candle touched neither barrier (low $84,035.75 > SL), and the 07:20:11 candle's low $83,838.25 ≤ SL with high $84,076.35 < TP, so the **first recorded barrier is the stop**; that bar opened at $84,034.75 (not through the stop), so it fills at the stop level. Reconciled exit: `Exit_Time` 2026-10-01 07:20:11, `Exit_Reason` SL, `Exit_Price` 84008.74, `Profit` −1.68, `Balance_After` 257.13. The entry candle's own range was not applied. Applied with `tools/reconcile_stale_trade.py` (report-only by default; `--apply` backs up `trades.csv`/`status.json` first). `status.json` now reads 126 closed, 54W/72L (42.9%), equity $257.13, `trade_active=false`, `next_trade_num=126`. This supersedes the "active #125" state in the 2026-10-05 review; that review's historical investigation stands, its exit-state finding does not.
 
@@ -66,15 +66,19 @@ edited it — that is what §10's ritual is for.
   remains the full live-readiness review and staged path; its detailed data
   snapshot is historical. `docs/REVIEW-2026-09-15.md` §13 is the 99-trade
   historical re-cut (§12 the 78-trade one).
-- **Current session (2026-10-13):** docs-only refresh of the handoff snapshot and
-  prose to the 157-trade / 10,030-bar mark, **plus** a code addition that changes
-  no params, gates, or conclusions: `tools/history_to_log.py` +
-  `tools/backtest.py` (§8, §7) — a large-N historical cross-check for the
-  statistical gates, added because "the forward test takes too long"
-  (`docs/ACCELERATE-TESTING.md`).
-  Post-gate sample is now **99 trades** (was 83 on 10-09). **Outstanding decision
-  for the user:** approve starting Stage A (order-path PR) and installing the XM
-  logger sidecar — those two starts are what move the micro-live date (see §7).
+- **Current session (2026-10-13):** the snapshot/prose refresh is through the
+  latest collected bar; the earlier same-day addition `tools/history_to_log.py` +
+  `tools/backtest.py` provides a large-N statistical cross-check
+  (`docs/ACCELERATE-TESTING.md`). This session also started Stage A Part B:
+  `tools/mt5_order_protocol.py` + `tools/mt5_order_executor.py`, a demo-only,
+  disabled-by-default Wine order-executor scaffold, with fake-terminal tests,
+  dormant systemd unit and `docs/MT5-ORDER-EXECUTOR.md`. It is **not wired into
+  `engine.py`**, has not run under Wine/XM, and does not make the LIVE path ready;
+  the legacy `live_path_probe.py` still tests the engine path and still fails.
+  No strategy params, data gates or statistical conclusions changed. Post-gate
+  sample remains **99 trades**. The separate outstanding decision is still to
+  install/start the read-only XM logger (its clock is 0/14 days); completing the
+  engine-side Stage A integration and demo validation remain subsequent gates.
 
 **LIVE verdict (2026-10-13 win-rate re-read): still not ready.** Strictly
 post-gate sample is now **99 trades** (42W/57L, 42.4%), with t = +0.80 and a
@@ -84,10 +88,12 @@ net-negative. Estimated break-even round trip ~**$0.63 vs $0.40 assumed
 (1.6×)** — cost gate still FAIL. Only **1/6** data-readiness gates pass.
 Confirming even the observed ~$0.23/trade edge needs ~700+ post-gate trades
 (~30 more weeks at ~20/week). LIVE order-path probe remains 1/9 clean
-(4 BLOCKER, 3 HIGH, 1 ADVISORY); **Stage A has not started and the XM logger
-has not been installed (0/14 days)**. Earliest realistic micro-live remains
-**early-to-mid December 2026**, conditional on starting Stage A now. Keep
-`TRADING_MODE = FORWARD_TEST`; do not enable real-money orders.
+(4 BLOCKER, 3 HIGH, 1 ADVISORY); **Stage A is incomplete** (the Wine executor
+has only passed fake-terminal tests; engine integration and XM/Wine validation
+remain) and the XM logger has not been installed (0/14 days). Earliest realistic
+micro-live remains **early-to-mid December 2026**, conditional on the remaining
+Stage A work and logger starting promptly. Keep `TRADING_MODE = FORWARD_TEST`;
+do not enable real-money orders.
 
 ### The book in one table (net of $0.40/trade; gross in brackets; refreshed 2026-10-13)
 
@@ -106,14 +112,25 @@ gates. Do not use a pooled R total or one pooled breakeven rate across the 09-06
 
 The raw Profit column sums to **−$326.48 gross** across all 157 closed rows, giving a ledger reconstruction of **−$126.48 from the $200 start before spread costs**. The engine ledger reads **$270.37**; the gap is the known 09-03 sizing monsters plus pre-port balance resets plus residual reconciliation artifacts. Exclude the two outliers from every strategy P/L statistic. The clean 09-05-on book (155 trades) is **+$70.32 gross / +$8.32 net** at the measured $0.40 round trip.
 
-### What changed since the 2026-10-09 snapshot (141 → 157 closed rows; 8,930 → 10,030 M5 rows, +1,100)
+### What changed since the 2026-10-09 snapshot (141 → 157 closed rows; 8,930 → 10,076 M5 rows, +1,146)
 
 1. **Sixteen new closes (6W/10L, roughly flat to slightly negative net), no open trade.** Post-gate sample grew 83 → **99**. Sample-size gate (100 post-gate) is now essentially met; the remaining gates are the binding constraints.
 2. **The point estimate softened further; the edge remains unproven.** Strictly post-gate n=99: 42W/57L, 42.4%, ~+$62.60 gross / +$23.00 net, t=+0.80, day-block bootstrap ~75% positive. Cost-adjusted cover ~1.6× (still below the 2.0× gate). Best 5 trades are ~133% of net; second half net-negative. Confirming the observed edge still needs ~700 post-gate trades.
 3. **Ledger gap persists** (engine $270.37 vs reconstructed true equity ~−$126.48). Same known causes (09-03 monsters + pre-port resets + residual #125-era artifacts). No new unexplained breaks reported by `check_data.py` beyond the expected warnings.
-4. **Data integrity:** `check_data.py` reports only expected warnings (duplicate Trade_Num, Balance_After breaks from ledger resets, feed gaps). Local log 10,030 rows through 10-13 09:05. Indicator reconstruction remains high; pathwalk agrees with log-covered trades.
+4. **Data integrity:** `check_data.py` reports 0 fail / 65 warnings (duplicate
+   Trade_Num, Balance_After breaks from ledger resets, feed gaps, plus a
+   `status.json` W/L drift: 67/90 vs the ledger's 66/91; no open trade, and the
+   engine resyncs status from `trades.csv` on restart). No data file changed in
+   this session. Local log 10,076 rows through 10-13 12:55. Indicator
+   reconstruction remains high; pathwalk agrees with log-covered trades.
 5. **Blocked signals:** skips grew (136 → 190). Phantoms still show daily halt protective, blackouts neutral, cooldown costly-looking but too small/cascade-ignorant to loosen.
-6. **LIVE path and logger: no movement.** `live_path_probe.py` still 1/9 clean. Stage A not started; XM logger not installed (0/14 days). Data-readiness gates: **1/6 pass**. Go-live timing unchanged: not now; earliest realistic micro-live early-to-mid December 2026 if Stage A + logger start immediately.
+6. **LIVE path: Part B scaffold only; logger: no movement.**
+   `live_path_probe.py` is still 1/9 clean because it probes the old engine LIVE
+   path. The Wine executor/protocol passed its offline fake suite but is not
+   connected to `engine.py`, not tested under Wine/XM, and does not exit Stage A.
+   XM logger not installed (0/14 days). Data-readiness gates: **1/6 pass**.
+   Go-live remains blocked; the early-to-mid December 2026 window is conditional
+   on completing Stage A and starting the logger promptly.
 
 ### Operations
 
@@ -152,8 +169,15 @@ The raw Profit column sums to **−$326.48 gross** across all 157 closed rows, g
   Scenario H covers fresh/stale offset estimation. The Bitcoin sidecar must be
   restarted after deployment, and `DATA_SOURCE=MT5` must wait until the first
   post-deploy JSON is verified.
-- Feed health at this snapshot: **10,030 local M5 rows** through 2026-10-13 09:05 UTC. Prior gaps (885 min 09-28/29, 35 min 10-03, 20 min 10-04) still present; the 885-min gap has aged out of a rolling 14-day window. No new large gaps reported in the latest check.
-- **Next milestones:** (a) the logger's exit — ≥14 complete UTC days incl. 2 complete weekends, read with `python3 tools/xm_quote_report.py` — and (b) the remaining live-readiness gates beyond the now-nearly-met 100 post-gate sample. Stage A (order-path + Wine executor) is the critical path for any micro-live. Keep collecting. Session spread profile and stronger per-signal skip logging remain open.
+- Feed health at this snapshot: **10,076 local M5 rows** through 2026-10-13 12:55 UTC. Prior gaps (885 min 09-28/29, 35 min 10-03, 20 min 10-04) still present; the 885-min gap has aged out of a rolling 14-day window. No new large gaps reported in the latest check.
+- **Next milestones:** (a) complete Stage A's engine adapter/reconciliation +
+  probes and validate the Wine worker on XM demo (the scaffold in
+  `docs/MT5-ORDER-EXECUTOR.md` is one component only); (b) start the read-only
+  logger and record ≥14 complete UTC days incl. 2 complete weekends with
+  `python3 tools/xm_quote_report.py`; and (c) clear the remaining live-readiness
+  gates. Stage A plus the logger clock are the calendar critical path. Keep
+  collecting; session spread profile and stronger per-signal skip logging remain
+  open.
 
 ## 2. Bot in one paragraph
 
@@ -213,6 +237,12 @@ re-tested it; §5 below has the prior re-read).
 | Max open | 1 | — |
 | Lot | 0.01 fixed | Forward-test only |
 
+No forward-test strategy gate was changed in this session. The new Stage A
+executor has separate, **inactive** safety defaults (demo-only, manual halt,
+$30 drawdown latch, 3 daily SLs / -$10, quote freshness and spread guards);
+they are documented in `docs/MT5-ORDER-EXECUTOR.md` and are not evidence of a
+validated live risk policy.
+
 ## 5. What the data says (2026-10-13)
 
 - **Edge is positive but unproven.** Post-gate n=99, net ~+$0.23/trade after $0.40 cost, t=+0.80, bootstrap ~75%. Fragility high (best 5 = 133% of net). Second half of the sample is net-negative. Do not treat the point estimate as a live expectation.
@@ -220,12 +250,24 @@ re-tested it; §5 below has the prior re-read).
 - **Cost is the binding constraint.** Measured round-trip $0.40; break-even ~$0.63 (1.6×). Gate wants 2.0×. Any live spread wider than ~$0.50 will erase the edge.
 - **Sample gate nearly met.** 99/100 post-gate. Remaining failures: edge significance, cost cover, fragility, recent form.
 - **Phantoms (blocked signals):** daily halt still protective; blackouts neutral; cooldown positive-looking but too small and cascade-ignorant to change. Keep gates.
-- **No parameter changes recommended.** Collect more data. The next useful experiment is the XM logger (real spread + contract specs), not a retune.
+- **No parameter changes recommended.** Collect more data. The next useful
+  experiment is the XM logger (real spread + contract specs), not a retune. The
+  Wine executor scaffold is infrastructure-only: it did not touch strategy
+  logic, forward-test order settings, or sample/data conclusions; its proposed
+  demo risk caps remain unverified.
 
 ## 6. Known issues / debt
 
-- LIVE order path: 1/9 probes clean. Stage A (fixes + Wine executor) not started. Do not flip `TRADING_MODE`.
-- Engine ledger vs reconstructed equity gap (~$397) is known and explained (09-03 monsters + resets + residual). Do not "fix" the ledger by rewriting history.
+- LIVE engine path: 1/9 probes clean. Stage A is incomplete: the protocol,
+  worker and fake tests are built (Part B), but engine adapter/reconciliation,
+  remaining path fixes and Wine/XM-demo validation are pending. The worker is
+  disabled by default and has never run against MT5. Do not flip `TRADING_MODE`.
+- Engine ledger vs reconstructed equity gap (~$397) is known and explained
+  (09-03 monsters + resets + residual). Do not "fix" the ledger by rewriting
+  history.
+- Current `status.json` reports 67W/90L while `trades.csv` reports 66W/91L
+  (same 157 closed, no open trade). `check_data.py` warns; restart resyncs engine
+  stats from the ledger. Do not hand-edit either file to reconcile it.
 - #125 reconciliation residue is closed history; status resyncs on restart.
 - XM logger built but not installed on the host. 0/14 days.
 - Session-specific spread profile and richer skip logging still open.
@@ -234,7 +276,7 @@ re-tested it; §5 below has the prior re-read).
 
 | Stage | What | Status | Gate |
 |---|---|---|---|
-| A | Order-path fixes + Wine executor PR | **Not started** | Probe ≥8/9 clean |
+| A | Order-path fixes + Wine executor PR | **In progress — executor scaffold only; engine integration/demo validation pending** | Probe ≥8/9 clean |
 | B-i | XM logger installed + ≥14 days (2 weekends) | **Not started** (built) | `xm_quote_report.py` OK |
 | B-ii | 100 strictly post-gate trades | **99/100** (met ~today) | Sample |
 | C | Remaining readiness gates (edge, cost, fragility, form) | 1/6 pass | All 6 |
@@ -250,7 +292,13 @@ Earliest realistic micro-live: **early-to-mid December 2026** if Stage A and the
 - `tools/live_readiness.py --spread 0.40` — the 6 data gates.
 - `tools/handoff_check.py` / `--update` — snapshot freshness.
 - `tools/check_data.py` — ledger integrity.
-- `tools/live_path_probe.py` — LIVE order-path probes.
+- `tools/live_path_probe.py` — legacy engine LIVE order-path probes (still
+  failing; not the sidecar test).
+- `tools/mt5_order_protocol.py` / `tools/mt5_order_executor.py` — demo-only,
+  disabled-by-default Wine executor protocol/worker (Stage A Part B; see
+  `docs/MT5-ORDER-EXECUTOR.md`).
+- `tools/mt5_order_executor_test.py` — offline fake-terminal regression tests;
+  also run by smoke scenario N.
 - `tools/xm_quote_report.py` — logger health (once installed).
 - `tools/autosync.sh` — 15-min data commit + deploy gate + Telegram.
 - `tools/history_to_log.py` / `tools/backtest.py` — **fast path for the statistical

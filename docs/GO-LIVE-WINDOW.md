@@ -1,6 +1,12 @@
 # Go-live window — planning calendar (not a live switch)
 
-Written 2026-10-09. Follow this with `docs/HANDOFF.md` §7. This does **not** approve `TRADING_MODE=LIVE`.
+Written 2026-10-09; status note added 2026-10-13. Follow this with
+`docs/HANDOFF.md` §7. This does **not** approve `TRADING_MODE=LIVE`.
+
+**2026-10-13 status:** Part B (Wine order-executor scaffold) has been started and
+is offline-tested only (`docs/MT5-ORDER-EXECUTOR.md`). It is not wired to the
+engine, not validated under Wine/XM, and does not meet the Stage A exit. The
+calendar remains conditional; `TRADING_MODE` stays `FORWARD_TEST`.
 
 ## Why this window
 
@@ -23,7 +29,10 @@ Working micro-live window: **2026-12-08 → 2026-12-19**. 0.01 lot, weekdays, M5
 
 ## Still needed from the operator
 
-1. Approve starting Stage A (order-path PR: findings 1–7 and 9 in `docs/REVIEW-2026-10-01.md` §6, plus the Wine order executor).
-2. Install the XM logger sidecar (`docs/XM-LOGGER.md` §3) in the week of 2026-10-12 so the 14-day clock covers the 10-24/25 server-DST weekend.
+1. Complete/review the remaining Stage A work: engine order-path fixes and
+   adapter, kill switches, probes, and real Wine/XM-demo validation. This request
+   started only the offline Part B scaffold; it did not approve a demo order or
+   complete Stage A.
+2. Install the XM logger sidecar (`docs/XM-LOGGER.md` §3) so its ≥14-day clock can be measured; it remains uninstalled.
 
 Keep `TRADING_MODE = FORWARD_TEST` until Stage A exits 0, Stage B-i is MET, and Stage C's demo exit is met.

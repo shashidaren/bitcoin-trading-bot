@@ -45,6 +45,9 @@ Scenarios:
      OHLC with deterministic stop/target fills, stop-first ties, no entry-candle
      self-exit, exit-before-entry ordering on the same close, and restart/dedup
      without duplicate close rows
+  N) Wine order-executor protocol -> fake-terminal tests MUST enforce demo-only
+     arming, spread/quote/risk guards, valid filling flags, no-retry ambiguity,
+     one-position exposure, and position-history close reconciliation
 
 Usage: python3 tools/smoke_test.py
 """
@@ -56,6 +59,7 @@ import shutil
 import tempfile
 import time
 import types
+import subprocess
 from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1528,6 +1532,14 @@ try:
           f"dup={dup} rows_once={rows_once} rows_twice={rows_twice}")
 finally:
     shutil.rmtree(_tmp, ignore_errors=True)
+
+# N: the Linux-hostable tests for the Wine order executor use only a fake MT5;
+# never import MetaTrader5 or touch a terminal from the production smoke gate.
+_n = subprocess.run([sys.executable, os.path.join(HERE, "mt5_order_executor_test.py")],
+                    cwd=ROOT, capture_output=True, text=True, timeout=60)
+check("N: demo-only Wine order executor fake-terminal suite",
+      _n.returncode == 0,
+      (_n.stdout + _n.stderr)[-1200:] if _n.returncode else "22 offline tests passed")
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.
