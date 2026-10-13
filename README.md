@@ -35,6 +35,10 @@ deliberately adapted for BTC).
 | `tools/live_readiness.py` | Evidence + go/no-go gates for LIVE: edge significance, cost margin, fragility, Monte Carlo risk, entry-latency stress, feed health (defaults to `--spread 0.40`). |
 | `tools/live_path_probe.py` | Offline probe of `engine.py`'s LIVE order path against a fake MT5 (no terminal, network or Telegram); exits 1 until the findings in the live-readiness review are fixed. |
 | `tools/mt5_quotes.py` | **Read-only** Wine sidecar (never touches orders or `engine.py`): logs XM BTCUSD bid/ask/spread, a contract-spec snapshot and shadow XM M5 candles into `xm_data/` so the cost assumption ($0.40 vs current $0.84 break-even) and feed parity are measured. Unit: `deploy/mt5quotes.service`. |
+| `tools/mt5_order_protocol.py` / `tools/mt5_order_executor.py` | Stage A Part B: stdlib JSON file bridge + **demo-only, disabled-by-default** Wine order executor. Has no engine integration or XM/Wine validation yet; keep `TRADING_MODE=FORWARD_TEST`. See `docs/MT5-ORDER-EXECUTOR.md`. |
+| `deploy/mt5order.service` | Dormant-by-default systemd unit for the order executor (`mt5order-btc`); requires explicit approved demo setup and a matching equity baseline. |
+| `tools/mt5_order_executor_test.py` | Offline fake-terminal tests for the Wine executor. |
+| `docs/MT5-ORDER-EXECUTOR.md` | Order-intent protocol, demo-only guardrails, kill switches, install boundary and remaining Stage A work. |
 | `tools/xm_quote_report.py` | Reads `xm_data/`: logger progress vs the ≥14-day/2-weekend exit, spread by session/weekend/blackout/hour, the cost on the ledger's real trades, candle parity vs `forward_test_log.csv`, the contract spec. `--quiet` = one advisory line (autosync digest). |
 | `archive/` | Historical backups, old engine versions, retired helpers (`generate_trades.py`). |
 
@@ -48,9 +52,9 @@ python3 tools/pathwalk_sims.py --spread 0.40 --census # 3. exit-rule replay (pri
 python3 tools/analyze_losers.py --spread 0.40         # 4. winner/loser feature drift, MAE/MFE, stop grid
 python3 tools/validate_gates.py                       # 5. replay entry gates vs all historical trades (gross)
 python3 tools/phantom_trades.py --spread 0.40         # 6. what did the blocked (skipped) signals actually do?
-python3 tools/smoke_test.py                           # 7. engine + sidecar regression tests (scenarios A–M)
+python3 tools/smoke_test.py                           # 7. engine + sidecar regression tests (scenarios A–N)
 python3 tools/live_readiness.py --spread 0.40         # 8. evidence + go/no-go gates for LIVE (seeded, ~1 s)
-python3 tools/live_path_probe.py                      # 9. LIVE order-path probe vs a fake MT5 (exit 1 until fixed)
+python3 tools/live_path_probe.py                      # 9. engine LIVE-path probe vs fake MT5 (still fails until Stage A integration)
 python3 tools/xm_quote_report.py                      # 10. XM logger: spread by session, real-trade cost, feed parity (needs xm_data/)
 
 # Optional fast path — cross-check the statistical gates on a LONG history in
@@ -62,9 +66,11 @@ python3 tools/backtest.py long_history.csv --spread 0.40 --save-log bt_log.csv
 `--spread 0.40` is the measured XM BTCUSD round trip at `LOT_SIZE = 0.01`; the tools default to
 `--spread 0` (gross), so a command copied without the flag prints numbers $0.40/trade more
 optimistic than the docs. `tools/handoff_check.py` fails the handoff if its command blocks disagree
-with its own cost assumption. All tools are read-only except the engine's self-healing migration and
-`handoff_check.py --update` (which rewrites only the marked snapshot block in `docs/HANDOFF.md`).
-Every walk comes from one implementation, `tools/replay_lib.py` — never hand-roll a bar walk.
+with its own cost assumption. Analysis tools are read-only except the engine's self-healing migration
+and `handoff_check.py --update` (which rewrites only the marked snapshot block in `docs/HANDOFF.md`).
+The order bridge/executor is explicitly side-effecting: it writes intents and can send MT5 **demo**
+orders only when deliberately enabled; it defaults off and refuses real accounts. Do not arm it from
+the analysis workflow. Every walk comes from one implementation, `tools/replay_lib.py` — never hand-roll a bar walk.
 
 ## 🚀 Deploying to production
 

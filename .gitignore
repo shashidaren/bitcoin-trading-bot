@@ -34,6 +34,9 @@ Thumbs.db
 # === Wine / MT5 Local Data (if any symlinks exist here) ===
 drive_c/
 *.tmp
+# Local order intents, fills, broker state and kill-switch marker are runtime-only.
+mt5_order_bridge/
+MT5_ORDER_HALT
 
 # === One-off reconciler backups (tools/reconcile_stale_trade.py) ===
 backups/

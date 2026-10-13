@@ -54,6 +54,22 @@ Risk geometry: SL = entry -/+ 2.0 x ATR, TP = entry +/- 4.0 x ATR (RR 1:2, break
 - **Blackouts (UTC)**: London Open (07:55-09:00), NY Pre-Market (12:25-12:45), NY Open & US Macro (13:25-15:15). No rollover window - BTC trades 24/7.
 
 ## Changelog & Recent Fixes
+- **[2026-10-13] Stage A Part B Wine order-executor scaffold — offline-tested, not connected or enabled.**
+  Added a stdlib atomic JSON intent/result protocol, a demo-only Wine MT5 worker,
+  a dormant-by-default `mt5order-btc` unit, and fake-terminal regression
+  coverage (smoke Scenario N). The worker checks actual DEMO account mode and an
+  explicit equity baseline, manual/daily/drawdown switches,
+  one-position/one-pending-order-per-magic, broker-side SL/TP, quote age, `$60` +
+  `70% of 1R` spread limits, symbol filling flags and `order_check`; it persists
+  `SENDING` before dispatch, never retries ambiguous sends, and reconciles closes
+  by position id, summing profit + commission + swap + fee. Runtime queue/state
+  are git-ignored.
+  **Not wired into `engine.py`, not tested under Wine/XM, service disabled, no
+  orders sent**; the old `live_path_probe.py` still fails and Stage A remains
+  incomplete. Runbook: `docs/MT5-ORDER-EXECUTOR.md`. `smoke_test.py` passes A–N;
+  strategy, forward-test sample, parameters and statistical conclusions are
+  unchanged. `docs/HANDOFF.md` refreshed from 10,030 to 10,076 M5 rows through
+  2026-10-13 12:55 UTC.
 - **[2026-10-05] BUY #125 explicitly reconciled from the OHLC path (SL) — not a guessed fill.**
   A later run had force-closed simulated BUY #125 in `trades.csv` as a *guessed*
   TP at the target with a wall-clock `Exit_Time` (2026-10-05 03:50:10, +$3.37) —
