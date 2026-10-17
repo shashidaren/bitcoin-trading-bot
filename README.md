@@ -15,7 +15,9 @@ deliberately adapted for BTC).
 |---|---|
 | `engine.py` | Data ingestion, indicators (EMA/RSI/ATR), the Buy/Sell signal funnel, trade execution. Includes `migrate_trades_csv()` — self-healing schema fix. |
 | `trade_filter.py` | Risk gatekeeper: session blackouts, escalating SL cooldowns, daily-loss circuit breaker, %-based ATR bounds. |
-| `dashboard.py` | Web dashboard (port 6001): funnel telemetry, equity, active trade. |
+| `dashboard.py` | Web dashboard (port 6001): equity, active trade, funnel telemetry, descriptive Buy/Sell tape pressure and 20-bar location. The pressure read is display-only, not a trade signal. |
+| `pressure.py` | Read-only pressure composite and level context; stdlib-only and not imported by the engine. |
+| `tools/pressure_report.py` | CLI equivalent; prints current components and per-side pre-entry score ranges without claiming predictive buckets. |
 | `trades.csv` | **The ledger** — one row per closed trade (16-field schema with `Trade_Type`). |
 | `forward_test_log.csv` | M5 candle log with all indicator values per bar. |
 | `skipped_trades.csv` | Every full signal the risk layer blocked, with reason. |
@@ -24,6 +26,7 @@ deliberately adapted for BTC).
 | `docs/HANDOFF.md` | **Start here** — executive summary: current state, gates, evidence base, next steps, data gotchas. Paste it into a new session. |
 | `archive/PROJECT_LOG.md` | Living changelog, current strategy rules, parameters, to-do list. |
 | `docs/PORT-2026-09-10.md` | What was ported from gold-trading-bot and the BTC-specific adaptations. |
+| `docs/ANALYSIS-2026-10-17-dashboard-pressure.md` | Read-only BTC pressure dashboard definition, side-collinearity caveat, and current per-side descriptive check. |
 | `docs/REVIEW-2026-10-05.md` | Latest data/exit-state recheck (125 closed rows): documents the open paper BUY #125 whose saved path already crosses SL, the conditional MT5 forward-test exit gap, updated metrics, and the need to confirm the production feed/runtime before reconciliation. |
 | `docs/REVIEW-2026-10-01.md` | **Live-readiness review (124 trades)** — is the edge real, how thin is the cost margin, what is wrong in the LIVE order path, and the staged path (fix → measure → XM demo → micro-live) to a capped pilot. Historical data snapshot; verdict remains not ready for real money. |
 | `docs/REVIEW-2026-09-15.md` | The first full data review (73 trades). §12 is the 2026-09-16 re-cut at 78 trades and **§13 the 2026-09-24 re-cut at 99 trades**; the body is the provenance behind them. |

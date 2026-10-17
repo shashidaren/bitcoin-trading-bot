@@ -50,6 +50,7 @@ Usage: python3 tools/smoke_test.py
 """
 import os
 import sys
+import ast
 import json
 import csv
 import shutil
@@ -1528,6 +1529,75 @@ try:
           f"dup={dup} rows_once={rows_once} rows_twice={rows_twice}")
 finally:
     shutil.rmtree(_tmp, ignore_errors=True)
+
+# --- Scenario N ------------------------------------------------------------
+print("\nScenario N: read-only BTC tape pressure and level calculations")
+import pressure as btc_pressure  # noqa: E402
+
+check("N: mirrored pressure constants stay aligned with engine",
+      btc_pressure.LOOKBACK_PERIOD == engine.LOOKBACK_PERIOD
+      and btc_pressure.WICK_RATIO_TARGET == engine.WICK_RATIO_TARGET
+      and btc_pressure.FLOOR_BUFFER_PCT == engine.FLOOR_BUFFER_PCT
+      and btc_pressure.EMA_SLOPE_LOOKBACK == engine.EMA_SLOPE_LOOKBACK
+      and btc_pressure.MAX_BELOW_EMA_ATR == engine.MAX_BELOW_EMA_ATR
+      and btc_pressure.RSI_MIN == engine.RSI_MIN and btc_pressure.RSI_MAX == engine.RSI_MAX
+      and btc_pressure.ATR_SL_MULT == engine.ATR_SL_MULT
+      and btc_pressure.ATR_TP_MULT == engine.ATR_TP_MULT)
+
+with open(os.path.join(ROOT, "pressure.py"), encoding="utf-8") as _source:
+    _pressure_tree = ast.parse(_source.read())
+_forbidden_imports = {"engine", "trade_filter", "flask", "subprocess", "shutil"}
+_pressure_imports = {
+    alias.name.split(".")[0]
+    for node in ast.walk(_pressure_tree)
+    if isinstance(node, (ast.Import, ast.ImportFrom))
+    for alias in node.names
+}
+_pressure_writes = any(
+    isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    and node.func.id == "open" and len(node.args) > 1
+    and isinstance(node.args[1], ast.Constant)
+    and any(mode in str(node.args[1].value) for mode in ("w", "a", "+", "x"))
+    for node in ast.walk(_pressure_tree)
+)
+check("N: pressure module remains stdlib-only and read-only",
+      not (_pressure_imports & _forbidden_imports) and not _pressure_writes)
+
+n_rows = []
+for i in range(80):
+    close = 80000.0 + i * 10.0
+    n_rows.append({
+        "Timestamp": (datetime(2026, 6, 1) + timedelta(minutes=5 * i)).strftime("%Y-%m-%d %H:%M:%S"),
+        "Open": str(close - 8), "High": str(close + 12), "Low": str(close - 12),
+        "Close": str(close), "Volume": "100", "EMA_50": str(close - 25),
+        "EMA_200": str(close - 100), "RSI": "60", "ATR": "100",
+        "Dynamic_Floor": "79900",
+    })
+n_read = btc_pressure.pressure(n_rows)
+n_loc = btc_pressure.location(n_rows[-21:])
+check("N: pressure is bounded, components sum to buy-share and sell is complementary",
+      n_read is not None and 0 <= n_read["buy_pct"] <= 100
+      and abs(n_read["buy_pct"] + n_read["sell_pct"] - 100) < 1e-9
+      and abs(sum(c["contribution"] for c in n_read["components"]) - n_read["buy_pct"]) < 1e-9,
+      f"buy={n_read['buy_pct']:.1f}%" if n_read else "no reading")
+n_warm = [dict(row) for row in n_rows]
+n_warm[-1]["EMA_200"] = "Calculating"
+check("N: pressure waits for valid EMA/RSI indicators instead of inventing neutral values",
+      btc_pressure.pressure(n_warm) is None)
+check("N: 20-bar location excludes the candle being evaluated",
+      n_loc is not None and n_loc["floor"] == 80000.0 + 59 * 10.0 - 12
+      and n_loc["ceiling"] == 80000.0 + 78 * 10.0 + 12)
+
+# Same-timestamp entry row is excluded: only features strictly before entry count.
+n_trade = [{"Trade_Type": "BUY", "Entry_Time": n_rows[65]["Timestamp"], "Profit": "2.50"}]
+n_cal = btc_pressure.calibrate(n_rows, n_trade)
+n_entry_changed = [dict(row) for row in n_rows]
+n_entry_changed[65].update({"Open": "1", "High": "1000000", "Low": "0", "Close": "999999"})
+n_cal_changed = btc_pressure.calibrate(n_entry_changed, n_trade)
+check("N: calibration uses only pre-entry bars and keeps sides separate",
+      n_cal["BUY"]["n"] == 1 and n_cal["SELL"]["n"] == 0
+      and n_cal["BUY"]["gross_profit"] == 2.5
+      and n_cal["BUY"]["score_median"] == n_cal_changed["BUY"]["score_median"])
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.
