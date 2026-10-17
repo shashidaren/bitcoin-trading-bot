@@ -4,10 +4,13 @@ import csv
 import json
 from flask import Flask, render_template_string
 
+import pressure as tape_pressure
+
 app = Flask(__name__)
 
-LOG_FILE_PATH = "/opt/bitcoin/forward_test_log.csv"
-STATUS_FILE_PATH = "/opt/bitcoin/status.json"
+DATA_DIR = os.getenv("BTC_DATA_DIR", "/opt/bitcoin")
+LOG_FILE_PATH = os.getenv("BTC_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
+STATUS_FILE_PATH = os.getenv("BTC_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -139,6 +142,71 @@ HTML_TEMPLATE = """
                     {% if status.atr %}{{ "%.2f"|format(status.atr) }}{% else %}&mdash;{% endif %}
                 </p>
             </div>
+        </div>
+
+        <!-- Descriptive tape-pressure read (never an entry/exit signal) -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+            <section class="lg:col-span-2 bg-slate-800 p-5 rounded-xl border border-slate-700">
+                <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+                    <div>
+                        <h2 class="text-lg font-semibold text-slate-100">Buy / Sell Tape Pressure</h2>
+                        <p class="text-xs text-slate-400">{{ pressure.window if pressure else 60 }} closed M5 bars · five-hour context · {{ pressure.as_of if pressure and pressure.as_of else 'warming up' }}</p>
+                    </div>
+                    <span class="text-xs px-2.5 py-1 rounded-full bg-amber-900/40 text-amber-300 border border-amber-700/40">Context only · not a signal</span>
+                </div>
+                {% if pressure %}
+                <div class="flex items-center justify-between text-sm mb-2">
+                    <span class="font-semibold text-emerald-400">BUY {{ "%.1f"|format(pressure.buy_pct) }}%</span>
+                    <span class="text-slate-300">{{ pressure.label }}</span>
+                    <span class="font-semibold text-rose-400">SELL {{ "%.1f"|format(pressure.sell_pct) }}%</span>
+                </div>
+                <div class="h-3 w-full rounded-full overflow-hidden bg-rose-500/80 flex mb-5" role="img" aria-label="Buy pressure {{ '%.1f'|format(pressure.buy_pct) }} percent; sell pressure {{ '%.1f'|format(pressure.sell_pct) }} percent">
+                    <div class="h-full bg-emerald-500" style="width: {{ '%.2f'|format(pressure.buy_pct) }}%"></div>
+                    <div class="h-full bg-rose-500" style="width: {{ '%.2f'|format(pressure.sell_pct) }}%"></div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
+                    {% for item in pressure.components %}
+                    <div>
+                        <div class="flex justify-between gap-2 text-xs mb-1">
+                            <span class="text-slate-300">{{ item.label }} <span class="text-slate-500">({{ "%.0f"|format(item.weight * 100) }}%)</span></span>
+                            <span class="font-mono text-slate-300">{{ item.raw }} {{ item.unit }}</span>
+                        </div>
+                        <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                            <div class="h-full bg-cyan-500 rounded-full" style="width: {{ '%.2f'|format(item.buy_pct) }}%"></div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <p class="mt-4 text-xs text-slate-500">Weighted descriptive composite of tick-count-weighted candle flow, 60-bar momentum, EMA trend, EMA slope and RSI. EMA trend/slope also gate this strategy, so the dial can echo the permitted trade side; it is not a probability or a proven predictor.</p>
+                {% else %}
+                <p class="text-sm text-slate-400 py-8 text-center">Waiting for enough valid candles and indicators to calculate the five-hour read.</p>
+                {% endif %}
+            </section>
+
+            <section class="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                <h2 class="text-lg font-semibold text-slate-100 mb-1">20-bar Location</h2>
+                <p class="text-xs text-slate-400 mb-5">Current close against the previous 20 M5 candle range</p>
+                {% if location %}
+                <div class="mb-4">
+                    <div class="flex justify-between text-xs text-slate-400 mb-1"><span>Floor ${{ "%.2f"|format(location.floor) }}</span><span>Ceiling ${{ "%.2f"|format(location.ceiling) }}</span></div>
+                    <div class="relative h-2 rounded-full bg-slate-700">
+                        {% set loc_pct = (((location.close - location.floor) / (location.ceiling - location.floor)) * 100) if location.ceiling > location.floor else 50 %}
+                        <div class="absolute -top-1 h-4 w-1 rounded bg-orange-400" style="left: {{ '%.2f'|format([0, [loc_pct, 100]|min]|max) }}%"></div>
+                    </div>
+                    <div class="text-center text-sm font-semibold text-orange-300 mt-2">Close ${{ "%.2f"|format(location.close) }}</div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div class="bg-slate-900/60 p-3 rounded-lg"><span class="text-xs text-slate-400">Above floor</span><br><span class="font-semibold">{{ "%.2f"|format(location.floor_atr) if location.floor_atr is not none else '—' }} ATR</span></div>
+                    <div class="bg-slate-900/60 p-3 rounded-lg"><span class="text-xs text-slate-400">Below ceiling</span><br><span class="font-semibold">{{ "%.2f"|format(location.ceiling_atr) if location.ceiling_atr is not none else '—' }} ATR</span></div>
+                </div>
+                {% if location.floor_logged is not none and (location.floor_logged - location.floor)|abs > 0.02 %}
+                <p class="text-xs text-amber-300 mt-3">Level check: recomputed floor differs from logged floor by ${{ "%.2f"|format((location.floor_logged - location.floor)|abs) }}.</p>
+                {% endif %}
+                {% else %}
+                <p class="text-sm text-slate-400 py-8 text-center">Waiting for at least 21 usable candles.</p>
+                {% endif %}
+                <p class="text-xs text-slate-500 mt-4">Location only. The panel does not evaluate or alter risk gates.</p>
+            </section>
         </div>
 
         <!-- Funnel Stats -->
@@ -294,6 +362,8 @@ def index():
         except Exception as e:
             print(f"Error reading log: {e}")
 
+    pressure_read = tape_pressure.pressure(rows[-500:])
+    location_read = tape_pressure.location(rows[-25:])
     recent_rows = list(reversed(rows))[:30]
 
     return render_template_string(
@@ -302,6 +372,8 @@ def index():
         status=status,
         total=total_rows,
         funnel=funnel,
+        pressure=pressure_read,
+        location=location_read,
     )
 
 
