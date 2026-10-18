@@ -11,6 +11,7 @@ app = Flask(__name__)
 DATA_DIR = os.getenv("BTC_DATA_DIR", "/opt/bitcoin")
 LOG_FILE_PATH = os.getenv("BTC_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
 STATUS_FILE_PATH = os.getenv("BTC_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
+TRADES_FILE_PATH = os.getenv("BTC_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -44,13 +45,20 @@ HTML_TEMPLATE = """
                     </span>
                 </div>
                 <div class="bg-slate-800 px-5 py-3 rounded-xl border border-slate-700 text-right">
-                    <span class="text-xs text-slate-400 block">Simulated Equity</span>
+                    <span class="text-xs text-slate-400 block">Engine Ledger Balance</span>
                     <span class="text-3xl font-semibold {{ 'text-emerald-400' if status.equity >= 200 else 'text-rose-400' }}">
                         ${{ "%.2f"|format(status.equity) }}
                     </span>
+                    <span class="text-[10px] text-slate-500 block">Internal balance; not all-time P/L</span>
                 </div>
             </div>
         </header>
+
+        {% if trade_stats_warning %}
+        <div role="status" class="bg-amber-950/60 border border-amber-700/60 text-amber-200 rounded-lg px-4 py-3 mb-5 text-sm">
+            {{ trade_stats_warning }}
+        </div>
+        {% endif %}
 
         <!-- Main Stats -->
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-4 mb-6">
@@ -348,6 +356,26 @@ def index():
         except Exception:
             pass
 
+    # Closed-row outcomes in trades.csv are authoritative if status.json is
+    # stale after a reconciliation. Keep the dashboard read-only: correct the
+    # display locally and leave the engine's files/state untouched.
+    ledger_stats = tape_pressure.trade_summary(tape_pressure.read_rows(TRADES_FILE_PATH))
+    trade_stats_warning = None
+    if ledger_stats["total_trades"]:
+        status_counts_match = True
+        for key in ("total_trades", "wins", "losses"):
+            try:
+                status_counts_match = status_counts_match and int(status.get(key)) == ledger_stats[key]
+            except (TypeError, ValueError):
+                status_counts_match = False
+        status.update(ledger_stats)
+        if not status_counts_match:
+            trade_stats_warning = (
+                "Closed-trade counters in status.json differ from trades.csv. "
+                "Showing ledger counts; the engine balance remains the internal status.json value "
+                "(not all-time P/L). No engine state was modified."
+            )
+
     funnel = status.get("funnel") or {}
     rows = []
     total_rows = 0
@@ -374,6 +402,7 @@ def index():
         funnel=funnel,
         pressure=pressure_read,
         location=location_read,
+        trade_stats_warning=trade_stats_warning,
     )
 
 

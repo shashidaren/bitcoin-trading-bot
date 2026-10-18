@@ -381,15 +381,33 @@ with open(engine.MT5_FEED_FILE, "w") as f:
 r1 = eng_h.read_mt5_feed()
 check("H: feed file normalized to rate shape",
       r1 is not None and r1[0]["time"] == 2000 and r1[0]["open"] == 80000.0 and r1[0]["tick_volume"] == 120)
+first_h_candle = eng_h.mt5_next_candle(r1, 0)
 check("H: first closed candle accepted",
-      (lambda c: c is not None and c[0] == 2000 and c[1] == 80000.0 and c[5] == 120)(eng_h.mt5_next_candle(r1, 0)))
-check("H: same candle NOT re-evaluated (restart dedup)", eng_h.mt5_next_candle(r1, 2000) is None)
+      first_h_candle is not None and first_h_candle[0] == 2000
+      and first_h_candle[1] == 80000.0 and first_h_candle[5] == 120)
+check("H: same candle NOT re-evaluated at its close watermark",
+      eng_h.mt5_next_candle(r1, 2000 + engine.CANDLE_SECONDS) is None)
+
+# Persist the exact source-bar close time, then make the next bar eligible.
+eng_h.process_closed_candle(*first_h_candle[1:], candle_ts=first_h_candle[0])
+last_close_ts = engine.last_logged_candle_close_ts(engine.LOG_FILE_PATH)
+check("H: MT5 log timestamp is the exact closed-bar boundary",
+      last_close_ts == 2000 + engine.CANDLE_SECONDS)
 
 with open(engine.MT5_FEED_FILE, "w") as f:
     json.dump({"ts": 2300, "open": 80005.0, "high": 80020.0, "low": 80000.0,
                "close": 80015.0, "tick_volume": 340, "updated_at": "2026-09-10 05:06:03"}, f)
-c2 = eng_h.mt5_next_candle(eng_h.read_mt5_feed(), 2000)
-check("H: next bar's candle accepted", c2 is not None and c2[0] == 2300 and c2[5] == 340)
+c2 = eng_h.mt5_next_candle(eng_h.read_mt5_feed(), last_close_ts)
+check("H: next bar is not skipped after restart watermark",
+      c2 is not None and c2[0] == 2300 and c2[5] == 340)
+
+eng_h._last_price_mono = 100.0
+check("H: MT5 watchdog recognizes a fresh closed candle",
+      not eng_h.mt5_feed_is_stale(r1, now_mono=105.0, now_epoch=2600.0))
+check("H: MT5 watchdog recognizes a stale unchanged candle",
+      eng_h.mt5_feed_is_stale(r1, now_mono=105.0, now_epoch=2901.0))
+check("H: MT5 watchdog recognizes a missing feed after its timeout",
+      eng_h.mt5_feed_is_stale(None, now_mono=701.0))
 
 with open(engine.MT5_FEED_FILE, "w") as f:
     f.write("corrupted")
@@ -1516,17 +1534,29 @@ try:
         json.dump({"ts": 3000, "open": 100.0, "high": 108.0, "low": 89.0,
                    "close": 95.0, "tick_volume": 123, "updated_at": "2026-10-05 03:20:11"}, f)
     candle = eng_m.mt5_next_candle(eng_m.read_mt5_feed(), 0)
-    eng_m.process_closed_candle(candle[1], candle[2], candle[3], candle[4], candle[5])
+    eng_m.process_closed_candle(candle[1], candle[2], candle[3], candle[4], candle[5],
+                                candle_ts=candle[0])
     rows_once = m_trade_rows(engine.TRADES_LOG_PATH)
+    close_watermark = engine.last_logged_candle_close_ts(engine.LOG_FILE_PATH)
 
     eng_m2 = m_make_engine(_tmp)
-    dup = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), candle[0])
+    dup = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), close_watermark)
     if dup is not None:
-        eng_m2.process_closed_candle(dup[1], dup[2], dup[3], dup[4], dup[5])
+        eng_m2.process_closed_candle(dup[1], dup[2], dup[3], dup[4], dup[5],
+                                     candle_ts=dup[0])
     rows_twice = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: restart dedup rejects the same candle and keeps one close row",
-          dup is None and len(rows_once) == 1 and len(rows_twice) == 1,
-          f"dup={dup} rows_once={rows_once} rows_twice={rows_twice}")
+    check("M: restart dedup uses persisted bar-close time and keeps one close row",
+          dup is None and close_watermark == candle[0] + engine.CANDLE_SECONDS
+          and len(rows_once) == 1 and len(rows_twice) == 1,
+          f"dup={dup} close_watermark={close_watermark} rows_once={rows_once} rows_twice={rows_twice}")
+
+    with open(engine.MT5_FEED_FILE, "w") as f:
+        json.dump({"ts": candle[0] + engine.CANDLE_SECONDS, "open": 100.0, "high": 108.0,
+                   "low": 95.0, "close": 101.0, "tick_volume": 124}, f)
+    next_after_restart = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), close_watermark)
+    check("M: restart watermark does not skip the immediately following bar",
+          next_after_restart is not None
+          and next_after_restart[0] == candle[0] + engine.CANDLE_SECONDS)
 finally:
     shutil.rmtree(_tmp, ignore_errors=True)
 
@@ -1598,6 +1628,22 @@ check("N: calibration uses only pre-entry bars and keeps sides separate",
       n_cal["BUY"]["n"] == 1 and n_cal["SELL"]["n"] == 0
       and n_cal["BUY"]["gross_profit"] == 2.5
       and n_cal["BUY"]["score_median"] == n_cal_changed["BUY"]["score_median"])
+
+n_second_trade = {"Trade_Type": "BUY", "Entry_Time": n_rows[70]["Timestamp"], "Profit": "1.50"}
+n_even_cal = btc_pressure.calibrate(n_rows, n_trade + [n_second_trade])
+n_second_cal = btc_pressure.calibrate(n_rows, [n_second_trade])
+expected_even_median = sum(sorted([
+    n_cal["BUY"]["score_median"], n_second_cal["BUY"]["score_median"]
+])) / 2
+check("N: reported median averages the middle pair for an even sample",
+      n_even_cal["BUY"]["n"] == 2
+      and abs(n_even_cal["BUY"]["score_median"] - expected_even_median) < 1e-9)
+
+n_ledger_stats = btc_pressure.trade_summary([
+    {"Exit_Reason": "TP"}, {"Exit_Reason": "SL"}, {"Exit_Reason": "unknown"}
+])
+check("N: dashboard ledger summary counts only closed TP/SL rows",
+      n_ledger_stats == {"total_trades": 2, "wins": 1, "losses": 1, "win_rate": 50.0})
 
 # --- summary ---------------------------------------------------------------
 # autosync.sh gates every deploy on this exit code - never remove it.

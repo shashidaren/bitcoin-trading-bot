@@ -178,11 +178,45 @@ def is_market_quiet(now_utc: datetime = None) -> bool:
 
 
 def latest_closed_candle_ts(rates):
-    """Timestamp of the most recent closed candle from mt5.copy_rates_*
-    results (position 1), or None if no data was returned."""
+    """MT5's `time` for position 1: the open timestamp of its latest closed bar."""
     if rates is None or len(rates) == 0:
         return None
     return int(rates[0]["time"])
+
+
+def last_logged_candle_close_ts(path=None):
+    """Read the newest log Timestamp as a UTC candle-close watermark.
+
+    Legacy engine rows use the processing time (at/just after bar close); the
+    MT5 path below writes the exact close time. CSV parsing avoids assuming the
+    timestamp is the only unquoted field in the row.
+    """
+    path = LOG_FILE_PATH if path is None else path
+    if not path or not os.path.isfile(path):
+        return 0
+    latest = None
+    try:
+        with open(path, newline="") as fh:
+            for row in csv.DictReader(fh):
+                value = (row.get("Timestamp") or "").strip()
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                    try:
+                        latest = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+                        break
+                    except ValueError:
+                        continue
+    except (OSError, csv.Error, UnicodeError):
+        return 0
+    return int(latest.timestamp()) if latest is not None else 0
+
+
+def mt5_closed_candle_age_seconds(candle_open_ts, now_epoch=None):
+    """Age of the latest closed MT5 candle, whose `time` is its open time."""
+    if candle_open_ts is None:
+        return None
+    now = time.time() if now_epoch is None else float(now_epoch)
+    closed_at = int(candle_open_ts) + CANDLE_SECONDS
+    return max(0.0, now - closed_at)
 
 
 if TRADING_MODE == "LIVE":
@@ -573,16 +607,45 @@ class BitcoinEngine:
             now_mono = time.monotonic()
         return max(0.0, now_mono - self._last_price_mono)
 
-    def maybe_alert_stale_feed(self, stale_seconds: float) -> bool:
+    def maybe_alert_stale_feed(
+        self,
+        stale_seconds: float,
+        source: str = "price ticks",
+        recovery: str = "check the feed",
+    ) -> bool:
         """Rate-limited Telegram alert for a stalled feed. True if it alerted."""
         if self._last_stale_alert_mono is not None and \
                 time.monotonic() - self._last_stale_alert_mono < STALE_ALERT_COOLDOWN_SECONDS:
             return False
         self._last_stale_alert_mono = time.monotonic()
         self.send_telegram(
-            f"WARNING: bitcoin engine: no price ticks for {stale_seconds / 60:.0f} min - "
-            f"stale-feed guard forced a WebSocket reconnect"
+            f"WARNING: bitcoin engine: no {source} for {stale_seconds / 60:.0f} min - {recovery}"
         )
+        return True
+
+    def mt5_feed_is_stale(self, rates, now_mono=None, now_epoch=None) -> bool:
+        """Alert and return True when the MT5 feed has not advanced for too long.
+
+        Use the UTC age of a bar when the sidecar file is readable; this catches
+        a stale file immediately after restart. If the file is missing or
+        unreadable, fall back to elapsed monotonic time since the last accepted
+        bar (or the runner's startup baseline).
+        """
+        candle_ts = latest_closed_candle_ts(rates)
+        if candle_ts is not None:
+            stale_seconds = mt5_closed_candle_age_seconds(candle_ts, now_epoch)
+        else:
+            stale_seconds = self.feed_stale_seconds(now_mono)
+        if stale_seconds <= STALE_FEED_SECONDS:
+            return False
+
+        if not is_market_quiet() and self.maybe_alert_stale_feed(
+                stale_seconds,
+                source="new closed M5 candles",
+                recovery="check the mt5feed-btc sidecar",
+        ):
+            print(f"\nStale MT5 feed: no new closed candles for {stale_seconds:.0f}s - "
+                  "check the mt5feed-btc sidecar", flush=True)
         return True
 
     def log_candle(self, timestamp, o, h, l, c, ratio, tick_count, vol_ma, dynamic_floor, ema_f, ema_s, tested, rejected, held, vol_conf, trend_conf, rsi_val, atr_val):
@@ -723,12 +786,20 @@ class BitcoinEngine:
 
         return False
 
-    def process_closed_candle(self, o, h, l, c, tick_count):
-        """MT5 forward-test ordering: exit old trades on the bar, then score the close."""
-        self.check_position_on_closed_candle(o, h, l, c)
-        self.evaluate_candle(o, h, l, c, tick_count)
+    def process_closed_candle(self, o, h, l, c, tick_count, candle_ts=None):
+        """MT5 forward-test ordering: exit old trades on the bar, then score the close.
 
-    def evaluate_candle(self, o, h, l, c, tick_count):
+        `candle_ts` is MT5's UTC bar-open timestamp. When supplied, persist the
+        exact close time so restart dedup compares like-for-like timestamps.
+        """
+        self.check_position_on_closed_candle(o, h, l, c)
+        timestamp = None
+        if candle_ts is not None:
+            close_ts = int(candle_ts) + CANDLE_SECONDS
+            timestamp = datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self.evaluate_candle(o, h, l, c, tick_count, timestamp=timestamp)
+
+    def evaluate_candle(self, o, h, l, c, tick_count, timestamp=None):
         candle_range = h - l
         if candle_range <= 0:
             return
@@ -791,7 +862,7 @@ class BitcoinEngine:
             print(f"   [BUY] Tested:{tested_floor} | Rej:{valid_buy_rejection} ({lower_wick_ratio:.0%}) | Held:{held_support} | Trend:{buy_trend_confirmed}")
             print(f"   [SELL] Tested:{tested_ceiling} | Rej:{valid_sell_rejection} ({upper_wick_ratio:.0%}) | Held:{held_resistance} | Trend:{sell_trend_confirmed}")
 
-        ts = utc_now_str()
+        ts = timestamp or utc_now_str()
         self.log_candle(
             ts, o, h, l, c, lower_wick_ratio, tick_count, volume_ma, dynamic_floor,
             self.ema_fast, self.ema_slow, tested_floor, valid_buy_rejection, held_support,
@@ -1168,12 +1239,16 @@ class BitcoinEngine:
         except Exception:
             return None
 
-    def mt5_next_candle(self, rates, last_ts):
-        """Return (ts, o, h, l, c, tick_volume) if `rates` holds a closed M5
-        candle newer than last_ts, else None. Dedup guard: a restart must
-        never re-log the candle the previous session already wrote."""
+    def mt5_next_candle(self, rates, last_processed_close_ts):
+        """Return (open_ts, o, h, l, c, tick_volume) for a new closed bar.
+
+        MT5 rate `time` is the bar-open timestamp; the persisted log watermark
+        is a bar-close timestamp. Compare `open_ts + CANDLE_SECONDS` to that
+        watermark, so a restart neither replays the old bar nor skips the next
+        one when log processing happened a few seconds after the boundary.
+        """
         ts = latest_closed_candle_ts(rates)
-        if ts is None or ts <= last_ts:
+        if ts is None or ts + CANDLE_SECONDS <= last_processed_close_ts:
             return None
         r = rates[0]
         return (ts, float(r["open"]), float(r["high"]), float(r["low"]),
@@ -1197,54 +1272,34 @@ class BitcoinEngine:
         check_position_on_closed_candle().
         """
         print("Bitcoin Engine FORWARD TEST (MT5 feed) starting...")
-        last_ts = 0
-        if os.path.isfile(LOG_FILE_PATH):
-            try:
-                with open(LOG_FILE_PATH) as f:
-                    for line in f:
-                        if line.strip():
-                            pass
-                ts_str = line.split(",")[0].strip()
-                last_ts = int(datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                              .replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                last_ts = 0
+        last_processed_close_ts = last_logged_candle_close_ts(LOG_FILE_PATH)
+        # The watchdog also needs a baseline when the sidecar file is missing.
+        self._last_price_mono = time.monotonic()
         try:
             while True:
                 rates = self.read_mt5_feed()
+                stale = self.mt5_feed_is_stale(rates)
 
-                if rates is not None and len(rates) > 0:
-                    candle = self.mt5_next_candle(rates, last_ts)
-                    if candle is None:
-                        time.sleep(5)  # same closed candle - wait for next bar
-                        continue
-                    ts, o, h, l, c, vol = candle
-                    last_ts = ts
-                    self._last_price_mono = time.monotonic()
-                    try:
-                        self.process_closed_candle(o, h, l, c, vol)
-                    except Exception as e:
-                        print(f"\nError evaluating candle @ {ts}: {e}", flush=True)
-                    if ts % 3600 == 0:
-                        print(f"Heartbeat: candle @ "
-                              f"{datetime.fromtimestamp(ts, tz=timezone.utc):%Y-%m-%d %H:%M} UTC "
-                              f"| close {c:,.2f}", flush=True)
-                else:
+                if rates is None or len(rates) == 0:
                     print(f"MT5: no feed in {MT5_FEED_FILE} - retrying in 5s "
                           "(is the mt5feed sidecar running? terminal logged in?)", flush=True)
-                    time.sleep(5)
-                    continue
+                elif not stale:
+                    candle = self.mt5_next_candle(rates, last_processed_close_ts)
+                    if candle is not None:
+                        ts, o, h, l, c, vol = candle
+                        try:
+                            self.process_closed_candle(o, h, l, c, vol, candle_ts=ts)
+                            last_processed_close_ts = ts + CANDLE_SECONDS
+                            self._last_price_mono = time.monotonic()
+                        except Exception as e:
+                            print(f"\nError evaluating candle @ {ts}: {e}", flush=True)
+                        if ts % 3600 == 0:
+                            print(f"Heartbeat: candle @ "
+                                  f"{datetime.fromtimestamp(ts, tz=timezone.utc):%Y-%m-%d %H:%M} UTC "
+                                  f"| close {c:,.2f}", flush=True)
 
-                # Stale-feed guard (same as run_forward_test): feed went quiet
-                # (sidecar crashed / terminal logged out) -> alert. The sidecar
-                # is a separate service: systemctl restart mt5feed-btc.
-                # BTC trades 24/7, so there are no quiet hours to suppress.
-                stale = self.feed_stale_seconds()
-                if stale > STALE_FEED_SECONDS:
-                    print(f"\nStale MT5 feed: no closed candles for {stale:.0f}s - "
-                          f"check the mt5feed-btc sidecar (systemctl restart mt5feed-btc)", flush=True)
-                    if not is_market_quiet():
-                        self.maybe_alert_stale_feed(stale)
+                # The guard above runs every iteration, including missing and
+                # unchanged feeds; neither case may continue around the check.
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nShutting down...")
@@ -1277,7 +1332,11 @@ class BitcoinEngine:
                         if stale > STALE_FEED_SECONDS:
                             print(f"\nStale feed: no price events for {stale:.0f}s - forcing reconnect")
                             if not is_market_quiet():
-                                self.maybe_alert_stale_feed(stale)
+                                self.maybe_alert_stale_feed(
+                                    stale,
+                                    source="price ticks",
+                                    recovery="forcing a Twelve Data WebSocket reconnect",
+                                )
                             break
                     except Exception as e:
                         print(f"\nConnection issue: {e}")
