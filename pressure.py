@@ -17,6 +17,7 @@ import csv
 import math
 import os
 from datetime import datetime
+from statistics import median
 
 # Mirrored strategy constants (source of truth: engine.py).
 PRESSURE_WINDOW = 60                # 60 closed M5 candles = five hours
@@ -72,6 +73,30 @@ def read_rows(path):
             return list(csv.DictReader(fh))
     except (OSError, csv.Error, UnicodeError):
         return []
+
+
+def trade_summary(trades):
+    """Summarize closed ledger outcomes for display, not execution state.
+
+    The engine's status.json counters can lag or disagree with trades.csv after
+    a manual reconciliation. The ledger is the source of truth for closed rows;
+    this helper lets the dashboard show those counts without mutating either
+    file or changing the engine's in-memory state.
+    """
+    wins = losses = 0
+    for trade in trades:
+        reason = (trade.get("Exit_Reason") or "").strip().upper()
+        if reason == "TP":
+            wins += 1
+        elif reason == "SL":
+            losses += 1
+    total = wins + losses
+    return {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(100.0 * wins / total, 1) if total else 0.0,
+    }
 
 
 def _sigmoid(x):
@@ -241,7 +266,7 @@ def calibrate(log_rows, trades):
         summary[side] = {
             "n": len(items),
             "score_min": min(scores) if scores else None,
-            "score_median": sorted(scores)[len(scores) // 2] if scores else None,
+            "score_median": median(scores) if scores else None,
             "score_max": max(scores) if scores else None,
             "wins": wins,
             "losses": losses,
