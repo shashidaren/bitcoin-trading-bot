@@ -217,3 +217,4 @@ Timestamp,Reason,Price,ATR
 2026-10-22 13:30:10,Blackout: NY Open & US High-Impact Macro Releases,81821.75,92.08
 2026-10-22 20:10:09,SL Cooldown: 15 min remaining,81412.95,76.52
 2026-10-22 20:15:10,SL Cooldown: 10 min remaining,81420.15,72.01
+2026-10-23 11:45:15,Daily Loss Limit Reached (3/3 SLs today) - Trading Halted,81682.85,79.22
