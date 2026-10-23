@@ -32,7 +32,7 @@ AUTO_DEPLOY="${AUTO_DEPLOY:-1}"       # 0 = data-only mode (never pull/restart)
 SMOKE_GATE="${SMOKE_GATE:-1}"         # 0 = deploy without the smoke test
 ENGINE_SERVICE="${ENGINE_SERVICE:-}" # empty = auto-detect the unit running engine.py
 DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}" # empty = auto-detect the unit running dashboard.py
-NOTIFY="${NOTIFY:-alerts}"            # alerts | always | quiet | off (phase 5 below)
+NOTIFY="${NOTIFY:-off}"               # alerts | always | quiet | off (phase 5 below); off = no Telegram
 DAILY_STAMP="${DAILY_STAMP:-/tmp/bitcoin_autosync_daily_digest}"  # alerts: last daily summary date
 ALERT_STAMP="${ALERT_STAMP:-/tmp/bitcoin_autosync_last_alert}"    # alerts: last alerted state (dedupe)
 # xm_data/ is a DIRECTORY (tools/mt5_quotes.py: quotes-YYYY-MM-DD.csv, candles_m5.csv, symbol_spec*).
@@ -300,11 +300,12 @@ log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HA
 # quiet   : only when something changed. Barely helps on BTC: a new M5 bar
 #           lands every 5 minutes, so "data changed" is the normal case, not
 #           an event - quiet still fires almost every run.
-# alerts  : DEFAULT. Sends only (a) a deploy or an incident / non-routine state
-#           CHANGE - identical repeats are deduped via ALERT_STAMP so a stuck
-#           failure cannot re-flood, and a clean run re-arms it - and (b) ONE
-#           "(daily)" summary digest per UTC day so the bot keeps a heartbeat.
-# off     : never message. Everything still lands in the log file.
+# alerts  : Sends only (a) a deploy or an incident / non-routine state CHANGE -
+#           identical repeats are deduped via ALERT_STAMP so a stuck failure
+#           cannot re-flood, and a clean run re-arms it - and (b) ONE "(daily)"
+#           summary digest per UTC day so the bot keeps a heartbeat.
+# off     : DEFAULT. Never message. Everything still lands in the log file; the
+#           dashboard's Journal tab holds the engine's event log instead.
 # Stamp files live in /tmp, so a reboot can repeat one digest at worst.
 # Unknown values fall back to "always" behaviour.
 SEND=1

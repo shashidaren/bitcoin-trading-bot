@@ -12,6 +12,7 @@ DATA_DIR = os.getenv("BTC_DATA_DIR", "/opt/bitcoin")
 LOG_FILE_PATH = os.getenv("BTC_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
 STATUS_FILE_PATH = os.getenv("BTC_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
 TRADES_FILE_PATH = os.getenv("BTC_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
+JOURNAL_FILE_PATH = os.getenv("BTC_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -26,7 +27,21 @@ HTML_TEMPLATE = """
 <body class="bg-slate-900 text-slate-100 font-sans p-6">
     <div class="max-w-7xl mx-auto">
 
-        <!-- Header -->
+        <!-- Tab navigation -->
+        <nav class="flex gap-2 mb-6 border-b border-slate-700 pb-2">
+            <button id="tab-dashboard" onclick="switchTab('dashboard')"
+                class="tab-btn active bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md">
+                &#8383; Dashboard
+            </button>
+            <button id="tab-journal" onclick="switchTab('journal')"
+                class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
+                Journal (event log)
+            </button>
+        </nav>
+
+        <div id="panel-dashboard" class="tab-panel">
+
+            <!-- Header -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 border-b border-slate-800 pb-4 gap-4">
             <div>
                 <h1 class="text-3xl font-bold text-orange-400">&#8383; Bitcoin Engine Dashboard</h1>
@@ -319,9 +334,85 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        </div>
+
+        <!-- Journal panel (replaces Telegram noise) -->
+        <div id="panel-journal" class="tab-panel hidden">
+            <div class="flex justify-between items-start md:items-center gap-3 mb-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-slate-100">Event Journal</h2>
+                    <p class="text-xs text-slate-400">
+                        Telegram is silenced. engine.py journals every trade entry, exit, skip and
+                        feed alert here; this tab shows the most recent 100 entries (newest first).
+                    </p>
+                </div>
+                {% if journal_error %}
+                <span class="text-xs text-rose-400 bg-rose-900/30 border border-rose-700/30 px-2 py-1 rounded">
+                    {{ journal_error }}
+                </span>
+                {% endif %}
+            </div>
+            {% if journal %}
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm text-slate-300">
+                    <thead class="bg-slate-900/50 text-slate-400 uppercase text-xs sticky top-0 z-10">
+                        <tr>
+                            <th class="px-3 py-3">Timestamp (UTC)</th>
+                            <th class="px-3 py-3">Event</th>
+                            <th class="px-3 py-3">Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-700">
+                        {% for entry in journal %}
+                        <tr class="hover:bg-slate-700/40">
+                            <td class="px-3 py-2 font-mono text-xs">{{ entry.Timestamp }}</td>
+                            <td class="px-3 py-2">
+                                <span class="px-2 py-0.5 rounded text-xs
+                                    {{ 'bg-emerald-900/50 text-emerald-400' if entry.Event == 'TRADE_ENTRY' else
+                                       'bg-rose-900/50 text-rose-400' if entry.Event == 'TRADE_EXIT' else
+                                       'bg-blue-900/50 text-blue-400' if entry.Event == 'LIVE_ENTRY' else
+                                       'bg-orange-900/50 text-orange-400' if entry.Event == 'LIVE_EXIT' else
+                                       'bg-amber-900/50 text-amber-400' if entry.Event in ('BUY_SKIP', 'SELL_SKIP') else
+                                       'bg-slate-900 text-slate-400' }}">
+                                    {{ entry.Event }}
+                                </span>
+                            </td>
+                            <td class="px-3 py-2 font-mono text-xs">{{ entry.Detail }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-sm text-slate-500 py-8 text-center">No journal events yet.</p>
+            {% endif %}
+        </div>
+
     </div>
 </body>
 </html>
+<script>
+    (function () {
+        var key = 'btc-dashboard-tab';
+        var saved = localStorage.getItem(key);
+        if (saved) switchTab(saved);
+    })();
+
+    function switchTab(tab) {
+        document.querySelectorAll('.tab-panel').forEach(function (p) {
+            p.classList.add('hidden');
+        });
+        document.querySelectorAll('.tab-btn').forEach(function (b) {
+            b.classList.remove('bg-orange-600', 'text-white', 'shadow-md');
+            b.classList.add('text-slate-400');
+        });
+        document.getElementById('panel-' + tab).classList.remove('hidden');
+        var btn = document.getElementById('tab-' + tab);
+        btn.classList.remove('text-slate-400');
+        btn.classList.add('bg-orange-600', 'text-white', 'shadow-md');
+        localStorage.setItem(key, tab);
+    }
+</script>
 """
 
 @app.route("/")
@@ -394,6 +485,19 @@ def index():
     location_read = tape_pressure.location(rows[-25:])
     recent_rows = list(reversed(rows))[:30]
 
+    # Event journal: engine.py appends every trade entry/exit, skip and
+    # stale-feed alert here (it no longer sends Telegram messages).
+    journal = []
+    journal_error = None
+    if os.path.isfile(JOURNAL_FILE_PATH):
+        try:
+            with open(JOURNAL_FILE_PATH, newline="") as f:
+                for row in csv.DictReader(f):
+                    journal.append(row)
+        except Exception as e:
+            journal_error = f"could not read journal: {e}"
+    journal = list(reversed(journal))[:100]
+
     return render_template_string(
         HTML_TEMPLATE,
         rows=recent_rows,
@@ -403,6 +507,8 @@ def index():
         pressure=pressure_read,
         location=location_read,
         trade_stats_warning=trade_stats_warning,
+        journal=journal,
+        journal_error=journal_error,
     )
 
 

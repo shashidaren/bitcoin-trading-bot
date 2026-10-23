@@ -5,7 +5,6 @@ import json
 import time
 import sys
 import shutil
-import requests
 from collections import deque
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -88,6 +87,9 @@ STATUS_FILE_PATH = "/opt/bitcoin/status.json"
 # broker-server timestamp using a fresh-tick offset). The engine reads this
 # file instead of importing MetaTrader5 (no Linux wheels exist for that package).
 MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", "/opt/bitcoin/mt5_last_candle.json")
+# Journal file: engine events (entries, exits, skips, stale-feed alerts) are
+# appended here instead of being sent to Telegram. Override with BTC_JOURNAL_FILE.
+JOURNAL_FILE_PATH = os.getenv("BTC_JOURNAL_FILE", "/opt/bitcoin/journal.csv")
 
 # Canonical trades.csv schema (what log_trade() writes). Trade_Type was added
 # with SELL support (gold 2026-09-09, ported here 2026-09-10); any older rows
@@ -587,17 +589,17 @@ class BitcoinEngine:
         except Exception as e:
             print(f"Failed to write status.json: {e}")
 
-    def send_telegram(self, text: str):
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            return
+    def journal(self, event: str, detail: str):
+        """Append an event to the local journal (replaces Telegram noise)."""
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": str(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "Markdown"},
-                timeout=4,
-            )
+            file_exists = os.path.isfile(JOURNAL_FILE_PATH)
+            with open(JOURNAL_FILE_PATH, mode="a", newline="") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["Timestamp", "Event", "Detail"])
+                writer.writerow([utc_now_str(), event, detail])
         except Exception as e:
-            print(f"\nTelegram failed: {e}")
+            print(f"\nJournal failed: {e}")
 
     def feed_stale_seconds(self, now_mono: float = None) -> float:
         """Seconds since the last price event (0.0 while the feed is fresh)."""
@@ -613,13 +615,14 @@ class BitcoinEngine:
         source: str = "price ticks",
         recovery: str = "check the feed",
     ) -> bool:
-        """Rate-limited Telegram alert for a stalled feed. True if it alerted."""
+        """Rate-limited journal entry for a stalled feed. True if it journaled."""
         if self._last_stale_alert_mono is not None and \
                 time.monotonic() - self._last_stale_alert_mono < STALE_ALERT_COOLDOWN_SECONDS:
             return False
         self._last_stale_alert_mono = time.monotonic()
-        self.send_telegram(
-            f"WARNING: bitcoin engine: no {source} for {stale_seconds / 60:.0f} min - {recovery}"
+        self.journal(
+            "STALE_FEED",
+            f"no {source} for {stale_seconds / 60:.0f} min - {recovery}",
         )
         return True
 
@@ -737,10 +740,10 @@ class BitcoinEngine:
         self.log_trade(exit_price=exit_price, exit_reason=exit_reason, profit=profit)
 
         pnl_text = f"+${profit:,.2f}" if profit >= 0 else f"-${abs(profit):,.2f}"
-        self.send_telegram(
-            f"BTC {exit_reason} HIT ({self.trade_type} #{self.current_trade_num})\n"
-            f"Exit: `${exit_price:,.2f}` ({pnl_text})\n"
-            f"Equity: `${self.balance:,.2f}`"
+        self.journal(
+            "TRADE_EXIT",
+            f"{exit_reason} HIT ({self.trade_type} #{self.current_trade_num}) | "
+            f"Exit: ${exit_price:,.2f} ({pnl_text}) | Equity: ${self.balance:,.2f}",
         )
         self.save_status()
         return True
@@ -980,7 +983,7 @@ class BitcoinEngine:
             if not allow:
                 msg = (f"BTC BUY SETUP SKIPPED\nReason: `{reason}`\n"
                        f"Price: `${c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
-                self.send_telegram(msg)
+                self.journal("BUY_SKIP", msg)
                 print(f"\nBTC Trade skipped -> {reason}\n")
                 return
 
@@ -1001,7 +1004,7 @@ class BitcoinEngine:
             if not allow:
                 msg = (f"BTC SELL SETUP SKIPPED\nReason: `{reason}`\n"
                        f"Price: `${c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
-                self.send_telegram(msg)
+                self.journal("SELL_SKIP", msg)
                 print(f"\nBTC Trade skipped -> {reason}\n")
                 return
 
@@ -1052,7 +1055,7 @@ class BitcoinEngine:
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             print(f"Order failed: {result.retcode} - {result.comment}")
-            self.send_telegram(f"BTC ORDER FAILED\nCode: {result.retcode}\nMsg: {result.comment}")
+            self.journal("ORDER_FAILED", f"Code: {result.retcode} | Msg: {result.comment}")
         else:
             self.current_trade_num = self.next_trade_num
             self.next_trade_num += 1
@@ -1070,12 +1073,10 @@ class BitcoinEngine:
             self.entry_ema_slow = self.ema_slow
 
             print(f"ORDER SUCCESS! Ticket: {self.active_ticket} | Trade #{self.current_trade_num}")
-            self.send_telegram(
-                f"LIVE BTC {direction} EXECUTED\n"
-                f"Ticket: `{self.active_ticket}` | Trade #{self.current_trade_num}\n"
-                f"Entry: `${price:,.2f}`\n"
-                f"SL: `${sl_price:,.2f}`\n"
-                f"TP: `${tp_price:,.2f}`"
+            self.journal(
+                "LIVE_ENTRY",
+                f"{direction} EXECUTED | Ticket: {self.active_ticket} | Trade #{self.current_trade_num} | "
+                f"Entry: ${price:,.2f} | SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}",
             )
             self.save_status()
 
@@ -1105,7 +1106,12 @@ class BitcoinEngine:
                f"RSI: `{self.rsi:.1f}` | ATR: `${self.atr:,.2f}`\n"
                f"SL: `${self.stop_loss:,.2f}`\n"
                f"TP: `${self.take_profit:,.2f}`")
-        self.send_telegram(msg)
+        self.journal(
+            "TRADE_ENTRY",
+            f"{direction} SETUP #{self.current_trade_num} | Entry: ${self.entry_price:,.2f} | "
+            f"RSI: {self.rsi:.1f} | ATR: ${self.atr:,.2f} | SL: ${self.stop_loss:,.2f} | "
+            f"TP: ${self.take_profit:,.2f}",
+        )
         print(f"\nAlert sent -> {direction} Trade #{self.current_trade_num}\n")
         self.save_status()
 
@@ -1147,10 +1153,10 @@ class BitcoinEngine:
                     self.active_ticket = None
 
                     self.log_trade(exit_price=exit_price, exit_reason=reason, profit=profit)
-                    self.send_telegram(
-                        f"BTC {reason} HIT ({self.trade_type} #{self.current_trade_num})\n"
-                        f"Exit: `${exit_price:,.2f}`\n"
-                        f"Profit: `${profit:,.2f}`"
+                    self.journal(
+                        "LIVE_EXIT",
+                        f"{reason} HIT ({self.trade_type} #{self.current_trade_num}) | "
+                        f"Exit: ${exit_price:,.2f} | Profit: ${profit:,.2f}",
                     )
                     self.save_status()
                     break
