@@ -1,0 +1,4 @@
+ts_utc,bid,ask,spread,spread_min,spread_max,n_ok,n_bad,tick_age_s,srv_offset_s,flags
+2026-10-24 15:43:30,29008.58,29011.48,2.90,2.90,2.90,4,0,,,NOOFFSET;LATE
+2026-10-24 15:44:00,29008.58,29011.48,2.90,2.90,2.90,6,0,,,NOOFFSET
+2026-10-24 15:44:30,29008.58,29011.48,2.90,2.90,2.90,6,0,,,NOOFFSET
