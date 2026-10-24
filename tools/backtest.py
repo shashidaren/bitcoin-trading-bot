@@ -1,43 +1,14 @@
 #!/usr/bin/env python3
 """
-Large-N historical BACK-TEST of the FROZEN BTC gates - the fast path around the
-~30-week forward test for the STATISTICAL go-live gates.
+Large-N historical BACK-TEST of the FROZEN Nasdaq-100 (US100Cash) M15 gates.
 
-The forward test is slow because it is real time (~4 trades/day, ~700 post-gate
-trades needed). The binding gates are statistical - EDGE (t-stat, day-block
-bootstrap P(net/trade>0) >= 0.90) and COST (break-even spread / assumed spread
->= 2.0x) - and those can be cross-checked far faster by replaying a long history
-through the SAME signal/walk/risk code. Feed it months of M5 bars and it reports
-the gate metrics at N in the hundreds/thousands in seconds.
-
-This tool changes NO strategy logic: it reuses
-  - replay_lib      for signals (all_signals), the walk, and the cascade
-                    (one position at a time + escalating SL cooldown + 3-SL
-                    daily halt = the live risk gates), and
-  - live_readiness  for the exact gate statistics (norm_cdf, boot_iid, boot_days).
-It prepares raw OHLC with history_to_log (validated to reproduce the engine's
-indicators).
-
-INPUT is either an existing forward_test_log.csv (has an EMA_50 column) or a raw
-OHLC csv (Timestamp,Open,High,Low,C[,Volume]) - detected automatically. Raw input
-is converted with history_to_log; pass --save-log to keep the prepared log.
-
-HONESTY (this is a back-test, not a go-live substitute - read before quoting):
-  * It measures the strategy LOGIC on an M5 reconstruction. The live engine
-    resolves entries/exits on ticks, so an M5 walk cannot reproduce it exactly
-    (the same <100% agreement pathwalk_sims reports). Read rows RELATIVELY.
-  * It is OUT-OF-SAMPLE only for history the gates were NOT tuned on. Do not read
-    a point estimate as a live expectation; the handoff forbids treating a pooled
-    back-test number as one.
-  * Every trade uses the CURRENT geometry (SL 2xATR / TP 4xATR), so there is no
-    geometry-change pooling inside one run. Use --min-date to align a slice.
-  * If the reconstruction quality (printed first) is not ~100% for floor/ATR/RSI,
-    distrust every number below it.
+Accepts either an existing forward_test_log.csv or a raw M15 OHLC CSV such as
+xm_data/candles_m15.csv (backfilled up to 12,000 bars = ~6 months on startup
+by tools/mt5_quotes.py).
 
 Usage:
-  python3 tools/backtest.py long_history.csv --spread 0.40 --save-log bt_log.csv
-  python3 tools/backtest.py forward_test_log.csv --spread 0.40 --horizon 240
-  python3 tools/backtest.py history.csv --side sell --tp 5.0 --be 0.75
+  python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25 --save-log bt_log.csv
+  python3 tools/backtest.py forward_test_log.csv --spread 0.25 --horizon 720
 """
 import argparse
 import csv
@@ -54,9 +25,9 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, ROOT)
 import replay_lib as R              # noqa: E402
-import live_readiness as LR         # noqa: E402  (reuse the exact gate stats)
-import trade_filter as TF           # noqa: E402  (live risk gates)
-import history_to_log as H          # noqa: E402  (raw OHLC -> engine-faithful log)
+import live_readiness as LR         # noqa: E402
+import trade_filter as TF           # noqa: E402
+import history_to_log as H          # noqa: E402
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -68,27 +39,25 @@ def is_log_file(path):
 
 
 def prepare_raw(path, save_log):
-    """Raw OHLC -> engine-faithful log file. Returns the log path."""
     bars = H.read_ohlc(path)
     if not bars:
         raise SystemExit(f"error: no usable OHLC rows in {path}")
-    out = save_log or os.path.join(tempfile.mkdtemp(prefix="btc_bt_"), "prepared_log.csv")
+    out = save_log or os.path.join(tempfile.mkdtemp(prefix="nasdaq_bt_"), "prepared_log.csv")
     with open(out, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=H.LOG_FIELDS)
         w.writeheader()
         for row in H.build_log(bars):
             w.writerow(row)
-    print(f"prepared {len(bars)} raw bars -> {out} (EMA200 ready from bar {H.EMA_SLOW})")
+    print(f"prepared {len(bars)} raw M15 bars -> {out} (EMA200 ready from bar {H.EMA_SLOW})")
     return out
 
 
 def book_stats(results, spread, B, rng):
-    """Gate metrics for a list of walk/cascade results. None if empty."""
     if not results:
         return None
     nets, gross, days = [], [], {}
     for r in results:
-        g = r["r"] * R.r_money(r["atr"])          # $ gross (price distance x lot)
+        g = r["r"] * R.r_money(r["atr"])
         net = g - spread
         gross.append(g)
         nets.append(net)
@@ -109,7 +78,7 @@ def book_stats(results, spread, B, rng):
     tot = sum(nets)
     second_half = sum(nets[n // 2:])
     top5_d = sum(srt[:5])
-    top5_share = (top5_d / tot) if tot > 0.01 else None   # only meaningful when net > 0
+    top5_share = (top5_d / tot) if tot > 0.01 else None
     return dict(n=n, w=w, l=l, wr=(100 * w / (w + l) if (w + l) else 0.0),
                 mu=mu, sd=sd, se=se, t=t, p_iid=p_iid, p_day=p_day, gm=gm,
                 cover=cover, tot=tot, top5=top5_share, top5_d=top5_d,
@@ -144,12 +113,12 @@ def walk_stream(sigs, bars, tp, be, horizon):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", help="forward_test_log.csv OR raw OHLC csv (auto-detected)")
-    ap.add_argument("--spread", type=float, default=0.40,
-                    help="assumed round-trip $/trade at 0.01 lot (default 0.40; 0 = gross)")
+    ap.add_argument("input", help="forward_test_log.csv OR raw M15 OHLC csv (auto-detected)")
+    ap.add_argument("--spread", type=float, default=0.25,
+                    help="assumed round-trip $/trade at 0.10 lot on US100Cash (default 0.25; 0 = gross)")
     ap.add_argument("--boot", type=int, default=5000, help="bootstrap iterations (default 5000)")
-    ap.add_argument("--seed", type=int, default=20260910, help="RNG seed (deterministic)")
-    ap.add_argument("--horizon", type=int, default=240, help="walk horizon minutes (default 240)")
+    ap.add_argument("--seed", type=int, default=20261024, help="RNG seed (deterministic)")
+    ap.add_argument("--horizon", type=int, default=720, help="walk horizon minutes (default 720 = 12h)")
     ap.add_argument("--tp", type=float, default=R.ATR_TP_MULT, help="TP multiple of ATR (default 4.0)")
     ap.add_argument("--be", type=float, default=None, help="hypothetical breakeven ratchet at +R")
     ap.add_argument("--side", choices=["both", "buy", "sell"], default="both")
@@ -176,9 +145,8 @@ def main(argv=None):
     if len(bars) < R.EMA_SLOPE_LOOKBACK + 5:
         raise SystemExit(f"error: only {len(bars)} bars after filtering - need a warm-up")
 
-    # ---- validation first: reconstruction quality --------------------------
     quality = R.enrich_log(bars)
-    print(f"\nbacktest: {len(bars)} M5 bars ({bars[0]['dt']} -> {bars[-1]['dt']}), "
+    print(f"\nbacktest: {len(bars)} M15 bars ({bars[0]['dt']} -> {bars[-1]['dt']}), "
           f"TP {args.tp}xATR, BE {'off' if args.be is None else '+%.2fR' % args.be}, "
           f"horizon {args.horizon}m, spread ${args.spread:.2f}/trade, seed {args.seed}")
     print("reconstruction quality (should be ~100%; if not, distrust everything below):")
@@ -186,7 +154,7 @@ def main(argv=None):
         tot = ok + bad
         print(f"    {name:10s} {ok}/{tot} = {100*ok/tot:.1f}%" if tot else f"    {name}: n/a")
 
-    sigs = R.all_signals(bars)
+    sigs = R.all_signals(bars, include_pre_port=True)
     if args.side != "both":
         want = "BUY" if args.side == "buy" else "SELL"
         sigs = [s for s in sigs if s["side"] == want]
@@ -194,14 +162,12 @@ def main(argv=None):
     ns = len(sigs) - nb
     print(f"\nreconstructed signal stream: {len(sigs)} signals ({nb} BUY / {ns} SELL)")
 
-    # ---- book 1: entry stream (cascade-ignorant) ---------------------------
     stream = walk_stream(sigs, bars, args.tp, args.be, args.horizon)
     print("\n== ENTRY STREAM (every signal, one position ignored - optimistic) ==")
     show("all", book_stats(stream, args.spread, args.boot, rng), args.spread)
     show("BUY", book_stats([r for r in stream if r["side"] == "BUY"], args.spread, args.boot, rng), args.spread)
     show("SELL", book_stats([r for r in stream if r["side"] == "SELL"], args.spread, args.boot, rng), args.spread)
 
-    # ---- book 2: takeable book (cascade = the live risk gates) -------------
     taken, skipped, book = R.cascade(sigs, bars, tp_mult=args.tp, be_trigger=args.be,
                                      horizon_min=args.horizon, daily_halt=TF.MAX_DAILY_LOSSES)
     print(f"\n== TAKEABLE BOOK (one position + escalating SL cooldown + {TF.MAX_DAILY_LOSSES}-SL "
@@ -210,7 +176,6 @@ def main(argv=None):
     show("BUY", book_stats([r for r in book if r["side"] == "BUY"], args.spread, args.boot, rng), args.spread)
     show("SELL", book_stats([r for r in book if r["side"] == "SELL"], args.spread, args.boot, rng), args.spread)
 
-    # ---- gate read ---------------------------------------------------------
     s = book_stats(book, args.spread, args.boot, rng)
     print("\n== GATE READ (takeable book, net of spread) ==")
     if s is None or s["n"] < 30:
@@ -226,7 +191,7 @@ def main(argv=None):
                 if s['top5'] is not None else f"best-5 trades ${s['top5_d']:+.2f} (net<=0)")
         print(f"    FRAGILITY {frag}; "
               f"second-half net {s['second']:+.2f} (negative = recent-form concern)")
-    print("\nREMINDER: M5 reconstruction, not tick-resolved; a back-test cross-check, "
+    print("\nREMINDER: M15 reconstruction, not tick-resolved; a back-test cross-check, "
           "NOT a live expectation or a go-live substitute.\n")
     return 0
 

@@ -1,84 +1,23 @@
 #!/usr/bin/env python3
-"""XM quote + contract-spec logger (Stage B-i) - a READ-ONLY Wine sidecar.
+"""XM quote + contract-spec logger for US100Cash (Stage B-i) - READ-ONLY Wine sidecar.
 
-Why this exists (docs/HANDOFF.md section 7, docs/REVIEW-2026-10-01.md section 7):
-the paper P/L assumes a flat $0.40 round trip, but the break-even round trip is
-only ~$0.87 and the single XM spread measurement is one Asian-session sample.
-This daemon starts the >= 14-day clock that measures what XM actually charges,
-without touching engine.py, DATA_SOURCE or the forward-test sample.
+Why this exists (docs/HANDOFF.md section 7):
+  1) Measures XM's actual live spread on US100Cash across Asia, London, NY cash
+     open, and rollover windows (quotes-YYYY-MM-DD.csv, every 30 s).
+  2) Back-fills up to MT5_QUOTES_BACKFILL_BARS (default 12,000 M15 bars = ~6 months
+     of US100Cash trading history!) into candles_m15.csv on first start, giving both
+     feed-parity audits AND an immediate 6-month broker dataset for tools/backtest.py.
+  3) Snapshots allow-listed contract specs (symbol_spec.json) with zero PII.
 
-What it writes (all under MT5_QUOTES_DIR, default Z:/opt/bitcoin/xm_data):
+PRIVACY: Never dumps login, name, server, balance, equity, or Windows paths.
+READ-ONLY: Never references any trading API (FORBIDDEN_API AST-checked in smoke_test.py).
 
-  quotes-YYYY-MM-DD.csv   one row per MT5_QUOTES_INTERVAL seconds (default 30), UTC day files:
-        ts_utc        window start on the box clock, aligned to the interval (UTC)
-        bid, ask      the POINT SAMPLE: first valid quote of the window (~1 s after the
-                      boundary, so the :00/:05/... rows are the quote a bar-close signal
-                      would have been filled at)
-        spread        ask - bid of the point sample (USD per BTC; x0.01 lot = $/trade)
-        spread_min/max  envelope over every poll in the window (default every 5 s)
-        n_ok, n_bad   valid / invalid polls in the window
-        tick_age_s    age of the point sample's tick when polled (staleness)
-        srv_offset_s  broker-server-time offset from UTC in force (seconds)
-        flags         ';'-joined: STALE NOQUOTE BADQUOTE NOOFFSET LATE
-  candles_m5.csv          shadow XM M5 candles, one row per CLOSED bar, append-only, gap-healing:
-        bar_close_utc same convention as forward_test_log.csv (row T covers [T-5m, T)),
-                      so a parity join is exact equality
-        open, high, low, close, tick_volume
-        spread_pts    the terminal's own per-bar spread (points) - semantics UNVERIFIED,
-                      the report cross-checks it against the live samples
-        time_srv      raw MT5 bar-open time (broker server clock); offset_s converts it
-  symbol_spec.json        latest contract-spec snapshot (allow-listed, decoded)
-  symbol_spec_history.jsonl   one line each time the spec CHANGES (swap, stops level, ...)
-
-On first start it back-fills up to MT5_QUOTES_BACKFILL_BARS closed M5 bars from the
-terminal's own history, so feed parity can be measured on day one (the forward-test log
-began 2026-09-07), and every later cycle heals any gap (sidecar down, restart) from the
-same history. The terminal only serves what its "Max bars in chart" setting allows
-(terminal_info().maxbars is recorded in the spec).
-
-TIME. MT5 'time' fields are BROKER SERVER time encoded as epoch seconds, not UTC,
-whatever the Python docs say (forum thread https://www.mql5.com/en/forum/369602: "the data
-is given in seconds since 1970 in the timezone of the broker"). There is no API for the
-server's zone; the only way to learn it is to compare a FRESH tick with the local clock:
-tick.time - now = offset - age. XM's server time is GMT+2 in winter and GMT+3 in summer on
-the EU rule (XM's trading-hours page: last Sunday of March/October; next change Sun 25 Oct
-2026), so the offset CHANGES twice a year. This tool estimates a whole-hour offset from every fresh tick, uses
-the current estimate, and records both the raw server time and the offset on every row.
-Back-filled bars are converted with the CURRENT offset: if a server DST change lies inside
-the back-filled span the older bars are off by one hour - the report's per-day shift check
-flags it. (tools/mt5_feed.py publishes the raw server 'ts'; engine.py's DATA_SOURCE=MT5
-restart dedup compares it with UTC log stamps - see docs/XM-LOGGER.md.)
-
-PRIVACY. The repo is PUBLIC and tools/autosync.sh commits xm_data/ every 15 minutes.
-MT5's account_info() carries login, name, balance, equity and server; terminal_info()
-carries Windows user paths. This tool NEVER dumps those objects: it copies an explicit
-allow-list of non-identifying fields (SYMBOL_FIELDS / ACCOUNT_FIELDS / TERMINAL_FIELDS)
-and prints no login. The account tier, which XM does not expose, is an operator-chosen
-free-text label (MT5_QUOTES_LABEL). Locked by tools/smoke_test.py Scenario K.
-
-READ-ONLY. It never sends, checks, modifies or lists orders or positions. The only calls it
-makes are symbol_select (Market Watch), symbol_info(_tick), copy_rates_from_pos,
-account_info, terminal_info and the pure calculators order_calc_profit/order_calc_margin.
-Scenario K walks this file's AST and fails if any trading API name is referenced.
-
-Run (manual test - mirrors the mt5-balance alias and tools/mt5_feed.py):
+Run (manual test):
   export WINEPREFIX=~/.mt5
-  xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/bitcoin/tools/mt5_quotes.py --spec
-  xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/bitcoin/tools/mt5_quotes.py --once
-Or as a service (deploy/mt5quotes.service; note the -btc suffix on the installed name):
-  sudo systemctl enable --now mt5quotes-btc
-
-Modes:  (none) run forever | --spec print the spec snapshot, write nothing |
-        --once one cycle (start-up, one poll, flush, candle sync, spec) then exit |
-        --backfill N merge the last N closed M5 bars into candles_m5.csv, then exit
-        (deepens the history; stop the service first - the merge rewrites the file)
-
-Env overrides: MT5_QUOTES_SYMBOL (BTCUSD), MT5_QUOTES_DIR, MT5_QUOTES_INTERVAL (30 s, row
-cadence), MT5_QUOTES_POLL (5 s, sub-sample cadence; must divide the interval),
-MT5_QUOTES_BACKFILL_BARS (12000), MT5_QUOTES_LABEL (free text, e.g. "XM Standard demo").
-
-Only the stdlib and the MetaTrader5 package are needed (no numpy/pandas imports here).
-The file imports cleanly WITHOUT MetaTrader5 so tests and tools can use its pure functions.
+  xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/nasdaq/tools/mt5_quotes.py --spec
+  xvfb-run --auto-servernum wine C:/Python312/python.exe Z:/opt/nasdaq/tools/mt5_quotes.py --once
+Or as a service (deploy/mt5quotes.service):
+  sudo systemctl enable --now mt5quotes-nasdaq
 """
 import argparse
 import csv
@@ -89,6 +28,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 try:
     import MetaTrader5 as mt5
@@ -97,7 +37,9 @@ except ImportError:          # Linux box, CI, smoke test: importable, just not r
 
 SCHEMA_VERSION = 1
 TS_FMT = "%Y-%m-%d %H:%M:%S"
-M5_SECONDS = 300
+M15_SECONDS = 900
+BAR_SECONDS = M15_SECONDS
+NY_TZ = ZoneInfo("America/New_York")
 
 QUOTE_FIELDS = ["ts_utc", "bid", "ask", "spread", "spread_min", "spread_max",
                 "n_ok", "n_bad", "tick_age_s", "srv_offset_s", "flags"]
@@ -105,13 +47,13 @@ CANDLE_FIELDS = ["bar_close_utc", "open", "high", "low", "close", "tick_volume",
                  "spread_pts", "time_srv", "offset_s"]
 
 QUOTES_PREFIX = "quotes-"
-CANDLES_FILE = "candles_m5.csv"
+CANDLES_FILE = "candles_m15.csv"
 SPEC_FILE = "symbol_spec.json"
 SPEC_HISTORY_FILE = "symbol_spec_history.jsonl"
 
 # --- tunables ---------------------------------------------------------------------------
-DEFAULT_DIR = "Z:/opt/bitcoin/xm_data"       # Wine's Z: is the Linux root
-LAG_S = 1.0                  # sample just after the boundary so the new M5 bar's quotes exist
+DEFAULT_DIR = "Z:/opt/nasdaq/xm_data"        # Wine's Z: is the Linux root
+LAG_S = 1.0                  # sample just after the boundary so the new M15 bar's quotes exist
 STALE_TICK_S = 120           # a point-sample tick older than this is flagged STALE
 OFFSET_MAX_AGE_S = 300       # residual (tick age + clock skew) allowed when learning the offset
 OFFSET_CONFIRM = 2           # a CHANGED offset must be seen on this many consecutive fresh ticks
@@ -119,11 +61,11 @@ MAX_OFFSET_H = 14            # implausible beyond +-14 h
 SPEC_EVERY_S = 6 * 3600      # re-read the contract spec this often (changes are history-logged)
 REINIT_AFTER_S = 60          # no valid quote this long -> shutdown()/initialize() again
 DEAD_AFTER_S = 900           # ...and this long -> exit(2) so systemd restarts a clean process
-MAX_FETCH_BARS = 5000        # per gap-heal call (~17 days of M5)
+MAX_FETCH_BARS = 5000        # per gap-heal call (~52 days of M15)
 CANDLE_RETRY_S = 10          # throttle for re-asking history about the same closed bar
 HEARTBEAT_S = 3600           # one stdout line per hour
 ERR_LOG_EVERY_S = 300        # repeated identical errors are printed at most this often
-FUTURE_SLACK_S = 120         # a "closed" bar may not end later than now + this (clock skew allowance)
+FUTURE_SLACK_S = 120         # a "closed" bar may not end later than now + this
 SETTLE_TRIES = 5             # first-run back-fill: re-ask while the terminal downloads history
 SETTLE_WAIT_S = 3.0
 
@@ -150,10 +92,10 @@ ACCOUNT_FIELDS = (                      # NOT login, name, server, balance, equi
 TERMINAL_FIELDS = (                     # NOT path, data_path, commondata_path (Windows user names)
     "build", "connected", "trade_allowed", "tradeapi_disabled", "maxbars", "company", "name",
 )
-TERMINAL_VOLATILE = ("connected",)      # live state, excluded from the change hash
+TERMINAL_VOLATILE = ("connected",)
 
 # --- decoders for the numeric enums/bitmasks (documented MT5 values) ---------------------
-FILLING_BITS = {1: "FOK", 2: "IOC", 4: "BOC"}            # SYMBOL_FILLING_* flags
+FILLING_BITS = {1: "FOK", 2: "IOC", 4: "BOC"}
 ORDER_MODE_BITS = {1: "MARKET", 2: "LIMIT", 4: "STOP", 8: "STOP_LIMIT", 16: "SL", 32: "TP",
                    64: "CLOSE_BY"}
 EXPIRATION_BITS = {1: "GTC", 2: "DAY", 4: "SPECIFIED", 8: "SPECIFIED_DAY"}
@@ -185,6 +127,22 @@ def parse_utc(text):
     return datetime.strptime(text.strip(), TS_FMT).replace(tzinfo=timezone.utc).timestamp()
 
 
+def is_cme_closed(epoch: float) -> bool:
+    """True during CME Globex US100Cash closure (Fri 16:55 ET -> Sun 18:10 ET, and Mon-Thu 16:55-18:10 ET)."""
+    et = datetime.fromtimestamp(float(epoch), tz=timezone.utc).astimezone(NY_TZ)
+    wd = et.weekday()
+    mins = et.hour * 60 + et.minute
+    if wd == 5:
+        return True
+    if wd == 4 and mins >= 16 * 60 + 55:
+        return True
+    if wd == 6 and mins < 18 * 60 + 10:
+        return True
+    if wd in (0, 1, 2, 3) and (16 * 60 + 55) <= mins < (18 * 60 + 10):
+        return True
+    return False
+
+
 def _env_num(name, default, cast=int):
     try:
         return cast(float(os.environ.get(name, default)))
@@ -193,7 +151,6 @@ def _env_num(name, default, cast=int):
 
 
 def jsonable(v):
-    """numpy/ctypes scalars -> plain python so json.dumps never raises."""
     if isinstance(v, (bool, int, float, str)) or v is None:
         return v
     item = getattr(v, "item", None)
@@ -206,22 +163,11 @@ def jsonable(v):
 
 
 def clean_label(text):
-    """Operator-chosen free text (e.g. 'XM Standard demo'): one line, bounded."""
     return " ".join(str(text or "").split())[:80]
 
 
 def estimate_offset(tick_time_srv, now_epoch, max_age_s=OFFSET_MAX_AGE_S):
-    """Broker-server offset from UTC in seconds (a whole number of hours), or None.
-
-    tick.time is server time as epoch seconds, so  tick.time - now = offset - age  with a
-    small age. Round to the hour; accept only when the residual (= tick age + clock skew)
-    is small.
-
-    CALLER MUST PASS A FRESH TICK ONLY. A tick that is exactly N hours old is
-    indistinguishable from a fresh tick on a server N hours behind, so a stale feed (weekend
-    maintenance) could silently move the offset. XmLogger therefore feeds this function only
-    ticks whose time ADVANCED since the previous poll (a frozen tick is stale by definition).
-    """
+    """Broker-server offset from UTC in seconds (whole hours), or None."""
     if not tick_time_srv:
         return None
     d = float(tick_time_srv) - float(now_epoch)
@@ -232,7 +178,6 @@ def estimate_offset(tick_time_srv, now_epoch, max_age_s=OFFSET_MAX_AGE_S):
 
 
 def tick_age_s(tick_time_srv, offset_s, now_epoch):
-    """Age of a tick in seconds, or None when the offset is not known."""
     if offset_s is None or not tick_time_srv:
         return None
     return float(now_epoch) - (float(tick_time_srv) - offset_s)
@@ -255,7 +200,6 @@ def decode_enum(value, table):
 
 
 def read_csv_rows(path, fields):
-    """Valid rows of an append-only CSV as dicts; torn/misaligned lines are skipped."""
     out = []
     try:
         with open(path, newline="", encoding="utf-8") as f:
@@ -272,7 +216,6 @@ def read_csv_rows(path, fields):
 
 
 def last_csv_row(path, fields):
-    """Last well-formed row of a CSV without reading the whole file, or None."""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -292,15 +235,7 @@ def last_csv_row(path, fields):
 
 
 class CsvAppender:
-    """Append-only CSV: header on create, schema-drift protection, torn-line repair.
-
-    * Opened with newline="" and lineterminator="\\n": the Wine (Windows) Python would
-      otherwise translate to CRLF and the Linux readers would see a trailing \\r.
-    * If the header on disk is not exactly `fields` the file is MOVED ASIDE and a fresh one
-      started - appending misaligned rows is how trades.csv silently broke once.
-    * If the last line has no newline (killed mid-write) a newline is added first so the
-      torn row stays isolated and the next row is intact; readers skip malformed lines.
-    """
+    """Append-only CSV: header on create, schema-drift protection, torn-line repair."""
 
     def __init__(self, path, fields, log=print):
         self.path, self.fields, self.log = path, list(fields), log
@@ -351,7 +286,7 @@ def atomic_write_text(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         f.write(text)
-    os.replace(tmp, path)          # atomic: readers (and git add) never see a partial file
+    os.replace(tmp, path)
 
 
 # =========================================================================================
@@ -362,7 +297,6 @@ def _pick(obj, fields):
 
 
 def spec_hash(spec):
-    """Stable hash of the parts of a snapshot that are contract facts (not live state)."""
     term = {k: v for k, v in (spec.get("terminal") or {}).items() if k not in TERMINAL_VOLATILE}
     core = {"symbol": spec.get("symbol"), "symbol_info": spec.get("symbol_info"),
             "account": spec.get("account"), "terminal": term}
@@ -382,7 +316,7 @@ def build_spec(mt5mod, symbol, label="", now=None):
             return None
         try:
             return fn(*args)
-        except Exception as e:                      # a failing probe must not kill the logger
+        except Exception as e:
             err.append("%s: %s" % (name, e))
             return None
 
@@ -407,7 +341,6 @@ def build_spec(mt5mod, symbol, label="", now=None):
         "margin_mode": decode_enum(spec["account"].get("margin_mode"), ACCOUNT_MARGIN_MODE),
         "symbol_trade_mode": decode_enum(sym.get("trade_mode"), SYMBOL_TRADE_MODE),
         "execution_mode": decode_enum(sym.get("trade_exemode"), EXEMODE),
-        # SYMBOL flag bits (FOK=1, IOC=2) are NOT the order enum (FOK=0, IOC=1, RETURN=2).
         "filling_allowed_flags": decode_bits(sym.get("filling_mode"), FILLING_BITS),
         "order_types_allowed": decode_bits(sym.get("order_mode"), ORDER_MODE_BITS),
         "expiration_allowed": decode_bits(sym.get("expiration_mode"), EXPIRATION_BITS),
@@ -420,11 +353,11 @@ def build_spec(mt5mod, symbol, label="", now=None):
     bid = jsonable(getattr(tick, "bid", None)) if tick is not None else None
     if bid:
         buy = getattr(mt5mod, "ORDER_TYPE_BUY", 0)
-        # pure calculators (no order is created): P/L of 0.01 lot for a +$100 move is exactly
-        # $1.00 if the contract size is 1.0 - the cost model's lot arithmetic, measured.
-        probes["calc_profit_usd_0.01lot_plus_100usd"] = jsonable(
-            call("order_calc_profit", buy, symbol, 0.01, bid, bid + 100.0))
-        probes["calc_margin_usd_0.01lot"] = jsonable(call("order_calc_margin", buy, symbol, 0.01, bid))
+        # Pure calculators (no order created): on US100Cash (contract_size=1.0),
+        # 0.10 lot x +100 index points = $10.00 ($0.10/pt).
+        probes["calc_profit_usd_0.10lot_plus_100pts"] = jsonable(
+            call("order_calc_profit", buy, symbol, 0.10, bid, bid + 100.0))
+        probes["calc_margin_usd_0.10lot"] = jsonable(call("order_calc_margin", buy, symbol, 0.10, bid))
         probes["price_used"] = bid
     spec["probes"] = probes
     if si is None:
@@ -445,12 +378,12 @@ class QuoteWindow:
 
     def __init__(self, grid_epoch):
         self.grid = grid_epoch
-        self.first = None            # (poll_epoch, bid, ask, age, offset): the point sample
+        self.first = None
         self.smin = None
         self.smax = None
         self.n_ok = 0
-        self.n_none = 0              # the terminal returned no tick at all
-        self.n_invalid = 0           # a tick came back but bid/ask were zero or crossed
+        self.n_none = 0
+        self.n_invalid = 0
 
     @property
     def n_bad(self):
@@ -503,16 +436,15 @@ class QuoteWindow:
 # the logger
 # =========================================================================================
 class XmLogger:
-    """All state and I/O lives here; the terminal module, the sleep function and the clock
-    are injected, so the smoke test drives it with a fake terminal and a fake clock (no
-    sleeping, no Wine)."""
+    """All state and I/O lives here; terminal module, sleep, and clock are injected."""
 
     def __init__(self, mt5mod, symbol, out_dir, interval=30, poll=5, lag=LAG_S,
                  stale_s=STALE_TICK_S, backfill_bars=12000, label="", log=None,
-                 spec_every_s=SPEC_EVERY_S, sleep=None):
+                 spec_every_s=SPEC_EVERY_S, sleep=None, respect_market_hours=False):
         self.mt5, self.symbol, self.out_dir = mt5mod, symbol, out_dir
         self.log = log or (lambda m: print(m, flush=True))
-        self.sleep = sleep or time.sleep      # resolved now, not at import (patchable in tests)
+        self.sleep = sleep or time.sleep
+        self.respect_market_hours = bool(respect_market_hours)
         self.interval, self.poll, self.lag = int(interval), int(poll), float(lag)
         if self.poll < 1 or self.interval < self.poll or self.interval % self.poll:
             self.log("mt5_quotes: interval %s / poll %s are not compatible (poll must divide the "
@@ -520,16 +452,16 @@ class XmLogger:
             self.interval, self.poll = 30, 5
         self.stale_s, self.backfill_bars = stale_s, int(backfill_bars)
         self.label, self.spec_every_s = clean_label(label), spec_every_s
-        self.tf_m5 = getattr(mt5mod, "TIMEFRAME_M5", 5)
+        self.tf_m15 = getattr(mt5mod, "TIMEFRAME_M15", 15)
 
         self.window = None
         self.started_at = None
-        self.last_stamp = None          # newest quote-row grid epoch already written
-        self.last_bar_open_utc = None   # UTC open (epoch) of the newest candle already written
+        self.last_stamp = None
+        self.last_bar_open_utc = None
         self.offset = None
-        self.prev_offset = None         # the offset before the last change (straddling-bar fallback)
-        self._pending_offset = None     # (candidate, consecutive count) for a CHANGED offset
-        self._prev_tick_time = None     # server time of the previous valid tick (freshness gate)
+        self.prev_offset = None
+        self._pending_offset = None
+        self._prev_tick_time = None
         self.digits = 2
         self.last_ok_poll = None
         self.last_reinit = -1e18
@@ -546,7 +478,6 @@ class XmLogger:
 
     # ---- plumbing ------------------------------------------------------------------
     def _err(self, key, msg, now):
-        """Print an error at most once per ERR_LOG_EVERY_S per key."""
         if now - self._err_seen.get(key, -1e18) >= ERR_LOG_EVERY_S:
             self._err_seen[key] = now
             self.log("mt5_quotes: %s" % msg)
@@ -566,11 +497,9 @@ class XmLogger:
         return os.path.join(self.out_dir, CANDLES_FILE)
 
     def grid(self, now):
-        """Window a poll at `now` belongs to; 0.5 s of slack for a timer that wakes early."""
         return int((now - self.lag + 0.5) // self.interval) * self.interval
 
     def next_poll_time(self, now):
-        """Next instant on the poll grid (lag + k*poll) strictly after `now`."""
         return (math.floor((now - self.lag) / self.poll) + 1) * self.poll + self.lag
 
     def off_txt(self):
@@ -586,7 +515,6 @@ class XmLogger:
             self.digits = d
 
     def resume(self, now):
-        """Resume points: a restart never duplicates a row or a candle."""
         last_q = last_csv_row(self.quotes_path(now), QUOTE_FIELDS)
         if last_q:
             try:
@@ -596,13 +524,11 @@ class XmLogger:
         last_c = last_csv_row(self.candles_path, CANDLE_FIELDS)
         if last_c:
             try:
-                self.last_bar_open_utc = int(parse_utc(last_c["bar_close_utc"])) - M5_SECONDS
+                self.last_bar_open_utc = int(parse_utc(last_c["bar_close_utc"])) - M15_SECONDS
             except ValueError:
                 pass
 
     def learn_offset(self, now, tries=10, clock=None):
-        """Poll until one fresh tick yields the server offset (or give up after `tries`).
-        Needs two polls (a tick that ADVANCED), so it sleeps between them."""
         clock = clock or time.time
         for _ in range(tries):
             self._poll_tick(now)
@@ -624,11 +550,10 @@ class XmLogger:
                      self.symbol, (spec.get("decoded") or {}).get("account_kind") or "?",
                      self.off_txt(), self.interval, self.poll, self.out_dir,
                      utc_str(self.last_stamp) if self.last_stamp else "none",
-                     utc_str(self.last_bar_open_utc + M5_SECONDS) if self.last_bar_open_utc else "none"))
+                     utc_str(self.last_bar_open_utc + M15_SECONDS) if self.last_bar_open_utc else "none"))
 
     # ---- tick handling -------------------------------------------------------------
     def _poll_tick(self, now):
-        """-> ('ok', bid, ask, tick_time) | ('bad',) | ('none',). Updates the offset."""
         try:
             t = self.mt5.symbol_info_tick(self.symbol)
         except Exception as e:
@@ -644,13 +569,11 @@ class XmLogger:
             return ("bad",)
         fresh = self._prev_tick_time is not None and tt != self._prev_tick_time
         self._prev_tick_time = tt
-        if fresh:                       # a frozen tick is stale: it must not move the offset
+        if fresh:
             self._note_offset(estimate_offset(tt, now))
         return ("ok", bid, ask, tt)
 
     def _note_offset(self, cand):
-        """First estimate is taken at once; a different one only after OFFSET_CONFIRM
-        consecutive agreeing fresh ticks (one glitchy tick must not flip every row)."""
         if cand is None:
             return
         if self.offset is None:
@@ -667,7 +590,6 @@ class XmLogger:
 
     # ---- one poll ------------------------------------------------------------------
     def step(self, now):
-        """One poll at wall-clock `now`. Returns the poll outcome tuple (for tests)."""
         g = self.grid(now)
         if self.window is None or self.window.grid != g:
             self.flush_window(now)
@@ -688,11 +610,15 @@ class XmLogger:
             self.next_heartbeat = now + HEARTBEAT_S
             self.log("mt5_quotes: %s UTC | spread %s | rows written %d | candles written %d | "
                      "offset %s" % (utc_str(now)[:16],
-                                    "n/a" if self.last_spread is None else "$%.2f" % self.last_spread,
+                                    "n/a" if self.last_spread is None else "%.2f pts" % self.last_spread,
                                     self.rows_written, self.candles_written, self.off_txt()))
         return res
 
     def _watchdog(self, now):
+        if self.respect_market_hours and is_cme_closed(now):
+            # Do not restart-loop during CME weekend closure or daily 17:00-18:00 ET break
+            self.last_ok_poll = now
+            return
         ref = self.last_ok_poll if self.last_ok_poll is not None else (
             self.started_at if self.started_at is not None else now)
         quiet = now - ref
@@ -712,12 +638,11 @@ class XmLogger:
 
     # ---- quote rows ----------------------------------------------------------------
     def flush_window(self, now):
-        """Write the open window as one row (if it has any poll and is newer than the last)."""
         w, self.window = self.window, None
         if w is None or (w.n_ok == 0 and w.n_bad == 0):
             return None
         if self.last_stamp is not None and w.grid <= self.last_stamp:
-            return None     # clock stepped back, or a restart inside the same window: no duplicate
+            return None
         row = w.row(self.digits, self.poll, self.stale_s)
         try:
             self._appender(self.quotes_path(w.grid), QUOTE_FIELDS).append([row])
@@ -730,8 +655,6 @@ class XmLogger:
 
     # ---- candles -------------------------------------------------------------------
     def _last_bar_srv(self):
-        """Resume point on the SERVER clock as it reads NOW. Kept in UTC internally so a
-        server DST change (the clock jumps by an hour) cannot hide or duplicate bars."""
         if self.last_bar_open_utc is None or self.offset is None:
             return None
         return self.last_bar_open_utc + self.offset
@@ -739,7 +662,7 @@ class XmLogger:
     def _maybe_sync_candles(self, now, tick_time_srv):
         if self.offset is None:
             return
-        closed_srv = (int(tick_time_srv) // M5_SECONDS) * M5_SECONDS - M5_SECONDS
+        closed_srv = (int(tick_time_srv) // M15_SECONDS) * M15_SECONDS - M15_SECONDS
         last = self._last_bar_srv()
         if last is not None and closed_srv <= last:
             return
@@ -749,34 +672,23 @@ class XmLogger:
         self.sync_candles(now, closed_srv)
 
     def fetch_rates(self, want, now, settle=False):
-        """The most recent `want` CLOSED bars, oldest first. With settle=True keep asking
-        while the terminal is still downloading history (the returned count keeps growing)."""
         best, prev = [], -1
         for _ in range(SETTLE_TRIES if settle else 1):
             try:
-                rates = self.mt5.copy_rates_from_pos(self.symbol, self.tf_m5, 1, int(want))
+                rates = self.mt5.copy_rates_from_pos(self.symbol, self.tf_m15, 1, int(want))
             except Exception as e:
                 self._err("rates", "copy_rates_from_pos failed: %s" % e, now)
                 rates = None
             n = 0 if rates is None else len(rates)
             if n > len(best):
                 best = list(rates)
-            if not settle or n >= want or n <= prev:      # complete, or no longer growing
+            if not settle or n >= want or n <= prev:
                 break
             prev = n
             self.sleep(SETTLE_WAIT_S)
         return best
 
     def candle_rows(self, rates, now, after_utc=None):
-        """MT5 rate records -> CSV row dicts, ascending in UTC, unique, newer than `after_utc`
-        (UTC open of the newest candle already recorded).
-
-        Each bar's raw server time is converted with the current offset, then - only if that
-        puts it outside the plausible window (after the last recorded bar, not in the future) -
-        with the PREVIOUS offset. That is what makes a server DST change safe: the bar that
-        opened before the change and closed after it still carries its old-regime raw time, and
-        converting it with the new offset would date it an hour into the future and poison the
-        resume point. A bar that fits neither is skipped rather than guessed."""
         cands = [o for o in (self.offset, self.prev_offset) if o is not None]
         if not cands:
             return []
@@ -789,14 +701,14 @@ class XmLogger:
                     u = t - off
                     if after_utc is not None and u <= after_utc:
                         continue
-                    if u + M5_SECONDS > now + FUTURE_SLACK_S:
+                    if u + M15_SECONDS > now + FUTURE_SLACK_S:
                         continue
                     try:
                         sp = int(r["spread"])
                     except (KeyError, IndexError, TypeError, ValueError):
                         sp = ""
                     picked.setdefault(u, {
-                        "bar_close_utc": utc_str(u + M5_SECONDS),
+                        "bar_close_utc": utc_str(u + M15_SECONDS),
                         "open": fmt % float(r["open"]), "high": fmt % float(r["high"]),
                         "low": fmt % float(r["low"]), "close": fmt % float(r["close"]),
                         "tick_volume": int(r["tick_volume"]), "spread_pts": sp,
@@ -808,7 +720,6 @@ class XmLogger:
         return [picked[u] for u in sorted(picked)]
 
     def sync_candles(self, now, closed_srv):
-        """Append every closed bar newer than the last one recorded (first run: back-fill)."""
         if self.offset is None:
             return 0
         last = self._last_bar_srv()
@@ -816,7 +727,7 @@ class XmLogger:
         if first_run:
             want, settle = self.backfill_bars, True
         else:
-            gap = (closed_srv - last) // M5_SECONDS
+            gap = (closed_srv - last) // M15_SECONDS
             if gap <= 0:
                 return 0
             want, settle = min(MAX_FETCH_BARS, int(gap)), False
@@ -829,14 +740,14 @@ class XmLogger:
         except OSError as e:
             self._err("write-candle", "cannot write candles: %s" % e, now)
             return 0
-        self.last_bar_open_utc = int(parse_utc(rows[-1]["bar_close_utc"])) - M5_SECONDS
+        self.last_bar_open_utc = int(parse_utc(rows[-1]["bar_close_utc"])) - M15_SECONDS
         self.candles_written += len(rows)
         if first_run:
-            self.log("mt5_quotes: first run - back-filled %d closed M5 bars (asked for %d; %s -> %s "
+            self.log("mt5_quotes: first run - back-filled %d closed M15 bars (asked for %d; %s -> %s "
                      "UTC close). The terminal serves at most its 'Max bars in chart'." % (
                          len(rows), want, rows[0]["bar_close_utc"], rows[-1]["bar_close_utc"]))
         elif len(rows) > 1:
-            self.log("mt5_quotes: healed a gap of %d closed M5 bars up to %s UTC" % (
+            self.log("mt5_quotes: healed a gap of %d closed M15 bars up to %s UTC" % (
                 len(rows), rows[-1]["bar_close_utc"]))
         return len(rows)
 
@@ -883,14 +794,14 @@ class XmLogger:
         try:
             while True:
                 now = clock()
-                target = self.next_poll_time(max(now, target))   # never poll the same slot twice
+                target = self.next_poll_time(max(now, target))
                 if target > now:
                     self.sleep(target - now)
                 try:
                     self.step(clock())
                 except SystemExit:
                     raise
-                except Exception as e:                    # never let one bad poll end the clock
+                except Exception as e:
                     self._err("step", "poll error: %s (continuing)" % e, clock())
         except KeyboardInterrupt:
             pass
@@ -899,8 +810,7 @@ class XmLogger:
 
 
 def merge_candles(path, rows):
-    """Merge `rows` into the candle file keyed by bar_close_utc (older history may be
-    inserted): sorted, unique, rewritten atomically. Returns (rows_added, total)."""
+    """Merge `rows` into the candle file keyed by bar_close_utc: sorted, unique, atomic."""
     by_key = {}
     for r in read_csv_rows(path, CANDLE_FIELDS):
         by_key[r["bar_close_utc"]] = r
@@ -931,26 +841,25 @@ def _connect(symbol, m):
         sys.exit(1)
     if not m.symbol_select(symbol, True):
         print("mt5_quotes: symbol_select(%s) failed: %s (check the exact symbol name in Market "
-              "Watch; XM has BTCUSD, not BTCUSDm)" % (symbol, m.last_error()), flush=True)
+              "Watch; XM uses US100Cash for Nasdaq-100 Cash CFD)" % (symbol, m.last_error()), flush=True)
         sys.exit(1)
 
 
 def main(argv=None, mt5mod=None, clock=None, sleep=None):
-    """CLI entry. `mt5mod`, `clock` and `sleep` are injectable so the smoke test can drive every
-    mode (--spec, --once, --backfill) against a fake terminal without patching globals."""
-    ap = argparse.ArgumentParser(description="XM quote + contract-spec logger (read-only)")
+    ap = argparse.ArgumentParser(description="XM US100Cash quote + contract-spec logger (read-only)")
     ap.add_argument("--spec", action="store_true", help="print the contract-spec snapshot; write nothing")
     ap.add_argument("--once", action="store_true", help="one cycle, then exit")
     ap.add_argument("--backfill", type=int, metavar="N",
-                    help="merge the last N closed M5 bars into candles_m5.csv, then exit "
-                         "(stop mt5quotes-btc first: the merge rewrites the file)")
+                    help="merge the last N closed M15 bars into candles_m15.csv, then exit "
+                         "(stop mt5quotes-nasdaq first: the merge rewrites the file)")
     ap.add_argument("--dir", default=os.environ.get("MT5_QUOTES_DIR", DEFAULT_DIR))
     a = ap.parse_args(argv)
 
     m = mt5mod if mt5mod is not None else mt5
     clock = clock or time.time
-    symbol = os.environ.get("MT5_QUOTES_SYMBOL", "BTCUSD")
+    symbol = os.environ.get("MT5_QUOTES_SYMBOL", "US100Cash")
     label = os.environ.get("MT5_QUOTES_LABEL", "")
+    respect_hours = os.environ.get("MT5_QUOTES_SKIP_QUIET", "1").strip() not in ("0", "false", "no")
     _connect(symbol, m)
     try:
         if a.spec:
@@ -958,7 +867,8 @@ def main(argv=None, mt5mod=None, clock=None, sleep=None):
             return 0
         lg = XmLogger(m, symbol, a.dir,
                       interval=_env_num("MT5_QUOTES_INTERVAL", 30), poll=_env_num("MT5_QUOTES_POLL", 5),
-                      backfill_bars=_env_num("MT5_QUOTES_BACKFILL_BARS", 12000), label=label, sleep=sleep)
+                      backfill_bars=_env_num("MT5_QUOTES_BACKFILL_BARS", 12000), label=label,
+                      sleep=sleep, respect_market_hours=(respect_hours and not a.once))
         if a.backfill:
             os.makedirs(a.dir, exist_ok=True)
             lg.learn_digits()

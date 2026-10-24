@@ -52,7 +52,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.dirname(HERE))
     ap.add_argument("--spread", type=float, default=0.0)
-    ap.add_argument("--horizon", type=int, default=240)
+    ap.add_argument("--horizon", type=int, default=720)
     args = ap.parse_args()
 
     trades = R.load_trades(os.path.join(args.root, "trades.csv"))
@@ -60,8 +60,11 @@ def main():
     clean = [t for t in trades if t["et"] >= datetime(2026, 9, 5)]
     covered, _ = R.coverage(clean, bars)
 
-    print(f"analyze_losers - {len(trades)} trades ({len(clean)} from 09-05), "
-          f"{len(covered)} log-covered, {len(bars)} M5 bars\n")
+    print(f"analyze_losers - {len(trades)} trades ({len(clean)} clean), "
+          f"{len(covered)} log-covered, {len(bars)} M15 bars\n")
+    if not clean:
+        print("  0 closed trades yet (Day-0 US100Cash clean ledger).")
+        return
 
     # ------------------------------------------------------------- 1. baseline
     print("== 1. BASELINE (from 09-05) ==")

@@ -1,0 +1,39 @@
+# Wine MT5 Order Executor Sidecar for Nasdaq (US100Cash) LIVE mode
+#
+# Dormant (MT5_EXEC_ENABLED=0) and DEMO-locked (MT5_EXEC_ALLOW_REAL=0) by default!
+# See docs/START-LEVER1.md before arming MT5_EXEC_ENABLED=1 on a demo or live account.
+#
+# Install (NEVER put a login or password in this file):
+#   sudo cp /opt/nasdaq/deploy/mt5exec.service /etc/systemd/system/mt5exec-nasdaq.service
+#   sudo sed -i "s/YOUR_LINUX_USER/$USER/g" /etc/systemd/system/mt5exec-nasdaq.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mt5exec-nasdaq
+#   journalctl -u mt5exec-nasdaq -f
+
+[Unit]
+Description=Wine MT5 Order Executor Sidecar for Nasdaq (US100Cash)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/nasdaq
+Environment=WINEPREFIX=/home/YOUR_LINUX_USER/.mt5
+Environment=WINEDEBUG=-all
+Environment=MT5_ORDER_DIR=Z:/opt/nasdaq/mt5_bridge
+Environment=MT5_EXEC_SYMBOL=US100Cash
+Environment=MT5_EXEC_MAGIC=987656
+Environment=MT5_EXEC_ENABLED=0
+Environment=MT5_EXEC_ALLOW_REAL=0
+Environment=MT5_EXEC_HALT_FILE=Z:/opt/nasdaq/HALT
+Environment=MT5_EXEC_FLATTEN_ON_HALT=1
+Environment=MT5_EXEC_MAX_SPREAD_POINTS=8.0
+Environment=MT5_EXEC_MAX_SPREAD_TO_1R=0.35
+Environment=MT5_EXEC_DEVIATION_POINTS=500
+ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:/Python312/python.exe Z:/opt/nasdaq/tools/mt5_executor.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

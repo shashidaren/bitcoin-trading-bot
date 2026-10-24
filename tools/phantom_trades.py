@@ -39,8 +39,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replay_lib as R  # noqa: E402
 
-MAX_HOLD_MIN = 24 * 60      # 24 h horizon (kept from the original tool)
-MATCH_SECONDS = 360         # skip timestamp must land within +-6 min of a log row
+MAX_HOLD_MIN = 24 * 60      # 24 h horizon
+MATCH_SECONDS = 1080        # skip timestamp must land within +-18 min of an M15 log row
 
 
 def main():
@@ -118,7 +118,7 @@ def main():
         print(f"{s['dt'].strftime('%m-%d %H:%M:%S'):<17} {s['kind']:<11} {side:<5} {res:<12} "
               f"{pnl:>+7.2f}  {s['reason'][:48]}")
 
-    print("\n=== summary by skip kind (phantom P&L, $ at 0.01 lot) ===")
+    print("\n=== summary by skip kind (phantom P&L, $ at 0.10 lot on US100Cash) ===")
     agg = defaultdict(lambda: [0, 0, 0, 0, 0])  # n, W, L, TIME, unscored
     pnls = defaultdict(float)
     for s, row, side, res, pnl in rows_out:
@@ -190,7 +190,7 @@ def main():
     print("\n  compare: the traded book is "
           f"{len(R.load_trades(os.path.join(args.root, 'trades.csv')))} rows at 41% decisive")
 
-    print("\nNote: raw ATR-geometry distances x 0.01 lot"
+    print("\nNote: raw ATR-geometry distances x 0.10 lot (US100Cash)"
           + (f", net of ${args.spread:.2f}/trade round trip" if args.spread else
              " - pass --spread to see the cost haircut, no slippage modeled"))
     print("      'not reproducible' = signal fired under gates/params that no longer match the log.")

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-import os
 import csv
 import json
+import os
 from flask import Flask, render_template_string
 
 import pressure as tape_pressure
 
 app = Flask(__name__)
 
-DATA_DIR = os.getenv("BTC_DATA_DIR", "/opt/bitcoin")
-LOG_FILE_PATH = os.getenv("BTC_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
-STATUS_FILE_PATH = os.getenv("BTC_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
-TRADES_FILE_PATH = os.getenv("BTC_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
-JOURNAL_FILE_PATH = os.getenv("BTC_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
+DATA_DIR = os.getenv("NASDAQ_DATA_DIR", "/opt/nasdaq")
+LOG_FILE_PATH = os.getenv("NASDAQ_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
+STATUS_FILE_PATH = os.getenv("NASDAQ_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
+TRADES_FILE_PATH = os.getenv("NASDAQ_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
+JOURNAL_FILE_PATH = os.getenv("NASDAQ_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -20,7 +20,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bitcoin Trading Engine Dashboard</title>
+    <title>Nasdaq-100 (US100Cash) Trading Engine Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <meta http-equiv="refresh" content="5">
 </head>
@@ -30,8 +30,8 @@ HTML_TEMPLATE = """
         <!-- Tab navigation -->
         <nav class="flex gap-2 mb-6 border-b border-slate-700 pb-2">
             <button id="tab-dashboard" onclick="switchTab('dashboard')"
-                class="tab-btn active bg-orange-600 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md">
-                &#8383; Dashboard
+                class="tab-btn active bg-cyan-600 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md">
+                NDX Dashboard
             </button>
             <button id="tab-journal" onclick="switchTab('journal')"
                 class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
@@ -44,9 +44,9 @@ HTML_TEMPLATE = """
             <!-- Header -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 border-b border-slate-800 pb-4 gap-4">
             <div>
-                <h1 class="text-3xl font-bold text-orange-400">&#8383; Bitcoin Engine Dashboard</h1>
+                <h1 class="text-3xl font-bold text-cyan-400">Nasdaq-100 ({{ status.symbol or 'US100Cash' }}) Engine</h1>
                 <p class="text-slate-400 text-sm">
-                    BTC/USD Bidirectional M5 &bull; Auto-refreshes every 5s &bull; Last update: {{ status.last_update or '&mdash;' }}
+                    XM US100Cash Bidirectional M15 &bull; Auto-refreshes every 5s &bull; Last update: {{ status.last_update or '&mdash;' }}
                 </p>
             </div>
             <div class="flex items-center gap-4">
@@ -64,7 +64,7 @@ HTML_TEMPLATE = """
                     <span class="text-3xl font-semibold {{ 'text-emerald-400' if status.equity >= 200 else 'text-rose-400' }}">
                         ${{ "%.2f"|format(status.equity) }}
                     </span>
-                    <span class="text-[10px] text-slate-500 block">Internal balance; not all-time P/L</span>
+                    <span class="text-[10px] text-slate-500 block">0.10 lot US100Cash ($0.10/pt)</span>
                 </div>
             </div>
         </header>
@@ -79,7 +79,7 @@ HTML_TEMPLATE = """
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-4 mb-6">
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <p class="text-xs text-slate-400">Closed Trades</p>
-                <p class="text-2xl font-bold text-orange-400">{{ status.total_trades }}</p>
+                <p class="text-2xl font-bold text-cyan-400">{{ status.total_trades }}</p>
             </div>
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <p class="text-xs text-slate-400">Wins</p>
@@ -108,7 +108,7 @@ HTML_TEMPLATE = """
                 </p>
             </div>
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                <p class="text-xs text-slate-400">Total Candles</p>
+                <p class="text-xs text-slate-400">M15 Candles</p>
                 <p class="text-2xl font-bold">{{ total }}</p>
             </div>
         </div>
@@ -125,15 +125,15 @@ HTML_TEMPLATE = """
             <div class="grid grid-cols-3 gap-4 text-sm">
                 <div>
                     <span class="text-slate-400">Entry</span><br>
-                    <span class="text-lg font-semibold">${{ "%.2f"|format(status.entry_price or 0) }}</span>
+                    <span class="text-lg font-semibold">{{ "%.2f"|format(status.entry_price or 0) }}</span>
                 </div>
                 <div>
                     <span class="text-slate-400">Stop Loss</span><br>
-                    <span class="text-lg font-semibold text-rose-400">${{ "%.2f"|format(status.stop_loss or 0) }}</span>
+                    <span class="text-lg font-semibold text-rose-400">{{ "%.2f"|format(status.stop_loss or 0) }}</span>
                 </div>
                 <div>
                     <span class="text-slate-400">Take Profit</span><br>
-                    <span class="text-lg font-semibold text-emerald-400">${{ "%.2f"|format(status.take_profit or 0) }}</span>
+                    <span class="text-lg font-semibold text-emerald-400">{{ "%.2f"|format(status.take_profit or 0) }}</span>
                 </div>
             </div>
         </div>
@@ -142,13 +142,13 @@ HTML_TEMPLATE = """
         <!-- Indicator Snapshot -->
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                <p class="text-xs text-slate-400">EMA 50</p>
+                <p class="text-xs text-slate-400">EMA 50 (M15)</p>
                 <p class="text-xl font-bold text-cyan-400">
                     {% if status.ema_fast %}{{ "%.2f"|format(status.ema_fast) }}{% else %}&mdash;{% endif %}
                 </p>
             </div>
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                <p class="text-xs text-slate-400">EMA 200</p>
+                <p class="text-xs text-slate-400">EMA 200 (M15)</p>
                 <p class="text-xl font-bold text-blue-400">
                     {% if status.ema_slow %}{{ "%.2f"|format(status.ema_slow) }}{% else %}&mdash;{% endif %}
                 </p>
@@ -160,7 +160,7 @@ HTML_TEMPLATE = """
                 </p>
             </div>
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                <p class="text-xs text-slate-400">ATR (14)</p>
+                <p class="text-xs text-slate-400">ATR (14, pts)</p>
                 <p class="text-xl font-bold text-orange-400">
                     {% if status.atr %}{{ "%.2f"|format(status.atr) }}{% else %}&mdash;{% endif %}
                 </p>
@@ -173,7 +173,7 @@ HTML_TEMPLATE = """
                 <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
                     <div>
                         <h2 class="text-lg font-semibold text-slate-100">Buy / Sell Tape Pressure</h2>
-                        <p class="text-xs text-slate-400">{{ pressure.window if pressure else 60 }} closed M5 bars · five-hour context · {{ pressure.as_of if pressure and pressure.as_of else 'warming up' }}</p>
+                        <p class="text-xs text-slate-400">{{ pressure.window if pressure else 60 }} closed M15 bars · 15-hour context · {{ pressure.as_of if pressure and pressure.as_of else 'warming up' }}</p>
                     </div>
                     <span class="text-xs px-2.5 py-1 rounded-full bg-amber-900/40 text-amber-300 border border-amber-700/40">Context only · not a signal</span>
                 </div>
@@ -200,33 +200,33 @@ HTML_TEMPLATE = """
                     </div>
                     {% endfor %}
                 </div>
-                <p class="mt-4 text-xs text-slate-500">Weighted descriptive composite of tick-count-weighted candle flow, 60-bar momentum, EMA trend, EMA slope and RSI. EMA trend/slope also gate this strategy, so the dial can echo the permitted trade side; it is not a probability or a proven predictor.</p>
+                <p class="mt-4 text-xs text-slate-500">Weighted descriptive composite of tick-count-weighted M15 candle flow, 60-bar momentum, EMA trend, EMA slope and RSI. Context only; never a standalone predictor.</p>
                 {% else %}
-                <p class="text-sm text-slate-400 py-8 text-center">Waiting for enough valid candles and indicators to calculate the five-hour read.</p>
+                <p class="text-sm text-slate-400 py-8 text-center">Waiting for enough valid M15 candles and indicators to calculate the 15-hour read.</p>
                 {% endif %}
             </section>
 
             <section class="bg-slate-800 p-5 rounded-xl border border-slate-700">
-                <h2 class="text-lg font-semibold text-slate-100 mb-1">20-bar Location</h2>
-                <p class="text-xs text-slate-400 mb-5">Current close against the previous 20 M5 candle range</p>
+                <h2 class="text-lg font-semibold text-slate-100 mb-1">20-bar M15 Location</h2>
+                <p class="text-xs text-slate-400 mb-5">Current close against the previous 20 M15 candle range (5h)</p>
                 {% if location %}
                 <div class="mb-4">
-                    <div class="flex justify-between text-xs text-slate-400 mb-1"><span>Floor ${{ "%.2f"|format(location.floor) }}</span><span>Ceiling ${{ "%.2f"|format(location.ceiling) }}</span></div>
+                    <div class="flex justify-between text-xs text-slate-400 mb-1"><span>Floor {{ "%.2f"|format(location.floor) }}</span><span>Ceiling {{ "%.2f"|format(location.ceiling) }}</span></div>
                     <div class="relative h-2 rounded-full bg-slate-700">
                         {% set loc_pct = (((location.close - location.floor) / (location.ceiling - location.floor)) * 100) if location.ceiling > location.floor else 50 %}
-                        <div class="absolute -top-1 h-4 w-1 rounded bg-orange-400" style="left: {{ '%.2f'|format([0, [loc_pct, 100]|min]|max) }}%"></div>
+                        <div class="absolute -top-1 h-4 w-1 rounded bg-cyan-400" style="left: {{ '%.2f'|format([0, [loc_pct, 100]|min]|max) }}%"></div>
                     </div>
-                    <div class="text-center text-sm font-semibold text-orange-300 mt-2">Close ${{ "%.2f"|format(location.close) }}</div>
+                    <div class="text-center text-sm font-semibold text-cyan-300 mt-2">Close {{ "%.2f"|format(location.close) }}</div>
                 </div>
                 <div class="grid grid-cols-2 gap-3 text-sm">
                     <div class="bg-slate-900/60 p-3 rounded-lg"><span class="text-xs text-slate-400">Above floor</span><br><span class="font-semibold">{{ "%.2f"|format(location.floor_atr) if location.floor_atr is not none else '—' }} ATR</span></div>
                     <div class="bg-slate-900/60 p-3 rounded-lg"><span class="text-xs text-slate-400">Below ceiling</span><br><span class="font-semibold">{{ "%.2f"|format(location.ceiling_atr) if location.ceiling_atr is not none else '—' }} ATR</span></div>
                 </div>
                 {% if location.floor_logged is not none and (location.floor_logged - location.floor)|abs > 0.02 %}
-                <p class="text-xs text-amber-300 mt-3">Level check: recomputed floor differs from logged floor by ${{ "%.2f"|format((location.floor_logged - location.floor)|abs) }}.</p>
+                <p class="text-xs text-amber-300 mt-3">Level check: recomputed floor differs from logged floor by {{ "%.2f"|format((location.floor_logged - location.floor)|abs) }} pts.</p>
                 {% endif %}
                 {% else %}
-                <p class="text-sm text-slate-400 py-8 text-center">Waiting for at least 21 usable candles.</p>
+                <p class="text-sm text-slate-400 py-8 text-center">Waiting for at least 21 usable M15 candles.</p>
                 {% endif %}
                 <p class="text-xs text-slate-500 mt-4">Location only. The panel does not evaluate or alter risk gates.</p>
             </section>
@@ -234,7 +234,6 @@ HTML_TEMPLATE = """
 
         <!-- Funnel Stats -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-            <!-- Long Funnel -->
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <h3 class="text-sm font-semibold text-emerald-400 mb-3">Buy (Long) Funnel</h3>
                 <div class="grid grid-cols-3 gap-2 text-xs">
@@ -247,7 +246,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Short Funnel -->
             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <h3 class="text-sm font-semibold text-rose-400 mb-3">Sell (Short) Funnel</h3>
                 <div class="grid grid-cols-3 gap-2 text-xs">
@@ -264,7 +262,7 @@ HTML_TEMPLATE = """
         <!-- Candle Log -->
         <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-700 font-semibold text-slate-200">
-                Recent Candle Log (last 30)
+                Recent M15 Candle Log (last 30)
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-sm text-slate-300">
@@ -288,17 +286,17 @@ HTML_TEMPLATE = """
                         <tr class="hover:bg-slate-700/40">
                             <td class="px-3 py-2 font-mono text-xs">{{ row.Timestamp or '&mdash;' }}</td>
                             <td class="px-3 py-2 font-semibold">
-                                {% if not row.Close or row.Close == 'Calculating' %}&mdash;{% else %}${{ row.Close }}{% endif %}
+                                {% if not row.Close or row.Close == 'Calculating' %}&mdash;{% else %}{{ row.Close }}{% endif %}
                             </td>
                             <td class="px-3 py-2">{{ row.Wick_Ratio or '&mdash;' }}</td>
                             <td class="px-3 py-2">
-                                {% if not row.Dynamic_Floor or row.Dynamic_Floor == 'Calculating' %}&mdash;{% else %}${{ row.Dynamic_Floor }}{% endif %}
+                                {% if not row.Dynamic_Floor or row.Dynamic_Floor == 'Calculating' %}&mdash;{% else %}{{ row.Dynamic_Floor }}{% endif %}
                             </td>
                             <td class="px-3 py-2">
-                                {% if not row.EMA_50 or row.EMA_50 == 'Calculating' %}&mdash;{% else %}${{ row.EMA_50 }}{% endif %}
+                                {% if not row.EMA_50 or row.EMA_50 == 'Calculating' %}&mdash;{% else %}{{ row.EMA_50 }}{% endif %}
                             </td>
                             <td class="px-3 py-2">
-                                {% if not row.EMA_200 or row.EMA_200 == 'Calculating' %}&mdash;{% else %}${{ row.EMA_200 }}{% endif %}
+                                {% if not row.EMA_200 or row.EMA_200 == 'Calculating' %}&mdash;{% else %}{{ row.EMA_200 }}{% endif %}
                             </td>
                             <td class="px-3 py-2">
                                 {% if not row.RSI or row.RSI == 'Calculating' %}&mdash;{% else %}{{ row.RSI }}{% endif %}
@@ -336,14 +334,14 @@ HTML_TEMPLATE = """
 
         </div>
 
-        <!-- Journal panel (replaces Telegram noise) -->
+        <!-- Journal panel -->
         <div id="panel-journal" class="tab-panel hidden">
             <div class="flex justify-between items-start md:items-center gap-3 mb-4">
                 <div>
                     <h2 class="text-lg font-semibold text-slate-100">Event Journal</h2>
                     <p class="text-xs text-slate-400">
-                        Telegram is silenced. engine.py journals every trade entry, exit, skip and
-                        feed alert here; this tab shows the most recent 100 entries (newest first).
+                        engine.py journals every US100Cash trade entry, exit, skip and feed alert here;
+                        this tab shows the most recent 100 entries (newest first).
                     </p>
                 </div>
                 {% if journal_error %}
@@ -392,9 +390,9 @@ HTML_TEMPLATE = """
 </body>
 </html>
 <script>
+    var TAB_STORAGE_KEY = 'nasdaq-dashboard-tab';
     (function () {
-        var key = 'btc-dashboard-tab';
-        var saved = localStorage.getItem(key);
+        var saved = localStorage.getItem(TAB_STORAGE_KEY);
         if (saved) switchTab(saved);
     })();
 
@@ -403,22 +401,27 @@ HTML_TEMPLATE = """
             p.classList.add('hidden');
         });
         document.querySelectorAll('.tab-btn').forEach(function (b) {
-            b.classList.remove('bg-orange-600', 'text-white', 'shadow-md');
+            b.classList.remove('bg-cyan-600', 'text-white', 'shadow-md');
             b.classList.add('text-slate-400');
         });
-        document.getElementById('panel-' + tab).classList.remove('hidden');
+        var panel = document.getElementById('panel-' + tab);
+        if (!panel) return;
+        panel.classList.remove('hidden');
         var btn = document.getElementById('tab-' + tab);
-        btn.classList.remove('text-slate-400');
-        btn.classList.add('bg-orange-600', 'text-white', 'shadow-md');
-        localStorage.setItem(key, tab);
+        if (btn) {
+            btn.classList.remove('text-slate-400');
+            btn.classList.add('bg-cyan-600', 'text-white', 'shadow-md');
+        }
+        localStorage.setItem(TAB_STORAGE_KEY, tab);
     }
 </script>
 """
 
+
 @app.route("/")
 def index():
     status = {
-        "symbol": "BTC/USD",
+        "symbol": "US100Cash",
         "equity": 200.00,
         "total_trades": 0,
         "next_trade_num": None,
@@ -447,9 +450,6 @@ def index():
         except Exception:
             pass
 
-    # Closed-row outcomes in trades.csv are authoritative if status.json is
-    # stale after a reconciliation. Keep the dashboard read-only: correct the
-    # display locally and leave the engine's files/state untouched.
     ledger_stats = tape_pressure.trade_summary(tape_pressure.read_rows(TRADES_FILE_PATH))
     trade_stats_warning = None
     if ledger_stats["total_trades"]:
@@ -485,8 +485,6 @@ def index():
     location_read = tape_pressure.location(rows[-25:])
     recent_rows = list(reversed(rows))[:30]
 
-    # Event journal: engine.py appends every trade entry/exit, skip and
-    # stale-feed alert here (it no longer sends Telegram messages).
     journal = []
     journal_error = None
     if os.path.isfile(JOURNAL_FILE_PATH):

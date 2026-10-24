@@ -68,7 +68,7 @@ TOP_FRAC = 0.05           # best 5% of trades (>= 3) are removed in the fragilit
 RECENT_N = 25             # most recent closed trades that must not be net-negative
 MAX_GAP_MIN = 60          # longest tolerated price-log gap ...
 GAP_WINDOW_DAYS = 14      # ... inside this trailing window of the log
-FEED_GAP_FLAG_MIN = 15    # check_data's gap threshold (M5)
+FEED_GAP_FLAG_MIN = 45    # check_data's gap threshold (M15 = 15m, flag > 45m)
 Z_ALPHA = 1.96            # two-sided 5%
 Z_POWER = 0.8416          # 80% power
 MC_PATHS = 6000           # Monte Carlo paths per scenario
@@ -219,11 +219,9 @@ def line(label, ts, spread):
 
 # --------------------------------------------------------------------------- #
 def feed_report(bars):
-    """Gaps > FEED_GAP_FLAG_MIN between consecutive logged M5 bars + slot coverage.
-
-    Slots are counted exactly like tools/check_data.py: rows are stamped at the bar
-    close (a :01/:02 second offset is normal), so group by minute; repeated minutes
-    are one slot, not extra coverage."""
+    """Gaps > FEED_GAP_FLAG_MIN between consecutive logged M15 bars + slot coverage."""
+    if not bars:
+        return [], 0, 0, 0
     gaps = []
     for a, b in zip(bars, bars[1:]):
         m = (b["dt"] - a["dt"]).total_seconds() / 60
@@ -235,16 +233,15 @@ def feed_report(bars):
     while t <= end:
         expected += 1
         missing += t not in have
-        t += timedelta(minutes=5)
+        t += timedelta(minutes=15)
     return gaps, expected - missing, expected, missing
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BTC live-readiness evidence + gates")
-    ap.add_argument("--spread", type=float, default=0.40,
-                    help="round-trip $/trade at 0.01 lot. Default 0.40 = the handoff's measured cost "
-                         "(unlike the other tools, which default to gross: a readiness verdict on "
-                         "gross numbers would be misleading). 0 = gross.")
+    ap = argparse.ArgumentParser(description="US100Cash M15 live-readiness evidence + gates")
+    ap.add_argument("--spread", type=float, default=0.25,
+                    help="round-trip $/trade at 0.10 lot on US100Cash. Default 0.25 "
+                         "(2.5 index points x $0.10/pt). 0 = gross.")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--boot", type=int, default=5000, help="bootstrap iterations")
     ap.add_argument("--horizon", type=int, default=100, help="Monte Carlo trades per path")
@@ -264,7 +261,7 @@ def main():
     nets = [t["profit"] - sp for t in pg]
     gross = [t["profit"] for t in pg]
     oneR = [abs(t["entry"] - t["sl"]) * R.LOT_SIZE for t in pg]
-    span_days = (pg[-1]["xt"] - pg[0]["et"]).total_seconds() / 86400
+    span_days = max(1e-6, (pg[-1]["xt"] - pg[0]["et"]).total_seconds() / 86400)
     per_week = n / span_days * 7
     wins = sum(1 for t in pg if t["profit"] > 0)
     mu, sd = st.mean(nets), st.stdev(nets)
@@ -272,12 +269,12 @@ def main():
     tstat = mu / se if se else 0.0
 
     print(f"live_readiness - {n} post-gate trades (entries >= {R.GATES_DEPLOY:%Y-%m-%d}) of {len(trades)} total, "
-          f"{len(bars)} M5 bars, spread ${sp:.2f}/trade, seed {a.seed}")
+          f"{len(bars)} M15 bars, spread ${sp:.2f}/trade, seed {a.seed}")
     print(f"  span {span_days:.1f} days, {n / span_days:.1f} trades/day ({per_week:.1f}/week); "
           f"P/L below is {'NET of the spread' if sp else 'GROSS'}")
     if not sp:
         print("  WARNING: --spread 0 is GROSS. Every figure below ignores trading cost, so the gates are")
-        print("           not meaningful. Use --spread 0.40 (the default) for any live-readiness conclusion.")
+        print("           not meaningful. Use --spread 0.25 (the default) for any live-readiness conclusion.")
 
     # ---- 1. EDGE -----------------------------------------------------------
     print("\n== 1. EDGE: is it distinguishable from zero? ==")

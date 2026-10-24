@@ -69,8 +69,8 @@ def main():
     ap.add_argument("--root", default=os.path.dirname(HERE))
     ap.add_argument("--spread", type=float, default=0.0,
                     help="assumed round-trip cost in $ per trade at LOT_SIZE (default 0)")
-    ap.add_argument("--horizon", type=int, default=240,
-                    help="walk horizon in minutes from entry (default 240 = 4h)")
+    ap.add_argument("--horizon", type=int, default=720,
+                    help="walk horizon in minutes from entry (default 720 = 12h)")
     ap.add_argument("--census", action="store_true",
                     help="also replay the reconstructed signal stream (all signals in the log)")
     args = ap.parse_args()
@@ -81,9 +81,13 @@ def main():
     bars = R.load_bars(log_path)
     covered, uncovered = R.coverage(trades, bars)
 
-    print(f"pathwalk_sims - {len(trades)} trades, {len(bars)} M5 bars "
-          f"({bars[0]['dt']} -> {bars[-1]['dt']}), horizon {args.horizon} min, "
+    span_str = f"{bars[0]['dt']} -> {bars[-1]['dt']}" if bars else "empty log"
+    print(f"pathwalk_sims - {len(trades)} trades, {len(bars)} M15 bars "
+          f"({span_str}), horizon {args.horizon} min, "
           f"spread ${args.spread:.2f}/trade")
+    if not trades and not bars:
+        print("0 trades and 0 bars yet (Day-0 US100Cash clean ledger).")
+        return
     print(f"log-covered trades: {len(covered)} (entry >= first bar); "
           f"{len(uncovered)} predate the log and cannot be re-walked\n")
 

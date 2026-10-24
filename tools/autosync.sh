@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# tools/autosync.sh — unattended data sync + safe auto-deploy for /opt/bitcoin
+# tools/autosync.sh — unattended data sync + safe auto-deploy for /opt/nasdaq
 # Runs from cron (root). Full documentation: docs/AUTOSYNC.md
 #
 # Every run:
@@ -11,42 +11,31 @@
 #        everything else = remote wins) -> runs the smoke test -> rolls back
 #        on failure -> restarts the engine -> verifies status.json is fresh
 #   3. Runs tools/check_data.py (integrity gate), tools/handoff_check.py (docs/HANDOFF.md
-#      freshness) and tools/xm_quote_report.py --quiet (XM logger liveness). The last two
-#      are advisory: they never block a deploy
-#   4. Sends a one-message digest to the Telegram chat configured in .env
-#
-# Safety model:
-#   - flock: never two runs at once
-#   - data is committed BEFORE any merge, so a rollback never loses data
-#   - refuses to deploy if someone hand-edited code files on the server
-#   - smoke-test gate with automatic rollback to pre-merge code
-#   - .env (secrets) is read but never committed
+#      freshness) and tools/xm_quote_report.py --quiet (XM logger liveness).
+#   4. Optionally sends a digest to Telegram (NOTIFY=off by default).
 # ==============================================================================
 set -uo pipefail
 
-BTC_DIR="${BTC_DIR:-/opt/bitcoin}"
-LOCK_FILE="${LOCK_FILE:-/var/lock/bitcoin-autosync.lock}"
+NASDAQ_DIR="${NASDAQ_DIR:-${BTC_DIR:-/opt/nasdaq}}"
+LOCK_FILE="${LOCK_FILE:-/var/lock/nasdaq-autosync.lock}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
-AUTO_DEPLOY="${AUTO_DEPLOY:-1}"       # 0 = data-only mode (never pull/restart)
-SMOKE_GATE="${SMOKE_GATE:-1}"         # 0 = deploy without the smoke test
-ENGINE_SERVICE="${ENGINE_SERVICE:-}" # empty = auto-detect the unit running engine.py
-DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}" # empty = auto-detect the unit running dashboard.py
-NOTIFY="${NOTIFY:-off}"               # alerts | always | quiet | off (phase 5 below); off = no Telegram
-DAILY_STAMP="${DAILY_STAMP:-/tmp/bitcoin_autosync_daily_digest}"  # alerts: last daily summary date
-ALERT_STAMP="${ALERT_STAMP:-/tmp/bitcoin_autosync_last_alert}"    # alerts: last alerted state (dedupe)
-# xm_data/ is a DIRECTORY (tools/mt5_quotes.py: quotes-YYYY-MM-DD.csv, candles_m5.csv, symbol_spec*).
-# `git add -- xm_data` stages its new and modified files; before the logger is installed it matches
-# nothing and the (silenced) failure is harmless.
+AUTO_DEPLOY="${AUTO_DEPLOY:-1}"
+SMOKE_GATE="${SMOKE_GATE:-1}"
+ENGINE_SERVICE="${ENGINE_SERVICE:-}"
+DASHBOARD_SERVICE="${DASHBOARD_SERVICE:-}"
+NOTIFY="${NOTIFY:-off}"
+DAILY_STAMP="${DAILY_STAMP:-/tmp/nasdaq_autosync_daily_digest}"
+ALERT_STAMP="${ALERT_STAMP:-/tmp/nasdaq_autosync_last_alert}"
 DATA_FILES=(trades.csv forward_test_log.csv skipped_trades.csv status.json xm_data)
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TG_CHAT="${TELEGRAM_CHAT_ID:-}"
-if [ -z "$TG_TOKEN" ] && [ -f "$BTC_DIR/.env" ]; then
-    TG_TOKEN=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$BTC_DIR/.env" | head -n1 | tr -d "\"'")
-    TG_CHAT=$(sed -n 's/^TELEGRAM_CHAT_ID=//p' "$BTC_DIR/.env" | head -n1 | tr -d "\"'")
+if [ -z "$TG_TOKEN" ] && [ -f "$NASDAQ_DIR/.env" ]; then
+    TG_TOKEN=$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$NASDAQ_DIR/.env" | head -n1 | tr -d "\"'")
+    TG_CHAT=$(sed -n 's/^TELEGRAM_CHAT_ID=//p' "$NASDAQ_DIR/.env" | head -n1 | tr -d "\"'")
 fi
 
 tg() {
@@ -56,11 +45,6 @@ tg() {
         --data-urlencode "text=${1}" >/dev/null 2>&1 || true
 }
 
-# alert_once: message only when this state differs from the last alerted one,
-# so a persistent failure (dead push credentials, wedged merge, missing dir)
-# cannot re-flood the chat every 15 minutes. NOTIFY=off stays fully silent.
-# The stamp lives in /tmp: a reboot re-arms it (worst case: one repeat), and a
-# clean routine run removes it (phase 5), so the same incident re-alerts later.
 alert_once() {
     [ "$NOTIFY" = "off" ] && return 0
     if [ "$1" = "$(cat "$ALERT_STAMP" 2>/dev/null)" ]; then return 0; fi
@@ -69,17 +53,12 @@ alert_once() {
 }
 
 detect_service() {
-    # $1 = marker to look for in the unit definition (e.g. 'engine\.py')
-    # $2 = optional explicit unit name override (skips detection)
-    # Detection is scoped to units that ALSO reference $BTC_DIR, so services
-    # belonging to other repos on the same box (e.g. a gold bot with its
-    # own engine.py) are never picked up by mistake.
     if [ -n "${2:-}" ]; then echo "$2"; return 0; fi
     local unit def
     while IFS= read -r unit; do
         [ -z "$unit" ] && continue
         def=$(systemctl cat "$unit" 2>/dev/null) || continue
-        if printf '%s' "$def" | grep -q "$1" && printf '%s' "$def" | grep -qF "$BTC_DIR"; then
+        if printf '%s' "$def" | grep -q "$1" && printf '%s' "$def" | grep -qF "$NASDAQ_DIR"; then
             echo "$unit"; return 0
         fi
     done < <(systemctl list-units --type=service --no-legend --plain 2>/dev/null | awk '{print $1}')
@@ -90,16 +69,16 @@ detect_service() {
 exec 9>"$LOCK_FILE" || { log "FATAL: cannot open lock file"; exit 1; }
 if ! flock -n 9; then log "another autosync run is active - skipping"; exit 0; fi
 
-cd "$BTC_DIR" || { log "FATAL: cannot cd to $BTC_DIR"; alert_once "fatal-cd|$BTC_DIR" "bitcoin autosync: FATAL - cannot cd to $BTC_DIR"; exit 1; }
+cd "$NASDAQ_DIR" || { log "FATAL: cannot cd to $NASDAQ_DIR"; alert_once "fatal-cd|$NASDAQ_DIR" "nasdaq autosync: FATAL - cannot cd to $NASDAQ_DIR"; exit 1; }
 
 if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD ]; then
     log "repo is mid rebase/merge - manual attention required"
-    alert_once "mid-rebase-merge" "bitcoin autosync: /opt/bitcoin is mid rebase/merge. Fix manually; autosync paused."
+    alert_once "mid-rebase-merge" "nasdaq autosync: $NASDAQ_DIR is mid rebase/merge. Fix manually; autosync paused."
     exit 1
 fi
 
 git config user.email >/dev/null 2>&1 || git config user.email "autosync@$(hostname)"
-git config user.name  >/dev/null 2>&1 || git config user.name  "bitcoin-autosync"
+git config user.name  >/dev/null 2>&1 || git config user.name  "nasdaq-autosync"
 export GIT_TERMINAL_PROMPT=0
 
 DATA_MSG="no new data"
@@ -132,14 +111,14 @@ REMOTE_SHA=$(git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || echo "")
 NEED_MERGE=0
 if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
     if git merge-base --is-ancestor "$REMOTE_SHA" HEAD 2>/dev/null; then
-        : # local ahead (data commit) - phase 3 will push
+        :
     else
         NEED_MERGE=1
     fi
 fi
 
 if [ "$NEED_MERGE" = "1" ]; then
-    if ! git diff --quiet -- engine.py trade_filter.py dashboard.py tools/ 2>/dev/null; then
+    if ! git diff --quiet -- engine.py trade_filter.py dashboard.py pressure.py tools/ 2>/dev/null; then
         DEPLOY_MSG="SKIPPED - local code edits detected on server (hand-edits are not supported); manual pull needed"
         log "$DEPLOY_MSG"
     elif [ "$AUTO_DEPLOY" != "1" ]; then
@@ -148,7 +127,7 @@ if [ "$NEED_MERGE" = "1" ]; then
     else
         CODE_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- '*.py' | grep -c . || true)
         CORE_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- engine.py trade_filter.py | grep -c . || true)
-        DASH_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- dashboard.py | grep -c . || true)
+        DASH_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- dashboard.py pressure.py | grep -c . || true)
         SVC=$(detect_service 'engine\.py' "$ENGINE_SERVICE" || true)
         PRE_MERGE=$(git rev-parse HEAD)
 
@@ -173,7 +152,7 @@ if [ "$NEED_MERGE" = "1" ]; then
 
         SMOKE="not run (no code change)"
         if [ "$MERGE_RC" = "0" ] && [ "$SMOKE_GATE" = "1" ] && [ "$CODE_CHANGED" -gt 0 ]; then
-            if python3 tools/smoke_test.py >/tmp/bitcoin_autosync_smoke.log 2>&1; then
+            if python3 tools/smoke_test.py >/tmp/nasdaq_autosync_smoke.log 2>&1; then
                 SMOKE="ok"
             else
                 SMOKE="FAIL"
@@ -197,7 +176,7 @@ if [ "$NEED_MERGE" = "1" ]; then
                 systemctl start "$SVC" >/dev/null 2>&1 || DEPLOY_MSG="$DEPLOY_MSG; FAILED to start $SVC"
                 sleep 20
                 if systemctl is-active --quiet "$SVC" 2>/dev/null; then
-                    if [ -z "$(find status.json -mmin -3 2>/dev/null)" ]; then
+                    if [ -z "$(find status.json -mmin -20 2>/dev/null)" ]; then
                         DEPLOY_MSG="$DEPLOY_MSG; engine active but status.json looks STALE"
                     fi
                 else
@@ -231,11 +210,11 @@ if ! git push "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
 fi
 log "push: $PUSH_MSG"
 
-# --- phase 4: integrity + stats --------------------------------------------------
+# --- phase 4: integrity + stats ------------------------------------------------
 CHECK_MSG="not run"
-python3 tools/check_data.py >/tmp/bitcoin_autosync_check.log 2>&1
+python3 tools/check_data.py >/tmp/nasdaq_autosync_check.log 2>&1
 CHECK_RC=$?
-CHECK_MSG=$(grep -E '^== result' /tmp/bitcoin_autosync_check.log | tail -n1 | sed 's/^== result: //')
+CHECK_MSG=$(grep -E '^== result' /tmp/nasdaq_autosync_check.log | tail -n1 | sed 's/^== result: //')
 if [ -z "$CHECK_MSG" ]; then
     CHECK_MSG="check_data FAILED to run (rc=$CHECK_RC)"
 fi
@@ -244,30 +223,19 @@ if [ "$CHECK_RC" != "0" ]; then
 🚨 check_data: $CHECK_MSG - start a review session"
 fi
 
-# --- phase 4b: handoff freshness (ADVISORY - never blocks a deploy) -------------
-# docs/HANDOFF.md carries a machine-checked snapshot block; tools/handoff_check.py
-# recomputes it from the data files this script just committed. A stale handoff
-# is how a new session ends up retuning on three-day-old numbers, so the verdict
-# rides along in the digest. It deliberately does NOT touch $EXTRA: at four runs
-# an hour that would nag the same unfixed doc all day, and quiet mode would never
-# settle. Fix it with: python3 tools/handoff_check.py --update
+# --- phase 4b: handoff freshness (ADVISORY) ------------------------------------
 HANDOFF_MSG="not run"
 if [ -f tools/handoff_check.py ] && [ -f docs/HANDOFF.md ]; then
-    if python3 tools/handoff_check.py --quiet >/tmp/bitcoin_autosync_handoff.log 2>&1; then
-        HANDOFF_MSG=$(tail -n1 /tmp/bitcoin_autosync_handoff.log)
+    if python3 tools/handoff_check.py --quiet >/tmp/nasdaq_autosync_handoff.log 2>&1; then
+        HANDOFF_MSG=$(tail -n1 /tmp/nasdaq_autosync_handoff.log)
     else
-        HANDOFF_MSG=$(tail -n1 /tmp/bitcoin_autosync_handoff.log)
+        HANDOFF_MSG=$(tail -n1 /tmp/nasdaq_autosync_handoff.log)
         [ -z "$HANDOFF_MSG" ] && HANDOFF_MSG="handoff_check failed to run"
     fi
     log "handoff: $HANDOFF_MSG"
 fi
 
-# --- phase 4c: XM logger liveness (ADVISORY - never blocks a deploy) -------------
-# tools/xm_quote_report.py --quiet prints ONE line: OK / STALE / not collecting yet, plus the
-# Stage B-i clock (complete days and weekends of the >= 14 days incl. 2 weekends). A dead
-# sidecar silently wastes days of that clock, so STALE raises ONE alert - the text is kept
-# free of changing numbers on purpose so alert_once's dedupe holds and a stuck logger cannot
-# re-flood the chat every 15 minutes. "not collecting yet" (not installed) never alerts.
+# --- phase 4c: XM logger liveness (ADVISORY) -----------------------------------
 XM_MSG="not run"
 if [ -f tools/xm_quote_report.py ]; then
     XM_MSG=$(python3 tools/xm_quote_report.py --quiet 2>/dev/null | tail -n1)
@@ -276,7 +244,7 @@ if [ -f tools/xm_quote_report.py ]; then
     case "$XM_MSG" in
         "xm logger: STALE"*)
             EXTRA="$EXTRA
-⚠️ XM quote logger stopped writing - check: systemctl status mt5quotes-btc" ;;
+⚠️ XM quote logger stopped writing - check: systemctl status mt5quotes-nasdaq" ;;
     esac
 fi
 
@@ -296,18 +264,6 @@ PYEOF
 log "done. data=[$DATA_MSG] deploy=[$DEPLOY_MSG] check=[$CHECK_MSG] handoff=[$HANDOFF_MSG] xm=[$XM_MSG]"
 
 # --- phase 5: notification policy ----------------------------------------------
-# always  : digest every run (~96/day at the 15-min cron) - the original flood
-# quiet   : only when something changed. Barely helps on BTC: a new M5 bar
-#           lands every 5 minutes, so "data changed" is the normal case, not
-#           an event - quiet still fires almost every run.
-# alerts  : Sends only (a) a deploy or an incident / non-routine state CHANGE -
-#           identical repeats are deduped via ALERT_STAMP so a stuck failure
-#           cannot re-flood, and a clean run re-arms it - and (b) ONE "(daily)"
-#           summary digest per UTC day so the bot keeps a heartbeat.
-# off     : DEFAULT. Never message. Everything still lands in the log file; the
-#           dashboard's Journal tab holds the engine's event log instead.
-# Stamp files live in /tmp, so a reboot can repeat one digest at worst.
-# Unknown values fall back to "always" behaviour.
 SEND=1
 DAILY_TAG=""
 if [ "$NOTIFY" = "off" ]; then
@@ -326,7 +282,7 @@ elif [ "$NOTIFY" = "alerts" ]; then
             printf '%s' "$CUR_STATE" > "$ALERT_STAMP" 2>/dev/null || true
         fi
     else
-        rm -f "$ALERT_STAMP" 2>/dev/null || true    # routine again - re-arm
+        rm -f "$ALERT_STAMP" 2>/dev/null || true
     fi
     if [ "$SEND" = "0" ] && [ "$(cat "$DAILY_STAMP" 2>/dev/null)" != "$(date -u '+%Y-%m-%d')" ]; then
         SEND=1
@@ -337,7 +293,7 @@ fi
 log "notify: policy=$NOTIFY send=$SEND"
 
 if [ "$SEND" = "1" ]; then
-    tg "🤖 bitcoin autosync${DAILY_TAG} — $(date -u '+%m-%d %H:%M') UTC
+    tg "🤖 nasdaq autosync${DAILY_TAG} — $(date -u '+%m-%d %H:%M') UTC
 📦 data: $DATA_MSG (push: $PUSH_MSG)
 🚀 deploy: $DEPLOY_MSG
 🩺 integrity: $CHECK_MSG

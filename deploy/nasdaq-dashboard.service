@@ -1,0 +1,23 @@
+# Nasdaq-100 (US100Cash) Flask Dashboard systemd unit (port 6001)
+#
+# Install:
+#   sudo cp /opt/nasdaq/deploy/nasdaq-dashboard.service /etc/systemd/system/nasdaq-dashboard.service
+#   sudo sed -i "s/YOUR_LINUX_USER/$USER/g" /etc/systemd/system/nasdaq-dashboard.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nasdaq-dashboard
+
+[Unit]
+Description=Nasdaq-100 (US100Cash) M15 Web Dashboard (port 6001)
+After=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/nasdaq
+Environment=NASDAQ_DATA_DIR=/opt/nasdaq
+ExecStart=/opt/nasdaq/venv/bin/python /opt/nasdaq/dashboard.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

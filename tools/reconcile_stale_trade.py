@@ -57,7 +57,7 @@ ROOT = os.path.dirname(HERE)
 
 def read_lot_size():
     """Read LOT_SIZE straight from engine.py so the reconciler cannot drift from
-    the engine's own PnL scaling. Falls back to 0.01 if engine.py is unreadable."""
+    the engine's own PnL scaling. Falls back to 0.10 if engine.py is unreadable."""
     try:
         txt = open(os.path.join(ROOT, "engine.py"), encoding="utf-8").read()
         m = re.search(r"^LOT_SIZE\s*=\s*([0-9]*\.?[0-9]+)", txt, re.M)
@@ -65,7 +65,7 @@ def read_lot_size():
             return float(m.group(1))
     except Exception:
         pass
-    return 0.01
+    return 0.10
 
 
 LOT_SIZE = read_lot_size()

@@ -41,7 +41,7 @@ LOG = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "forward_test_log
 TRADES = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "trades.csv")
 
 LOOKBACK = 20          # dynamic floor/ceiling lookback (engine LOOKBACK_PERIOD)
-FLOOR_BUFFER_PCT = 0.0015  # engine FLOOR_BUFFER_PCT
+FLOOR_BUFFER_PCT = 0.0012  # engine FLOOR_BUFFER_PCT (US100Cash)
 K_FAST = 2 / (50 + 1)  # EMA50 smoothing (to reconstruct post-update values)
 
 
@@ -108,6 +108,9 @@ def load_trades():
 def main():
     log = load_log()
     trades = load_trades()
+    if not log or not trades:
+        print(f"validate_gates: {len(trades)} trades, {len(log)} M15 bars - nothing to validate yet.")
+        return
     stamps = [r["dt"] for r in log]
 
     report = []

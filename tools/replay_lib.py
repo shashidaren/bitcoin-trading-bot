@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """
-Shared replay core for the BTC analysis tools - ONE copy of every walk rule.
+Shared replay core for the Nasdaq-100 (US100Cash) M15 analysis tools.
 
-Why this module exists: gold's 2026-09-15 review found that its sequence-aware
-replay had the bar extremes inverted for SELLs, so shorts "fell back to their
-actual outcome" and the tool silently validated itself. Duplicated walk logic
-in three tools is what allowed the bug to survive. New BTC tools must import
-the walk from here instead of re-implementing it, and `tools/smoke_test.py`
-Scenario I locks the SELL direction with a synthetic bar path.
-
-Conventions (all BTC):
-  - M5 bars, log rows are stamped at the bar's CLOSE (row T covers [T-5m, T)).
+Conventions (US100Cash on XM):
+  - M15 bars (CANDLE_SECONDS = 900), log rows stamped at bar CLOSE (row T covers [T-15m, T)).
     A signal at row i enters at row i's close, so the walk starts at row i+1.
   - Geometry: SL = entry -/+ ATR_SL_MULT*ATR, TP = entry +/- ATR_TP_MULT*ATR
     (RR 1:2, breakeven decisive WR = 33.3%). Money = price distance * LOT_SIZE.
-  - 1R in price units = ATR_SL_MULT*ATR; in dollars = 1R * LOT_SIZE.
-  - Exit domain on BTC is {SL, TP}: no BE ratchet, no time stop. The walk
-    supports a hypothetical BE trigger (RB) so the gold candidate can be
-    measured on BTC data before anyone implements it.
-  - Within one bar that touches both levels, the STOP is assumed first
-    (conservative). The live engine resolves exits on ticks, so an M5 walk
-    cannot reproduce it exactly - `validate_against_actual()` measures how far
-    off it is, and every tool prints that number before its grids.
+  - At LOT_SIZE = 0.10 on US100Cash (contract size = 1.0), 1 index point = $0.10.
+  - Within one bar that touches both levels, STOP wins (conservative).
 
 Read-only helpers: nothing in this module writes to disk.
 """
@@ -29,48 +16,33 @@ import csv
 import math
 from datetime import datetime, timedelta
 
-# --- engine/trade_filter constants (keep in sync with engine.py) -------------
+# --- engine/trade_filter constants (keep in sync with engine.py & trade_filter.py) ---
 LOOKBACK_PERIOD = 20
-FLOOR_BUFFER_PCT = 0.0015
+FLOOR_BUFFER_PCT = 0.0012
 WICK_RATIO_TARGET = 0.15
 RSI_MIN, RSI_MAX = 40.0, 70.0
-MAX_BELOW_EMA_ATR = 0.30
-EMA_SLOPE_LOOKBACK = 30
+MAX_BELOW_EMA_ATR = 0.50
+EMA_SLOPE_LOOKBACK = 12
 ATR_SL_MULT = 2.0
 ATR_TP_MULT = 4.0
-LOT_SIZE = 0.01
-CANDLE_SECONDS = 300
-MIN_ATR_PERCENT = 0.0001      # trade_filter.MIN_ATR_PERCENT
-MAX_ATR_PERCENT = 0.0060      # trade_filter.MAX_ATR_PERCENT
+LOT_SIZE = 0.10
+CANDLE_SECONDS = 900
+MIN_ATR_PERCENT = 0.0004      # trade_filter.MIN_ATR_PERCENT
+MAX_ATR_PERCENT = 0.0080      # trade_filter.MAX_ATR_PERCENT
 SL_COOLDOWN_BASE_MINUTES = 30
 SL_COOLDOWN_ESCALATED_MINUTES = 60
 MAX_DAILY_LOSSES = 3
 
-# The port that installed the regime gates / SELL funnel (first post-port trade).
-# Era slices ("new regime") start here so that historical numbers stay
-# comparable with every review already written.
-PORT_DEPLOY = datetime(2026, 9, 9, 2, 25)
-
-# When those gates were ACTUALLY taking trades - use this, not PORT_DEPLOY, for
-# anything that re-applies an entry gate to ledger rows. Evidence that the gated
-# code went live a day after PORT_DEPLOY: the ledger's first SELL is 09-10 09:05
-# (the SELL funnel arrived with the port), and two of the four 09-09 BUY rows sit
-# on the adverse side of the near-EMA gate (0.57 and 3.11 ATR) that would have
-# blocked them. tools/check_data.py's entry-gate conformance block polices the
-# boundary and carries a copy of this date (keep the two in sync).
-GATES_DEPLOY = datetime(2026, 9, 10, 0, 0)
-
-# The ledger's second geometry change: rows before this ran SL 1.5xATR / TP
-# 2.5xATR (RR 1:1.67) with candle-era fills that overshoot the logged stop; rows
-# from here ran the live 2x/4x rule. The two 09-03 rows coincidentally show
-# 1.5/2.5 multiples because their lot size was 100x too large.
-GEOM2_DEPLOY = datetime(2026, 9, 6, 17, 49)
+# Nasdaq (US100Cash M15) restructure cutover date (BTC era archived in archive/btc/).
+PORT_DEPLOY = datetime(2026, 10, 24, 0, 0)
+GATES_DEPLOY = datetime(2026, 10, 24, 0, 0)
+GEOM2_DEPLOY = datetime(2026, 10, 24, 0, 0)
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def wilson(w, n, z=1.96):
-    """95% CI on a proportion. n must be the DECISIVE count (no scratches here)."""
+    """95% CI on a proportion. n must be the DECISIVE count."""
     if n <= 0:
         return 0.0, 0.0
     p = w / n
@@ -81,7 +53,7 @@ def wilson(w, n, z=1.96):
 
 
 def fnum(x):
-    """Comma-tolerant float (58 of the first 61 ledger rows are comma-grouped)."""
+    """Comma-tolerant float."""
     try:
         return float(str(x).replace(",", "").replace("%", ""))
     except (TypeError, ValueError):
@@ -94,12 +66,7 @@ def r_money(atr, sl_mult=ATR_SL_MULT, lot=LOT_SIZE):
 
 
 def planned_rr(t):
-    """Reward:risk the row was opened with, from its own logged SL/TP levels.
-
-    The ledger is NOT single-geometry: every row logged before 2026-09-06 17:49
-    UTC ran SL 1.5xATR / TP 2.5xATR (RR 1:1.67), the 2x/4x geometry starts with
-    row 09-06 17:49. Never assume 2R per win across a mixed sample.
-    """
+    """Reward:risk the row was opened with, from its own logged SL/TP levels."""
     d = 1 if t["side"] == "BUY" else -1
     risk = d * (t["entry"] - t["sl"])
     reward = d * (t["tp"] - t["entry"])
@@ -115,7 +82,7 @@ def geometry(t):
 
 
 def realized_r(t):
-    """What the row actually did, in R, at LOT_SIZE - the honest per-trade unit."""
+    """What the row actually did, in R, at LOT_SIZE."""
     risk = abs(t["entry"] - t["sl"])
     if risk <= 0 or t.get("profit") is None:
         return None
@@ -130,14 +97,7 @@ def parse_ts(s):
 
 
 def load_trades(path, since=None):
-    """Ledger rows -> dicts with direction-aware geometry.
-
-    Defensive ratchet handling: if |Entry_Price - Stop_Loss| ~ 0 the row logs a
-    stop that was moved to entry (gold's BE ratchet). BTC has no BE yet, so this
-    only matters if one is ever adopted - but every R-multiple would divide by
-    zero then, and `Exit_Reason` is not a reliable marker (gold's engine logs the
-    LIVE stop, so armed winners look like scratches too). Key on geometry.
-    """
+    """Ledger rows -> dicts with direction-aware geometry."""
     out = []
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
@@ -150,7 +110,7 @@ def load_trades(path, since=None):
             if None in (et, xt, entry, sl, tp, atr):
                 continue
             ratcheted = abs(entry - sl) < 1e-9
-            if ratcheted:  # rebuild the original geometry from ATR
+            if ratcheted:
                 d = 1 if side == "BUY" else -1
                 sl, tp = entry - d * ATR_SL_MULT * atr, entry + d * ATR_TP_MULT * atr
             out.append(dict(
@@ -168,11 +128,7 @@ def load_trades(path, since=None):
 
 
 def load_bars(path, with_indicators=False):
-    """Price-log rows -> [{dt,o,h,l,c}] sorted by timestamp.
-
-    with_indicators=True also loads the logged (pre-update) indicator columns
-    needed by enrich_log()/signal_at() for the signal census.
-    """
+    """Price-log rows -> [{dt,o,h,l,c}] sorted by timestamp."""
     bars = []
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
@@ -191,14 +147,7 @@ def load_bars(path, with_indicators=False):
 
 
 def enrich_log(rows):
-    """Reconstruct post-update EMA50/ATR/RSI + floor/ceiling per log row.
-
-    The logged EMA_50/ATR/RSI are PRE-update for that row; the engine gates on
-    the post-update values, so signals cannot be re-derived without this step.
-    Returns the reconstruction-quality stats (should be ~100% - if it is not,
-    every signal-census number in the reports is suspect).
-    """
-    n = len(rows)
+    """Reconstruct post-update EMA50/ATR/RSI + floor/ceiling per log row."""
     for i, row in enumerate(rows):
         prior = rows[max(0, i - LOOKBACK_PERIOD):i]
         if len(prior) == LOOKBACK_PERIOD:
@@ -242,12 +191,7 @@ def enrich_log(rows):
 
 
 def signal_at(rows, i):
-    """Full-signal flags (buy, sell) for log row i under the CURRENT gate stack.
-
-    Mirrors engine.evaluate_candle: floor/ceiling from the prior 20 bars,
-    pre-update trend columns from the row itself, post-update slope/near-EMA/
-    RSI/ATR gates, and trade_filter's %-based ATR floor.
-    """
+    """Full-signal flags (buy, sell) for log row i under the CURRENT gate stack."""
     row = rows[i]
     if any(row.get(k) is None for k in ("o", "h", "l", "c", "r_floor", "r_ceiling",
                                         "post_ema50", "post_atr", "post_rsi")):
@@ -260,7 +204,8 @@ def signal_at(rows, i):
     up_wick = (row["h"] - body_top) / rng
 
     rsi, atr = row["post_rsi"], row["post_atr"]
-    atr_ok = atr / row["c"] > MIN_ATR_PERCENT if row["c"] else False
+    atr_pct = (atr / row["c"]) if row["c"] else 0.0
+    atr_ok = MIN_ATR_PERCENT <= atr_pct <= MAX_ATR_PERCENT
     trend_buy = None not in (row["ema50"], row["ema200"]) and row["ema50"] > row["ema200"]
     trend_sell = None not in (row["ema50"], row["ema200"]) and row["ema50"] < row["ema200"]
     slope_buy = slope_sell = near_buy = near_sell = False
@@ -280,10 +225,7 @@ def signal_at(rows, i):
 
 
 def all_signals(rows, include_pre_port=False):
-    """Every full signal in the price log (cascade-ignorant: one per row, max).
-
-    Returns dicts with i (row index), dt, side, atr, entry, rsi, wick.
-    """
+    """Every full signal in the price log (cascade-ignorant: one per row, max)."""
     out = []
     for i in range(len(rows)):
         if not include_pre_port and rows[i]["dt"] < PORT_DEPLOY:
@@ -304,30 +246,14 @@ def all_signals(rows, include_pre_port=False):
 
 def walk(entry, side, atr, bars, sl_mult=ATR_SL_MULT, tp_mult=ATR_TP_MULT,
          be_trigger=None, horizon_min=None, start_dt=None):
-    """Walk one trade bar-by-bar under a hypothetical exit rule.
-
-    Direction-aware excursions (the gold 09-15 SELL fix): a bar's MOST FAVOURABLE
-    move is max(high-entry, low-entry) for a BUY and the same expression is
-    correct for a SELL only because of the sign flip inside max() - so use
-    hi = max(d*(h-e), d*(l-e)) and lo = min(d*(h-e), d*(l-e)) with d = +-1,
-    never `d*(h-e)` alone (that is the favourable side for BUYs only).
-
-    Returns (outcome, r_multiple, bars_held, exit_dt) with outcome in
-    {TP, SL, BE, TIME}:
-      - TP/SL: level touched (SL first when one bar spans both - conservative);
-      - BE:    hypothetical breakeven ratchet armed at +be_trigger R and the
-               price came back to entry;
-      - TIME:  horizon ended flat -> marked to market at the last close.
-    `be_trigger=None` => no ratchet. `horizon_min=None` => walk to the last bar.
-    """
+    """Walk one trade bar-by-bar under a hypothetical exit rule."""
     d = 1 if side.upper() == "BUY" else -1
     risk = sl_mult * atr
     if risk <= 0:
         return "TIME", 0.0, 0, start_dt
     tp_r = tp_mult * atr / risk
-    stop_r = -1.0                      # in R units; 0.0 once the ratchet arms
+    stop_r = -1.0
     armed = False
-    # horizon is measured from start_dt when given, else from the first bar
     anchor = start_dt if start_dt is not None else (bars[0]["dt"] if bars else None)
     end = (anchor + timedelta(minutes=horizon_min)) if (horizon_min is not None and anchor) else None
     held = 0
@@ -341,7 +267,6 @@ def walk(entry, side, atr, bars, sl_mult=ATR_SL_MULT, tp_mult=ATR_TP_MULT,
         last_close = b["c"]
         hi_r = max(d * (b["h"] - entry), d * (b["l"] - entry)) / risk
         lo_r = min(d * (b["h"] - entry), d * (b["l"] - entry)) / risk
-        # ratchet arms on the favourable excursion, then the stop sits at entry
         if be_trigger is not None and not armed and hi_r >= be_trigger - 1e-9:
             armed = True
             stop_r = 0.0
@@ -355,12 +280,7 @@ def walk(entry, side, atr, bars, sl_mult=ATR_SL_MULT, tp_mult=ATR_TP_MULT,
 
 
 def walk_trade(t, bars, **kw):
-    """Walk a ledger trade with the LIVE geometry (logged SL/TP levels).
-
-    The logged levels are used for the baseline row of any grid so it can be
-    compared against what the engine actually did.
-    """
-    d = 1 if t["side"] == "BUY" else -1
+    """Walk a ledger trade with the LIVE geometry (logged SL/TP levels)."""
     risk = abs(t["entry"] - t["sl"])
     seg = [b for b in bars if b["dt"] > t["et"]]
     if kw.get("horizon_min") is not None:
@@ -370,19 +290,9 @@ def walk_trade(t, bars, **kw):
 
 
 def cascade(items, bars, sl_mult=ATR_SL_MULT, tp_mult=ATR_TP_MULT, be_trigger=None,
-            horizon_min=240, cooldown_min=SL_COOLDOWN_BASE_MINUTES,
+            horizon_min=720, cooldown_min=SL_COOLDOWN_BASE_MINUTES,
             escalated_min=SL_COOLDOWN_ESCALATED_MINUTES, daily_halt=None):
-    """Sequence-aware replay: the simulated book can only hold one trade.
-
-    An item is taken only if the simulated book is free and the SL cooldown
-    (30 min, escalating to 60 after 2 consecutive simulated SLs) has elapsed.
-    Without this, a looser exit looks better than it is: held positions block
-    the later signals that the live book actually kept trading.
-
-    `items` must be dicts with dt/side/atr/entry (signals) or trades (walk_trade
-    style: et/side/atr/entry). Returns (taken, skipped, results) where results
-    carry outcome/r/exit_dt/entry_dt.
-    """
+    """Sequence-aware replay: one position at a time + escalating SL cooldown."""
     taken, skipped, results = 0, 0, []
     busy_until = None
     streak = 0

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Read-only BTC tape-pressure context for the dashboard.
+"""Read-only Nasdaq (US100Cash) tape-pressure context for the dashboard.
 
-This module describes the last 60 closed M5 candles. It is deliberately not
-imported by engine.py or trade_filter.py: pressure is not an entry/exit gate.
-The composite includes EMA trend and slope, which are already strategy gates,
-so a high/low reading may simply restate the side the engine is allowed to take.
-The flow input is the feed's tick-count volume proxy, not exchange BTC volume.
+This module describes the last 60 closed M15 candles (15 trading hours). It is
+deliberately not imported by engine.py or trade_filter.py: pressure is not an
+entry/exit gate. The composite includes EMA trend and slope, which are already
+strategy gates, so a high/low reading may simply restate the side the engine is
+allowed to take. The flow input is the feed's tick-count volume proxy, not
+exchange futures contract volume.
 
 The calculations are transparent and return each component as well as the
 combined buy/sell shares. Strategy constants below are mirrored from engine.py;
@@ -20,12 +21,12 @@ from datetime import datetime
 from statistics import median
 
 # Mirrored strategy constants (source of truth: engine.py).
-PRESSURE_WINDOW = 60                # 60 closed M5 candles = five hours
+PRESSURE_WINDOW = 60                # 60 closed M15 candles = 15 trading hours
 LOOKBACK_PERIOD = 20
 WICK_RATIO_TARGET = 0.15
-FLOOR_BUFFER_PCT = 0.0015
-EMA_SLOPE_LOOKBACK = 30             # 30 M5 bars = 150 minutes
-MAX_BELOW_EMA_ATR = 0.30
+FLOOR_BUFFER_PCT = 0.0012
+EMA_SLOPE_LOOKBACK = 12             # 12 M15 bars = 3 hours
+MAX_BELOW_EMA_ATR = 0.50
 RSI_MIN = 40.0
 RSI_MAX = 70.0
 ATR_SL_MULT = 2.0
@@ -39,9 +40,9 @@ PRESSURE_WEIGHTS = {
     "rsi": 0.15,
 }
 
-DATA_DIR = os.getenv("BTC_DATA_DIR", "/opt/bitcoin")
-LOG_FILE_PATH = os.getenv("BTC_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
-TRADES_FILE_PATH = os.getenv("BTC_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
+DATA_DIR = os.getenv("NASDAQ_DATA_DIR", "/opt/nasdaq")
+LOG_FILE_PATH = os.getenv("NASDAQ_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
+TRADES_FILE_PATH = os.getenv("NASDAQ_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
 
 
 def parse_float(value):
@@ -76,13 +77,7 @@ def read_rows(path):
 
 
 def trade_summary(trades):
-    """Summarize closed ledger outcomes for display, not execution state.
-
-    The engine's status.json counters can lag or disagree with trades.csv after
-    a manual reconciliation. The ledger is the source of truth for closed rows;
-    this helper lets the dashboard show those counts without mutating either
-    file or changing the engine's in-memory state.
-    """
+    """Summarize closed ledger outcomes for display, not execution state."""
     wins = losses = 0
     for trade in trades:
         reason = (trade.get("Exit_Reason") or "").strip().upper()
@@ -108,12 +103,7 @@ def _clip01(x):
 
 
 def pressure(rows, window=PRESSURE_WINDOW):
-    """Build a weighted, descriptive buy/sell pressure reading.
-
-    Returns None until all required price/indicator history is present. Each
-    component exposes its raw value, buy-share, weight and weighted contribution
-    so the combined percentage is auditable. `Volume` is tick count in this repo.
-    """
+    """Build a weighted, descriptive buy/sell pressure reading on M15 bars."""
     if window < 2 or len(rows) < max(window + 1, EMA_SLOPE_LOOKBACK + 1):
         return None
 
@@ -126,13 +116,11 @@ def pressure(rows, window=PRESSURE_WINDOW):
     i = len(rows) - 1
     atr, close = atrs[i], closes[i]
     slope_i = i - EMA_SLOPE_LOOKBACK
-    # Do not manufacture neutral component values during indicator warm-up.
     if (atr is None or atr <= 0 or close is None or ema50[i] is None
             or ema200[i] is None or slope_i < 0 or ema50[slope_i] is None
             or rsis[i] is None):
         return None
 
-    # Tick-count-weighted signed candle body (bounded by -1 and +1).
     flow_num = flow_den = 0.0
     for j in range(i - window + 1, i + 1):
         o, h, l, c = opens[j], highs[j], lows[j], closes[j]
@@ -164,7 +152,7 @@ def pressure(rows, window=PRESSURE_WINDOW):
     }
     component_defs = [
         ("flow", "Tick-weighted candle flow", flow, f"{flow:+.2f}", "signed body (−1 to +1)"),
-        ("momentum", f"{window}-bar momentum", momentum, f"{momentum:+.2f}", "ATR"),
+        ("momentum", f"{window}-bar M15 momentum", momentum, f"{momentum:+.2f}", "ATR"),
         ("trend", "EMA50 vs EMA200", trend, f"{trend:+.2f}", "ATR"),
         ("slope", f"EMA50 {EMA_SLOPE_LOOKBACK}-bar slope", slope, f"{slope:+.2f}", "ATR"),
         ("rsi", "RSI posture", rsi, f"{rsi:.1f}", "RSI points"),
@@ -205,7 +193,7 @@ def pressure(rows, window=PRESSURE_WINDOW):
 
 
 def location(rows):
-    """Report current close relative to the engine's previous-20-bar levels."""
+    """Report current close relative to the engine's previous-20-bar M15 levels."""
     if len(rows) < LOOKBACK_PERIOD + 1:
         return None
     current = rows[-1]
@@ -232,12 +220,7 @@ def location(rows):
 
 
 def calibrate(log_rows, trades):
-    """Descriptive per-side pressure readings at the last logged bar pre-entry.
-
-    This makes no threshold/bucket claim. We deliberately use only a log bar
-    strictly earlier than the trade's entry timestamp, avoiding the entry bar.
-    P/L here is the ledger's gross Profit (the ledger does not subtract costs).
-    """
+    """Descriptive per-side pressure readings at the last logged M15 bar pre-entry."""
     parsed_log = [(parse_ts(row.get("Timestamp")), row) for row in log_rows]
     parsed_log = [(ts, row) for ts, row in parsed_log if ts is not None]
     output = {"BUY": [], "SELL": []}

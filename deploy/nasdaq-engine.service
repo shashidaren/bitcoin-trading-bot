@@ -1,0 +1,27 @@
+# Nasdaq-100 (US100Cash) M15 Trading Engine systemd unit
+#
+# Install:
+#   sudo cp /opt/nasdaq/deploy/nasdaq-engine.service /etc/systemd/system/nasdaq-engine.service
+#   sudo sed -i "s/YOUR_LINUX_USER/$USER/g" /etc/systemd/system/nasdaq-engine.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nasdaq-engine
+#   journalctl -u nasdaq-engine -f
+
+[Unit]
+Description=Nasdaq-100 (US100Cash) M15 Auto-Trading Engine
+After=network-online.target mt5feed-nasdaq.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/nasdaq
+Environment=NASDAQ_DATA_DIR=/opt/nasdaq
+Environment=DATA_SOURCE=MT5
+Environment=SYMBOL_MT5=US100Cash
+ExecStart=/opt/nasdaq/venv/bin/python /opt/nasdaq/engine.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -14,14 +14,20 @@ dist/
 build/
 
 # === Trading Bot Runtime Data ===
-# trades.csv and skipped_trades.csv are intentionally tracked
-# so we can review results from the repo
+# trades.csv, forward_test_log.csv, skipped_trades.csv, status.json and xm_data/
+# are intentionally tracked so autosync commits them and reviews work from git.
 *.log
 *.txt
 *.sqlite
 *.db
 state.json
 portfolio_state.pkl
+journal.csv
+mt5_last_candle.json
+mt5_warmup_candles.json
+mt5_bridge/
+HALT
+MT5_ORDER_HALT
 
 # === OS & Editor Files ===
 .DS_Store
@@ -34,6 +40,8 @@ Thumbs.db
 # === Wine / MT5 Local Data (if any symlinks exist here) ===
 drive_c/
 *.tmp
+*.tmp-*
+*.bak-*
 
 # === One-off reconciler backups (tools/reconcile_stale_trade.py) ===
 backups/
