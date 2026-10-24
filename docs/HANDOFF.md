@@ -24,9 +24,8 @@
 
 ## 1. Executive State (Read First)
 
-On **2026-10-24**, the repository was restructured from Bitcoin (`BTCUSD` M5 under `/opt/bitcoin`) to auto-trade XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles under **`/opt/nasdaq`**.
+This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles under **`/opt/nasdaq`** (cutover date **2026-10-24**; all legacy data discarded).
 
-- **Historical Bitcoin era archived:** All prior BTC ledgers, logs, and review notes live untouched in `archive/btc/` (`archive/btc/trades_btc.csv`, `archive/btc/forward_test_log_btc.csv`, `archive/btc/skipped_trades_btc.csv`, `archive/btc/status_btc.json`, and `archive/btc/docs/`). Never pool BTC rows with `US100Cash` rows.
 - **Day-0 Nasdaq ledger:** Root `trades.csv`, `forward_test_log.csv`, `skipped_trades.csv`, and `status.json` start clean at **$200.00** equity (`0W/0L`, `symbol: "US100Cash"`, `timeframe: "M15"`).
 - **Execution mode:** `TRADING_MODE = "FORWARD_TEST"` and `DATA_SOURCE = "MT5"` by default. Both the direct `MetaTrader5` path and the Linux Wine atomic file-bridge (`tools/mt5_executor.py` via `/opt/nasdaq/mt5_bridge/`) are implemented and verified (`11/11` checks clean in `tools/live_path_probe.py`), with `MT5_EXEC_ENABLED=0` and `MT5_EXEC_ALLOW_REAL=0` locked off until Stage B demo validation (`docs/START-LEVER1.md`) completes.
 
@@ -57,7 +56,7 @@ On **2026-10-24**, the repository was restructured from Bitcoin (`BTCUSD` M5 und
 
 ## 3. Market Hours & Session Blackouts (`America/New_York`)
 
-Unlike Bitcoin (24/7), `US100Cash` follows the CME Globex Nasdaq-100 session. All schedule checks in `trade_filter.py` convert UTC to `America/New_York` (`zoneinfo.ZoneInfo`) so US DST shifts never misalign the cash open or rollover break:
+`US100Cash` follows the CME Globex Nasdaq-100 session. All schedule checks in `trade_filter.py` convert UTC to `America/New_York` (`zoneinfo.ZoneInfo`) so US DST shifts never misalign the cash open or rollover break:
 
 1. **Market Quiet / Closed (`is_market_quiet`):**
    - **Weekend:** Friday `16:55 ET` through Sunday `18:10 ET`
@@ -125,7 +124,7 @@ Before switching `MT5_EXEC_ALLOW_REAL=1` on a real-money XM account (`docs/START
 
 ## 8. Key Reference Docs
 
-- `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` — BTC -> `US100Cash` M15 migration & VPS cutover guide
+- `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` — `US100Cash` M15 architecture & VPS cutover guide
 - `docs/START-LEVER1.md` — Wine `mt5_executor.py` Stage A/B/C live execution protocol
 - `docs/XM-LOGGER.md` — Read-only `mt5_quotes.py` & `xm_quote_report.py` reference
 - `docs/AUTOSYNC.md` — Unattended 15-min data sync & smoke-gated auto-deploy

@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
 """
-Win-rate report for BTC - "why is the win rate what it is?" (port of gold's
-win_rate_report.py, adapted to M5 / RR 1:2 / exit domain {SL, TP}).
+Win-rate report for US100Cash M15 - "why is the win rate what it is?" (RR 1:2,
+exit domain {SL, TP}).
 
-Read-only. Run after every data drop, next to the other tools:
+Read-only. Run after every data drop:
 
-    python3 tools/win_rate_report.py [--root DIR] [--spread 0.40]
-
-    --spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40
-    per trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9). Every P/L column below is
-    net of it, and docs/HANDOFF.md quotes these numbers net unless marked gross.
-
-Sections
-  1. Baseline: W/L, decisive win rate with a Wilson 95% CI, P&L, expectancy in
-     $ and in R, and the breakeven WR implied by the live 1:2 geometry.
-  2. Eras: pre-port (before the 2026-09-09 deploy) vs new regime vs last
-     N trades - never average a regime change into "the" win rate.
-  3. Side / day / hour breakdowns (BUY and SELL are different strategies).
-  4. How long each outcome actually takes.
-  5. Exit-geometry sanity grid (compact; full version in tools/pathwalk_sims.py).
-  6. Signal census: every reconstructed signal in the price log, walked with the
-     live geometry - the entry stream's own hit rate, independent of the gates.
-  7. Queued filter candidates (MIN_ATR, RSI floor, wick, side, hours, ATR%-by-day)
-     scored keep-vs-skip, WITH the day-confound control: on 7 days of data every
-     feature split is partly a split on WHICH DAYS the feature selected.
-  8. Cost sensitivity: the spread level at which the current book stops working.
-
-Data gotchas handled (docs/HANDOFF.md §9): comma-grouped legacy rows, M5 bar
-spacing, log coverage starting 2026-09-07 20:20 UTC, 09-03 sizing outliers,
-Trade_Num resets (stats here are row-based, never keyed on Trade_Num).
+    python3 tools/win_rate_report.py [--root DIR] [--spread 0.25]
 """
 import argparse
 import os

@@ -157,7 +157,6 @@ trade_filter.is_in_blackout = lambda now=None: (False, "")
 
 with redirect_stdout(io.StringIO()):
     eng_a = engine.NasdaqEngine()
-check("A: BitcoinEngine alias points to NasdaqEngine", engine.BitcoinEngine is engine.NasdaqEngine)
 check("A: US100Cash M15 defaults set (900s, 0.10 lot, $0.10/pt)",
       engine.SYMBOL_MT5 == "US100Cash" and engine.CANDLE_SECONDS == 900
       and abs(engine.LOT_SIZE - 0.10) < 1e-9 and abs(engine.CONTRACT_SIZE - 1.0) < 1e-9)

@@ -2,8 +2,7 @@
 """
 Nasdaq-100 Cash Index CFD (US100Cash) M15 Auto-Trading Engine for XM / MetaTrader 5.
 
-Restructured from Bitcoin (archived in archive/btc/) to trade XM's US100Cash on
-15-minute (M15) bars under /opt/nasdaq:
+Deployed on /opt/nasdaq to trade XM's US100Cash on 15-minute (M15) bars:
   - DATA_SOURCE="MT5" default (reads closed M15 bars from tools/mt5_feed.py +
     seeds 250 historical M15 bars on startup from mt5_warmup_candles.json so
     EMA200/EMA50/RSI/ATR are warm immediately without waiting 50 hours).
@@ -1738,10 +1737,6 @@ class NasdaqEngine:
             self.run_mt5_test()
         else:
             self.run_forward_test()
-
-
-# Backward-compatible alias for tools and tests importing BitcoinEngine
-BitcoinEngine = NasdaqEngine
 
 
 if __name__ == "__main__":

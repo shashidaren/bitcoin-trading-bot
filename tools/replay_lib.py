@@ -33,7 +33,7 @@ SL_COOLDOWN_BASE_MINUTES = 30
 SL_COOLDOWN_ESCALATED_MINUTES = 60
 MAX_DAILY_LOSSES = 3
 
-# Nasdaq (US100Cash M15) restructure cutover date (BTC era archived in archive/btc/).
+# Nasdaq (US100Cash M15) Day-0 start date.
 PORT_DEPLOY = datetime(2026, 10, 24, 0, 0)
 GATES_DEPLOY = datetime(2026, 10, 24, 0, 0)
 GEOM2_DEPLOY = datetime(2026, 10, 24, 0, 0)

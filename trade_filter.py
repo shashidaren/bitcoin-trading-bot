@@ -6,7 +6,7 @@ Acts as the final gatekeeper for portfolio/state-level rules.
 (Strategy-level rules like RSI, Wick, Floor/Ceiling, Slope, and Trend are handled
 in engine.py.)
 
-Restructured from Bitcoin to XM Nasdaq-100 Cash Index CFD (US100Cash, M15):
+XM Nasdaq-100 Cash Index CFD (US100Cash, M15) risk & session controls:
   - Escalating SL cooldowns (30m / 60m = 2 / 4 M15 bars)
   - Daily-loss circuit breaker (3 SLs or -$15 realized daily loss in UTC day)
   - DST-aware America/New_York market quiet hours (weekend + 17:00-18:00 ET CME break)

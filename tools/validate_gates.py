@@ -23,7 +23,7 @@ Gates (the ones marked ADOPTED are implemented in engine.py / trade_filter.py):
 Handles both the pre-SELL 15-field rows (all buys) and the current 16-field
 schema with Trade_Type (auto-detected, so it works even on a drifted file).
 
-BTC notes: M5 candles, RR 1:2 (breakeven WR ~33%). Floats parse
+US100Cash notes: M15 candles, RR 1:2 (breakeven WR ~33%). Floats parse
 comma-tolerantly so legacy comma-formatted rows still validate.
 
 Usage: python3 tools/validate_gates.py [log.csv trades.csv]

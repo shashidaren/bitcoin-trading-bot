@@ -1,30 +1,8 @@
 #!/usr/bin/env python3
 """
-Losing-trade analysis for BTC (port of gold's analyze_losers.py, M5 / RR 1:2).
+Losing-trade analysis for US100Cash M15 (RR 1:2, LOT_SIZE 0.10).
 
-What it answers:
-  1. How much heat do winners take, and how far do losers get before dying?
-     (MAE / MFE in R, re-walked on M5 bars.)
-  2. "Losers that were winners first" - the share of losses that reached +xR
-     before reversing. This is the mechanism behind the BE-ratchet question.
-  3. Entry-feature drift: what do winners look like vs losers vs the whole book.
-  4. Realized-R sanity: an SL must cost 1R and a TP must pay 2R at LOT_SIZE
-     0.01; rows that do not are sizing/schema drift (this is the class of bug
-     that produced the two -$197 pre-port trades).
-  5. Stop-width grid: is the 2xATR stop too tight? (complement of the target
-     grid in tools/pathwalk_sims.py)
-
-Counterfactual EXIT questions are deliberately NOT answered here: scoring a
-trade inside the window its actual exit left open cannot see a looser exit
-(gold's 2026-09-15 review §6.3 - its naive table printed "TP 1.5R -> 0.6% win
-rate" against a real 19.4%). Use tools/pathwalk_sims.py or the grids in
-tools/win_rate_report.py, which walk with an explicit horizon.
-
-Usage: python3 tools/analyze_losers.py [--root DIR] [--spread 0.40]
-
---spread is the round-trip cost in $ per trade at LOT_SIZE. The default is 0.0
-(gross) - pass the measured XM BTCUSD cost, $0.40 at 0.01 lot (2026-09-15
-terminal measurement; docs/HANDOFF.md §9), or the P/L columns are optimistic.
+Usage: python3 tools/analyze_losers.py [--root DIR] [--spread 0.25]
 Read-only - writes nothing.
 """
 import argparse

@@ -1,38 +1,10 @@
 #!/usr/bin/env python3
 """
-Sequence-aware exit-rule replay for BTC (port of gold's pathwalk_sims.py).
-
-Answers the "what if the exit were different?" question honestly:
-  - every trade/signal is re-walked bar-by-bar through forward_test_log.csv in
-    TRUE TIME ORDER with its own stop/target levels,
-  - a bar that spans both levels resolves to the STOP (conservative),
-  - the walk never sees the future beyond its horizon, and
-  - rows that end flat at the horizon are marked to market and reported as
-    TIME, never silently replaced by the actual outcome (that fallback is what
-    made gold's pre-review exit table "self-validating" - see its
-    docs/REVIEW-2026-09-15.md §6).
-
-VALIDATION FIRST: the tool walks the trades the engine actually made, inside
-their real exit windows, with the live geometry (SL 2xATR / TP 4xATR) and
-prints the agreement rate. If that row does not reproduce the engine, no other
-row in this file is worth reading.
-
-BTC notes: M5 bars (log rows are stamped at bar close, so the walk starts at
-the next row), exit domain {SL, TP}, no BE ratchet live (the BE grid is a
-candidate measurement only), LOT_SIZE 0.01 => money = price distance x 0.01.
-Legacy ledger rows are comma-grouped and are parsed comma-tolerantly.
+Sequence-aware exit-rule replay for US100Cash M15.
 
 Usage:
-  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.40] [--horizon 240]
-                                 [--census]
-
---spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40 per
-trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9).
-
-Grids:  A) real trades, TP multiple sweep      B) real trades, BE ratchet sweep
-        C) cascade-aware real trades           D) raw signal census (entry stream)
-        E) takeable census through cascade + blackout/daily gates (the honest D)
-Read-only - no files are modified.
+  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.25] [--horizon 720] [--census]
+"""
 """
 import argparse
 import os

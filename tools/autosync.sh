@@ -16,7 +16,7 @@
 # ==============================================================================
 set -uo pipefail
 
-NASDAQ_DIR="${NASDAQ_DIR:-${BTC_DIR:-/opt/nasdaq}}"
+NASDAQ_DIR="${NASDAQ_DIR:-/opt/nasdaq}"
 LOCK_FILE="${LOCK_FILE:-/var/lock/nasdaq-autosync.lock}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"

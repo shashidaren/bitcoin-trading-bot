@@ -2,7 +2,7 @@
 
 Automated intraday structural floor/ceiling rejection trading system for XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles, deployed on Linux (`/opt/nasdaq`) alongside a Wine MetaTrader 5 sidecar stack.
 
-> **Restructured 2026-10-24:** All prior Bitcoin (`BTCUSD` M5) ledgers, price logs, and review notes are preserved in `archive/btc/` (see `docs/NASDAQ-RESTRUCTURE-2026-10-24.md`). Start every session at `docs/HANDOFF.md`.
+> Start every session at `docs/HANDOFF.md`. For server setup and cutover instructions, see `docs/NASDAQ-RESTRUCTURE-2026-10-24.md`.
 
 ---
 
@@ -54,4 +54,4 @@ python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 
 ## Server Cutover (`/opt/nasdaq`)
 
-See `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` for step-by-step commands to migrate `/opt/bitcoin` -> `/opt/nasdaq`, install the `deploy/*.service` systemd units, verify `mt5feed-nasdaq` + `mt5quotes-nasdaq`, and run Stage B demo validation (`docs/START-LEVER1.md`) before arming `LIVE` mode.
+See `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` for step-by-step commands to deploy `/opt/nasdaq`, install the `deploy/*.service` systemd units, verify `mt5feed-nasdaq` + `mt5quotes-nasdaq`, and run Stage B demo validation (`docs/START-LEVER1.md`) before arming `LIVE` mode.

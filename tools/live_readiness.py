@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-live_readiness - "is the BTC book ready for real money?", in numbers.
+live_readiness - "is the US100Cash M15 book ready for real money?", in numbers.
 
 The other tools answer "what did the book do?". This one answers the question
 the handoff keeps deferring: does the forward-test evidence justify risking
@@ -308,7 +308,7 @@ def main():
     # ---- 2. COST -----------------------------------------------------------
     print("\n== 2. COST: how much room is there? ==")
     g_mean = st.mean(gross)
-    print(f"  gross/trade {g_mean:+.3f} => break-even round trip ${g_mean:.2f}/trade (${100 * g_mean:.0f}/BTC at 0.01 lot);"
+    print(f"  gross/trade {g_mean:+.3f} => break-even round trip ${g_mean:.2f}/trade ({10 * g_mean:.1f} pts on US100Cash at 0.10 lot);"
           f" assumed ${sp:.2f} => cover {g_mean / sp:.1f}x" if sp else f"  gross/trade {g_mean:+.3f}")
     row = "  net P/L at spread $/trade:  "
     for s in (0.25, 0.40, 0.60, 0.80, 1.00, 1.50):
