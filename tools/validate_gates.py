@@ -11,10 +11,12 @@ Gates (the ones marked ADOPTED are implemented in engine.py / trade_filter.py):
   OLD0.15%  baseline: candle Low within 0.15% of the 20-bar floor (old rule, kept)
             (SELL: High within 0.15% of the 20-bar ceiling)
   PROX<k>   stricter ATR-scaled floor proximity (candidate, NOT adopted -
-            gold rejected it: it blocks every historical win)
-  SLOPE30   ADOPTED: EMA50 rising vs 30 candles ago (SELL: falling)
+            on the historical book it blocks every winning entry)
+  SLOPE30   ADOPTED: EMA50 rising vs 30 candles ago (SELL: falling);
+            engine.py gates on EMA_SLOPE_LOOKBACK = 12 M15 bars
   ABV50s    ADOPTED: entry close no more than 0.3*ATR below EMA50
-            (SELL: no more than 0.3*ATR above)
+            (SELL: no more than 0.3*ATR above); engine.py's live cap is
+            MAX_BELOW_EMA_ATR = 0.50 * ATR, so this column is the tighter cut
   NOH8      ADOPTED: entry outside the extended 07:55-09:00 UTC London blackout
   RISE<N>   20-bar floor flat-or-rising vs N candles ago (candidate, not adopted)
             (SELL: ceiling flat-or-falling)

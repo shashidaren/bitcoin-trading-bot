@@ -16,8 +16,9 @@ Sections
   4. WHERE       exploratory post-hoc cuts (ATR bucket, side, weekday/weekend):
                  HYPOTHESES for prospective logging, never parameters
   5. STABILITY   halves, last-N, per-week, drawdown, and a Monte Carlo of what a
-                 0.01-lot account would see if the edge is real vs if it is zero,
-                 incl. how often a candidate kill-switch floor would be touched
+                 0.10-lot US100Cash account ($0.10 per index point) would see if
+                 the edge is real vs if it is zero, incl. how often a candidate
+                 kill-switch floor would be touched
   6. LATENCY     M5 re-walk with the fill 1/2.5/5 minutes after the signal bar
                  (the simulator fills at the signal-bar close; a live order cannot)
   7. OPERATIONS  price-log coverage and gaps (a dead feed is a live-money risk)
@@ -26,9 +27,11 @@ Sections
 Everything is the strictly post-gate slice (entries >= replay_lib.GATES_DEPLOY,
 the date today's entry gates actually went live) because earlier rows ran other
 rules (docs/HANDOFF.md §9). P/L is NET of --spread per trade; the ledger itself
-is gross. Unlike the other tools this one DEFAULTS to the measured $0.40 (a
-go/no-go on gross numbers would be misleading); --spread 0 gives gross. Deterministic:
-the bootstrap/Monte Carlo use a seeded RNG, so the same data gives the same output.
+is gross. This one DEFAULTS to the assumed $0.25/trade (= 2.5 index points x
+$0.10/pt at the 0.10 lot; the measured XM round trip at ~29,000 index is ~$0.29),
+because a go/no-go on gross numbers would be misleading; --spread 0 gives gross.
+Deterministic: the bootstrap/Monte Carlo use a seeded RNG, so the same data gives
+the same output.
 
 The gate thresholds below are PROPOSALS, not facts about the market - they are
 constants at the top of this file on purpose, so the user can change them in one
@@ -37,8 +40,8 @@ checklist (live order path, spread profile, demo parity, kill switches) decides
 the rest.
 
 Usage:
-  python3 tools/live_readiness.py --spread 0.40            # the handoff's measured cost (also the default)
-  python3 tools/live_readiness.py --spread 0.40 --horizon 200 --boot 20000
+  python3 tools/live_readiness.py --spread 0.25            # the assumed cost (also the default)
+  python3 tools/live_readiness.py --spread 0.29 --horizon 200 --boot 20000   # measured XM round trip
 
 Exit code: 0 = every data gate passes, 1 = at least one fails (so a script can
 branch on it). Read-only: nothing is written to disk and no network is used.
@@ -387,14 +390,15 @@ def main():
     final, mdd, streak, uw_t, uw_d = equity_stats(seq)
     print(f"  equity {final:+.2f}; max drawdown ${mdd:.2f}; longest losing streak {streak}; "
           f"longest stretch below a prior equity high {uw_t} trades / {uw_d:.1f} days")
-    print(f"\n  Monte Carlo, {a.horizon} trades at 0.01 lot (~{a.horizon / (n / span_days):.0f} days), "
+    print(f"\n  Monte Carlo, {a.horizon} trades at 0.10 lot on US100Cash "
+          f"(${R.LOT_SIZE:.2f}/index point, ~{a.horizon / (n / span_days):.0f} days), "
           f"bootstrap of the {n} post-gate net trades, {MC_PATHS} paths each:")
     print(f"  {'scenario':34s} {'P(net<0)':>8s} {'5th pct':>8s} {'median':>8s} {'95th pct':>9s}"
           f" {'median maxDD':>13s} {'95th maxDD':>11s}")
     demeaned = [x - mu for x in nets]
     scenarios = (("edge as observed", nets),
                  ("ZERO edge (same dispersion)", demeaned),
-                 (f"spread doubles (+${sp:.2f}/trade)" if sp else "extra $0.40/trade", [x - (sp or 0.40) for x in nets]))
+                 (f"spread doubles (+${sp:.2f}/trade)" if sp else "extra $0.25/trade", [x - (sp or 0.25) for x in nets]))
     touch_rows = []
     for label, xs in scenarios:
         f, d, tch = monte_carlo(xs, a.horizon, MC_PATHS, rng, KILL_FLOORS)

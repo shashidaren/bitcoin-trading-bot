@@ -192,6 +192,13 @@ def main():
     print(f"   {len(sigs)} full signals (BUY {sum(s['side']=='BUY' for s in sigs)}, "
           f"SELL {sum(s['side']=='SELL' for s in sigs)}); {len(sigs)-len(takeable)} fire inside a")
     print(f"   blackout window and are never takeable live -> {len(takeable)} takeable")
+    if not takeable:
+        # Day-0 / quiet-log guard: the census has nothing to walk, and every later
+        # section (filter lab, cost grid) is downstream of these rows. Exit early
+        # instead of dividing by zero.
+        print("   0 takeable signals yet (Day-0 ledger) - no reconstructed signal stream to walk;")
+        print("   re-run once forward_test_log.csv covers a full gate warm-up (EMA200 + 20-bar floor).")
+        return
     rows = []
     for s in takeable:
         seg = [b for b in bars_full if s["dt"] < b["dt"] <= s["dt"] + timedelta(minutes=args.horizon)]
@@ -202,9 +209,11 @@ def main():
     tm = len(rows) - w - l
     pnl = sum(x["r"] * R.r_money(x["atr"]) for x in rows) - args.spread * len(rows)
     lo, hi = R.wilson(w, w + l)
+    wr_txt = f"{w/(w+l)*100:5.1f}% [{lo:.1f},{hi:.1f}]" if w + l else "  n/a  (0 decisive)"
+    per_trade = f"{pnl/len(rows):+.3f}/trade" if rows else "n/a"
     print(f"   entry stream at the LIVE geometry: {w}W/{l}L/{tm}T  "
-          f"WR {w/(w+l)*100:5.1f}% [{lo:.1f},{hi:.1f}]  P/L {pnl:+7.2f}  "
-          f"({pnl/len(rows):+.3f}/trade)")
+          f"WR {wr_txt}  P/L {pnl:+7.2f}  "
+          f"({per_trade})")
     print("   -> this is the raw signal stream BEFORE the risk gates (cooldown, blackout,")
     print("      daily halt), and before exits are decided by tick order.")
     print()
@@ -265,7 +274,7 @@ def main():
     med = {d: sorted(x["atr"] / x["entry"] for x in v)[len(v) // 2] for d, v in by_day_sig.items()}
     lab("ATR% above its OWN day's median (the control)",
         lambda s: s["atr"] / s["entry"] >= med[s["dt"].date()], control=False)
-    lab("RSI >= 45 (gold's adopted filter)", lambda s: s["rsi"] >= 45)
+    lab("RSI >= 45 (a candidate filter, not live)", lambda s: s["rsi"] >= 45)
     lab("wick ratio <= 0.40 (deep rejection is worse, not better)",
         lambda s: s["wick"] <= 0.40)
     lab("side = SELL", lambda s: s["side"] == "SELL")
@@ -273,7 +282,7 @@ def main():
         lambda s: s["mom5h"] is not None and
         ((s["side"] == "BUY" and s["mom5h"] >= 0) or (s["side"] == "SELL" and s["mom5h"] <= 0)))
     # --- EMA50 distance: TWO different quantities, do not confuse them --------
-    # The live gate (engine.MAX_BELOW_EMA_ATR = 0.30) is ONE-SIDED: it only caps
+    # The live gate (engine.MAX_BELOW_EMA_ATR = 0.50) is ONE-SIDED: it only caps
     # how far the entry may sit on the ADVERSE side of EMA50 (below for a BUY,
     # above for a SELL). A two-sided |distance| band is a DIFFERENT, new gate.
     # This block used to print a two-sided 0.15 band under a label that said
@@ -367,7 +376,8 @@ def main():
     print(f"   breakeven decisive WR = (1 + s/a)/3 where a = 1R in $ = "
           f"{R.ATR_SL_MULT:.0f}xATR x LOT_SIZE")
     print("   live book WR (from 09-05) = "
-          f"{sum(t['reason']=='TP' for t in clean)/dec_all*100:.1f}%")
+          + (f"{sum(t['reason']=='TP' for t in clean)/dec_all*100:.1f}%" if dec_all
+             else "n/a (no decisive SL/TP rows yet)"))
     # US100Cash: CONTRACT_SIZE 1.0, LOT_SIZE 0.10 -> $0.10 per index point, so 1R in $
     # = 2.0 x ATR x 0.10. s=$0.25 is the assumed cost, s=$0.29 the measured XM round
     # trip (~2.9 index points) at ~29,000 index price.
