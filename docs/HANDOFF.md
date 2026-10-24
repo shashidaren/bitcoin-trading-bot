@@ -4,7 +4,7 @@
 | key | value |
 |---|---|
 | as_of_utc | 2026-10-24 15:59 |
-| data_collection | 4204 |
+| data_collection | 4214 |
 | closed_trades | 0 |
 | wins_losses | 0W/0L |
 | win_rate_pct | 0.0 |
