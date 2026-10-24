@@ -28,3 +28,37 @@ python3 tools/xm_quote_report.py --quiet
 # Backtest the 12,000 backfilled XM M15 candles at $0.25/trade:
 python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 ```
+
+## Wine Python Setup: `tzdata` for `America/New_York`
+
+The sidecars run under the **Wine** interpreter (`C:/Python312/python.exe`). Windows Python ships **no IANA timezone database**, so `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError` until `tzdata` is installed *into that same interpreter* (the Linux `/opt/nasdaq/venv` is irrelevant — it never runs the Wine sidecars).
+
+```bash
+# One-time, under the same WINEPREFIX the MT5 terminal and systemd units use.
+# The live VPS runs as root, so the prefix is /root/.mt5 (NOT /home/root/.mt5):
+export WINEPREFIX=/root/.mt5
+wine C:/Python312/python.exe -m pip install tzdata
+
+# Verify the interpreter can now resolve US Eastern:
+WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -c \
+  "from zoneinfo import ZoneInfo; print(ZoneInfo('America/New_York'))"
+```
+
+**Fallback (never blocks the logger):** if `tzdata` is missing, `tools/mt5_quotes.py` and `trade_filter.py` catch `ZoneInfoNotFoundError` and fall back to a stdlib fixed-rule US Eastern `tzinfo` (`USEasternFallback`):
+
+- DST starts 2nd Sunday of March `02:00 EST -> 03:00 EDT` (`07:00 UTC`)
+- DST ends 1st Sunday of November `02:00 EDT -> 01:00 EST` (`06:00 UTC`)
+
+That reproduces the post-2007 IANA rules exactly for EDT/EST (verified in `tools/smoke_test.py` across both 2026 transitions), so weekend closure, the `16:55–18:10 ET` CME break, and the `08:25–08:40 / 09:25–09:45 / 16:45–18:15 ET` blackouts stay aligned either way. Always install `tzdata` anyway: `zoneinfo` is the authority for historical/future rule changes.
+
+### Quick Wine-side sanity checks
+
+```bash
+# Which prefix/interpreters are actually in play (root -> /root/.mt5):
+systemctl show mt5quotes-nasdaq -p Environment | tr ' ' '\n' | grep WINEPREFIX
+ls -d /root/.mt5 /root/.mt5/drive_c/Python312 2>/dev/null
+
+# Confirm the logged-in terminal exposes US100Cash in Market Watch:
+WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -c \
+  "import MetaTrader5 as mt5; mt5.initialize(); print(mt5.symbol_select('US100Cash', True), mt5.symbol_info('US100Cash').spread)"
+```

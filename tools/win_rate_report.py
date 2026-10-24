@@ -145,8 +145,8 @@ def main():
             continue
         print(f"  {reason}: n={len(d):3d} median {statistics.median(d):6.1f}  "
               f"p90 {d[int(len(d)*0.9)]:6.1f}  max {max(d):7.1f}")
-    print("  (BTC has no time stop and no BE ratchet: every trade ends at SL or TP, so the")
-    print("   exit-reason domain is exactly {SL, TP})")
+    print("  (US100Cash has no time stop and no BE ratchet: every trade ends at SL or TP,")
+    print("   so the exit-reason domain is exactly {SL, TP})")
     print()
 
     # ------------------------------------------------- exit grid (compact)
@@ -368,20 +368,25 @@ def main():
           f"{R.ATR_SL_MULT:.0f}xATR x LOT_SIZE")
     print("   live book WR (from 09-05) = "
           f"{sum(t['reason']=='TP' for t in clean)/dec_all*100:.1f}%")
-    grid = (0.10, 0.25, 0.40, 0.50)   # 0.40 = measured XM BTCUSD round trip
-    header = "   " + "ATR$".rjust(7) + "".join(f"  s=${s:.2f}" for s in grid)
+    # US100Cash: CONTRACT_SIZE 1.0, LOT_SIZE 0.10 -> $0.10 per index point, so 1R in $
+    # = 2.0 x ATR x 0.10. s=$0.25 is the assumed cost, s=$0.29 the measured XM round
+    # trip (~2.9 index points) at ~29,000 index price.
+    grid = (0.15, 0.25, 0.29, 0.40)
+    header = "   " + "ATR(pts)".rjust(7) + "".join(f"  s=${s:.2f}" for s in grid)
     print(header)
-    for atr in (10, 15, 20, 30, 50, 70, 100, 150, 220):
+    for atr in (10, 15, 20, 30, 40, 50, 70, 100, 150):
         a = R.r_money(atr)
-        cells = "".join(f"  {(1+s/a)/3*100:6.0f}%" for s in grid)
-        mark = "  <- near the live-era median ATR" if atr == 100 else ""
+        cells = "".join(f"  {(1+s/a)/3*100:6.1f}%" for s in grid)
+        mark = "  <- ~0.14% of a ~29,000 index" if atr == 40 else ""
         print(f"   {atr:7.0f}{cells}{mark}")
-    print("   Read: s=$0.40 is the measured XM BTCUSD round trip at LOT_SIZE 0.01. At the")
-    print("   live-era median entry ATR (~$88) it needs a 40.9% decisive win rate; a $15-ATR")
-    print("   signal needs 75%.")
-    print("   Trade flow that small is not a strategy, it is a fee stream - measure the real")
-    print("   XM BTCUSD spread before LIVE (docs/HANDOFF.md §7).")
-    print("\n   Legend: 'WR' is decisive (SL/TP only - BTC has no scratch outcome).")
+    print("   Read: s=$0.29 is the measured XM US100Cash round trip at LOT_SIZE 0.10")
+    print("   (CONTRACT_SIZE 1.0, ~2.9 index points at ~29,000). At a typical M15 entry")
+    print("   ATR (~40 pts = 0.14% of 29,000, 1R = $8.00) it needs a 34.5% decisive win")
+    print("   rate vs the 33.3% breakeven - ~1.2 points of cushion; a 15-pt ATR signal")
+    print("   needs 36.6%.")
+    print("   Trade flow that tight is a fee stream, not an edge - measure the real XM")
+    print("   US100Cash spread before LIVE (docs/HANDOFF.md §7).")
+    print("\n   Legend: 'WR' is decisive (SL/TP only - US100Cash has no scratch outcome).")
     print("   Wilson CI covers sampling noise only; it is not a forecast.")
 
 

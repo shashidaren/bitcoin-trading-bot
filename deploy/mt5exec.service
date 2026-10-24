@@ -3,12 +3,22 @@
 # Dormant (MT5_EXEC_ENABLED=0) and DEMO-locked (MT5_EXEC_ALLOW_REAL=0) by default!
 # See docs/START-LEVER1.md before arming MT5_EXEC_ENABLED=1 on a demo or live account.
 #
-# Install (NEVER put a login or password in this file):
+# Install (root is the live VPS user - WINEPREFIX stays in /root, not /home/root;
+# NEVER put a login or password in this file):
 #   sudo cp /opt/nasdaq/deploy/mt5exec.service /etc/systemd/system/mt5exec-nasdaq.service
-#   sudo sed -i "s/YOUR_LINUX_USER/$USER/g" /etc/systemd/system/mt5exec-nasdaq.service
+#   sudo sed -i "s|YOUR_LINUX_USER|root|g; s|/home/root/.mt5|/root/.mt5|g" \
+#       /etc/systemd/system/mt5exec-nasdaq.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now mt5exec-nasdaq
 #   journalctl -u mt5exec-nasdaq -f
+#
+# Non-root user instead of root? Substitute your own login (e.g. 'trader') and the
+# sed keeps WINEPREFIX=/home/<user>/.mt5 - root's home is /root, never /home/root.
+#
+# Windows/Wine Python has no IANA timezone database. Install tzdata once into that
+# same interpreter (session blackouts shared with trade_filter.py fall back to a
+# stdlib fixed-rule US Eastern tzinfo if it is missing):
+#   WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -m pip install tzdata
 
 [Unit]
 Description=Wine MT5 Order Executor Sidecar for Nasdaq (US100Cash)
