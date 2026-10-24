@@ -1,51 +1,74 @@
 #!/usr/bin/env python3
-import os
+"""
+Nasdaq-100 Cash Index CFD (US100Cash) M15 Auto-Trading Engine for XM / MetaTrader 5.
+
+Deployed on /opt/nasdaq to trade XM's US100Cash on 15-minute (M15) bars:
+  - DATA_SOURCE="MT5" default (reads closed M15 bars from tools/mt5_feed.py +
+    seeds 250 historical M15 bars on startup from mt5_warmup_candles.json so
+    EMA200/EMA50/RSI/ATR are warm immediately without waiting 50 hours).
+  - DST-aware America/New_York market hours (suppresses stale-feed alerts during
+    CME weekend closure and the daily 17:00-18:00 ET maintenance break).
+  - Hardened LIVE execution supporting BOTH:
+      1) Direct MetaTrader5 Python API (Windows / Wine / tools/live_path_probe.py)
+      2) Linux -> Wine atomic JSON bridge (/opt/nasdaq/mt5_bridge via tools/mt5_executor.py)
+"""
 import csv
 import json
-import time
-import sys
+import math
+import os
 import shutil
+import sys
+import time
+import uuid
 from collections import deque
-from datetime import datetime, timezone
-from dotenv import load_dotenv
-from trade_filter import should_take_trade, get_daily_sl_count, MAX_DAILY_LOSSES, load_recent_trades
+from datetime import datetime, timedelta, timezone
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_a, **_kw):
+        return False
+from trade_filter import (
+    MAX_DAILY_LOSSES,
+    get_daily_sl_count,
+    is_market_quiet,
+    load_recent_trades,
+    should_take_trade,
+)
 
 # ==========================================
 # CONFIGURATION SWITCH
-# Set to "FORWARD_TEST" to use Twelve Data and simulated balance
-# Set to "LIVE" to use MetaTrader 5 and real execution
+# Set to "FORWARD_TEST" for simulated fills on live XM M15 candles
+# Set to "LIVE" for real MT5 order execution (direct or Wine mt5_bridge)
 # ==========================================
 TRADING_MODE = "FORWARD_TEST"
+if os.getenv("TRADING_MODE"):
+    TRADING_MODE = os.getenv("TRADING_MODE").strip().upper()
 
-load_dotenv(dotenv_path="/opt/bitcoin/.env")
+DATA_DIR = os.getenv("NASDAQ_DATA_DIR", "/opt/nasdaq")
+load_dotenv(dotenv_path=os.path.join(DATA_DIR, ".env"))
 
-# Data source for FORWARD_TEST mode: "TWELVEDATA" (WebSocket, default) or
-# "MT5" (local Wine MT5 terminal - broker feed, no API plan limits).
-# Set DATA_SOURCE=MT5 in /opt/bitcoin/.env to switch (the MT5 terminal must be
-# running and logged in). Trading stays simulated either way.
-# (Ported from gold 2026-09-10: the Twelve Data free-plan WebSocket trial can
-# expire silently - handshake OK, immediate close - so the log just stops.)
-DATA_SOURCE = (os.getenv("DATA_SOURCE") or "TWELVEDATA").strip().upper()
+# Data source for FORWARD_TEST mode: "MT5" (default: local Wine MT5 terminal
+# publishing XM US100Cash M15 bars) or "TWELVEDATA" (WebSocket fallback).
+DATA_SOURCE = (os.getenv("DATA_SOURCE") or "MT5").strip().upper()
 
 TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- INSTRUMENT ---
-SYMBOL_TD = "BTC/USD"
-SYMBOL_MT5 = "BTCUSD"  # Verify this in MT5! Might be "BTCUSDm" for micro lots.
+# --- INSTRUMENT (XM Nasdaq-100 Cash Index CFD) ---
+SYMBOL_MT5 = os.getenv("SYMBOL_MT5", "US100Cash")
+SYMBOL_TD = os.getenv("SYMBOL_TD", "NDX")
 
-# --- STRATEGY PARAMETERS (Bitcoin medium-term, M5 candles) ---
-LOOKBACK_PERIOD = 20
-WICK_RATIO_TARGET = 0.15
-EMA_FAST = 50
-EMA_SLOW = 200
+# --- STRATEGY PARAMETERS (US100Cash intraday swing, M15 candles) ---
+LOOKBACK_PERIOD = 20            # 20 x M15 = 5 trading hours structural floor/ceiling
+WICK_RATIO_TARGET = 0.15        # rejection wick >= 15% of bar range
+EMA_FAST = 50                   # 50 x M15 = 12.5 hours
+EMA_SLOW = 200                  # 200 x M15 = 50 trading hours (~2.2 trading days)
 RSI_PERIOD = 14
 ATR_PERIOD = 14
-FLOOR_BUFFER_PCT = 0.0015
+FLOOR_BUFFER_PCT = 0.0012       # 0.12% (~24 pts on US100Cash @ 20,000)
 
-# Risk geometry: RR 1:2 (breakeven WR ~33%). SL/TP distances scale with ATR;
-# PnL is scaled by LOT_SIZE in check_position().
+# Risk geometry: RR 1:2 (breakeven WR ~33.3%). SL = 2x M15 ATR, TP = 4x M15 ATR.
 ATR_SL_MULT = 2.0
 ATR_TP_MULT = 4.0
 
@@ -55,45 +78,47 @@ VOLUME_SPIKE_MULTIPLIER = 0.9
 REQUIRE_TREND_CONFIRM = True
 RSI_MIN = 40.0
 RSI_MAX = 70.0
-MIN_ATR = 0.0  # Engine-level floor disabled; trade_filter.py enforces the
-               # percentage-based MIN_ATR_PERCENT (adaptive to BTC price).
+MIN_ATR = 0.0  # trade_filter.py enforces percentage-based MIN_ATR_PERCENT / MAX_ATR_PERCENT
 
-# --- Stale feed guard (silent Twelve Data WebSocket stalls, gold 2026-09-10) ---
-STALE_FEED_SECONDS = 10 * 60            # force reconnect if no price event this long
-STALE_ALERT_COOLDOWN_SECONDS = 30 * 60  # Telegram alert at most this often
+# --- Stale feed guard (M15 cadence = 900s; alert after 20m during open market) ---
+CANDLE_SECONDS = 900                    # 15-minute bars (M15)
+STALE_FEED_SECONDS = 20 * 60            # 20 min (> 1 M15 bar)
+STALE_ALERT_COOLDOWN_SECONDS = 30 * 60  # journal alert at most every 30 min
 
-# --- Regime gates (EMA Slope & Distance from Mean, gold 2026-09-09) ---
-REQUIRE_EMA_SLOPE = True       # EMA50 slope direction filter
-EMA_SLOPE_LOOKBACK = 30        # Compare EMA50 vs N candles ago (30 x M5 = 150 min)
-MAX_BELOW_EMA_ATR = 0.30       # Entry distance buffer from EMA50
+# --- Regime gates (EMA Slope & Distance from Mean) ---
+REQUIRE_EMA_SLOPE = True
+EMA_SLOPE_LOOKBACK = 12        # Compare EMA50 vs 12 M15 bars ago (3 hours)
+MAX_BELOW_EMA_ATR = 0.50       # Entry distance buffer from EMA50
 
-# Candle timeframe for tick aggregation: 300s = M5 (medium-term design).
-# Everything downstream (EMA lookbacks, slope gate, log cadence) is in M5 bars.
-CANDLE_SECONDS = 300
+# --- Position sizing & XM US100Cash contract economics ---
+# XM US100Cash: 1.00 lot = $1.00 per index point (CONTRACT_SIZE = 1.0).
+# At LOT_SIZE = 0.10: $0.10 per index point -> 70-pt SL (2x 35-pt ATR) risks $7.00,
+# 140-pt TP pays $14.00, and typical ~2.5-pt spread costs ~$0.25/trade.
+LOT_SIZE = float(os.getenv("LOT_SIZE", "0.10"))
+CONTRACT_SIZE = float(os.getenv("CONTRACT_SIZE", "1.0"))
+ASSUMED_SPREAD_USD = float(os.getenv("ASSUMED_SPREAD_USD", "0.25"))
+MAGIC_NUMBER = int(os.getenv("MAGIC_NUMBER", "987656"))
 
-# Live Trading Parameters (Only used if TRADING_MODE == "LIVE")
-# WARNING: Verify XM's BTC contract size before going live!
-LOT_SIZE = 0.01
-MAGIC_NUMBER = 987655  # Different from Gold's 987654
+# Live execution guards
+MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "8.0"))
+MAX_SPREAD_TO_1R = float(os.getenv("MAX_SPREAD_TO_1R", "0.35"))
+LIVE_DEVIATION_POINTS = int(os.getenv("LIVE_DEVIATION_POINTS", "500"))  # $5.00 on 0.01-pt symbol
+MT5_BRIDGE_TIMEOUT_S = float(os.getenv("MT5_BRIDGE_TIMEOUT_S", "12.0"))
 
 STATS_EVERY_N_CANDLES = 30
 STARTING_BALANCE = 200.00
 
-LOG_FILE_PATH = "/opt/bitcoin/forward_test_log.csv"
-TRADES_LOG_PATH = "/opt/bitcoin/trades.csv"
-STATUS_FILE_PATH = "/opt/bitcoin/status.json"
-# DATA_SOURCE=MT5: the Wine sidecar (tools/mt5_feed.py) publishes the latest
-# closed M5 candle here; its `ts` field is UTC (the sidecar converts XM's
-# broker-server timestamp using a fresh-tick offset). The engine reads this
-# file instead of importing MetaTrader5 (no Linux wheels exist for that package).
-MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", "/opt/bitcoin/mt5_last_candle.json")
-# Journal file: engine events (entries, exits, skips, stale-feed alerts) are
-# appended here instead of being sent to Telegram. Override with BTC_JOURNAL_FILE.
-JOURNAL_FILE_PATH = os.getenv("BTC_JOURNAL_FILE", "/opt/bitcoin/journal.csv")
+LOG_FILE_PATH = os.getenv("NASDAQ_LOG_FILE", os.path.join(DATA_DIR, "forward_test_log.csv"))
+TRADES_LOG_PATH = os.getenv("NASDAQ_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
+STATUS_FILE_PATH = os.getenv("NASDAQ_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
+MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", os.path.join(DATA_DIR, "mt5_last_candle.json"))
+MT5_WARMUP_FILE = os.getenv("MT5_WARMUP_FILE", os.path.join(DATA_DIR, "mt5_warmup_candles.json"))
+MT5_ORDER_DIR = os.getenv("MT5_ORDER_DIR", os.path.join(DATA_DIR, "mt5_bridge"))
+JOURNAL_FILE_PATH = os.getenv("NASDAQ_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
 
-# Canonical trades.csv schema (what log_trade() writes). Trade_Type was added
-# with SELL support (gold 2026-09-09, ported here 2026-09-10); any older rows
-# have 15 fields and are backfilled as BUY by migrate_trades_csv().
+SYMBOL_FILLING_FOK = 1
+SYMBOL_FILLING_IOC = 2
+
 TRADES_FIELDNAMES = [
     "Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
     "Exit_Price", "Exit_Reason", "Profit", "Balance_After", "RSI_At_Entry",
@@ -101,23 +126,9 @@ TRADES_FIELDNAMES = [
 ]
 
 
-def migrate_trades_csv(path: str = TRADES_LOG_PATH) -> bool:
-    """Self-heal trades.csv schema drift (gold 2026-09-10 incident).
-
-    log_trade() writes 16-field rows (Trade_Type in position 2), but if the
-    file on disk still has the pre-SELL 15-field header, every appended row is
-    silently MISALIGNED with it: Exit_Reason reads as the exit price, Profit
-    reads as "SL"/"TP", Balance_After reads as the profit. Downstream readers
-    (engine stats reload, daily-loss circuit breaker, SL cooldowns) then
-    quietly stop counting those trades.
-
-    This rewrites the file in place (backup kept next to it as
-    <path>.bak-pre-migration) so that:
-      - the header is the 16-field schema above
-      - old 15-field rows get Trade_Type="BUY" inserted (every pre-SELL trade was a buy)
-      - already-16-field rows are kept byte-for-byte
-    Returns True if a migration was performed, False if already current.
-    """
+def migrate_trades_csv(path: str = None) -> bool:
+    """Self-heal trades.csv schema drift (15-field pre-SELL -> 16-field schema)."""
+    path = TRADES_LOG_PATH if path is None else path
     if not os.path.isfile(path):
         return False
     try:
@@ -131,13 +142,13 @@ def migrate_trades_csv(path: str = TRADES_LOG_PATH) -> bool:
 
     header = [h.strip() for h in raw[0]]
     if header == TRADES_FIELDNAMES:
-        return False  # already current
+        return False
 
     migrated, odd = [], 0
     for r in raw[1:]:
-        if len(r) == len(TRADES_FIELDNAMES):          # already new-schema row
+        if len(r) == len(TRADES_FIELDNAMES):
             migrated.append(r)
-        elif len(r) == len(TRADES_FIELDNAMES) - 1:    # pre-SELL row -> all buys
+        elif len(r) == len(TRADES_FIELDNAMES) - 1:
             migrated.append([r[0], "BUY"] + r[1:])
         else:
             migrated.append(r)
@@ -153,30 +164,16 @@ def migrate_trades_csv(path: str = TRADES_LOG_PATH) -> bool:
             w.writerows(migrated)
         os.replace(tmp, path)
     except Exception as e:
-        print(f"WARNING: trades.csv schema migration FAILED ({e}) - "
-              f"risk gates may miscount SELL trades until fixed!")
+        print(f"WARNING: trades.csv schema migration FAILED ({e})")
         return False
 
-    print(f"WARNING: migrated {path} to the 16-field schema "
-          f"(Trade_Type column added; {len(raw) - 1} rows rewritten, "
-          f"{odd} unrecognisable). Backup saved to {backup}.")
+    print(f"WARNING: migrated {path} to 16-field schema "
+          f"({len(raw) - 1} rows rewritten, {odd} odd). Backup: {backup}.")
     return True
 
 
 def utc_now_str() -> str:
-    """All timestamps in this bot are UTC (matches trade_filter.py)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def is_market_quiet(now_utc: datetime = None) -> bool:
-    """True during hours where no price ticks are expected.
-
-    BTC trades 24/7 with no daily break and no weekend close, so a silent
-    feed is NEVER normal - always returns False. (Gold's version suppresses
-    alerts 21:00-02:00 UTC + weekends; that must NOT be ported to BTC.)
-    Kept as a function so the stale-feed guard reads identically in both bots.
-    """
-    return False
 
 
 def latest_closed_candle_ts(rates):
@@ -187,12 +184,7 @@ def latest_closed_candle_ts(rates):
 
 
 def last_logged_candle_close_ts(path=None):
-    """Read the newest log Timestamp as a UTC candle-close watermark.
-
-    Legacy engine rows use the processing time (at/just after bar close); the
-    MT5 path below writes the exact close time. CSV parsing avoids assuming the
-    timestamp is the only unquoted field in the row.
-    """
+    """Read the newest log Timestamp as a UTC candle-close watermark."""
     path = LOG_FILE_PATH if path is None else path
     if not path or not os.path.isfile(path):
         return 0
@@ -221,13 +213,54 @@ def mt5_closed_candle_age_seconds(candle_open_ts, now_epoch=None):
     return max(0.0, now - closed_at)
 
 
+def _select_mt5_filling(symbol_info, mt5_mod) -> int:
+    """Decode MT5 SYMBOL_FILLING_* bitmask (1=FOK, 2=IOC) into ORDER_FILLING_* enum."""
+    fok_enum = getattr(mt5_mod, "ORDER_FILLING_FOK", 0)
+    ioc_enum = getattr(mt5_mod, "ORDER_FILLING_IOC", 1)
+    ret_enum = getattr(mt5_mod, "ORDER_FILLING_RETURN", 2)
+    flags = int(getattr(symbol_info, "filling_mode", 0) or 0) if symbol_info is not None else 0
+    if flags & SYMBOL_FILLING_IOC:
+        return ioc_enum
+    if flags & SYMBOL_FILLING_FOK:
+        return fok_enum
+    return ret_enum
+
+
+def _deal_net_profit(deal) -> float:
+    total = 0.0
+    for attr in ("profit", "commission", "swap", "fee"):
+        try:
+            v = float(getattr(deal, attr, 0.0) or 0.0)
+            if math.isfinite(v):
+                total += v
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.flush()
+    os.replace(tmp, path)
+
+
 if TRADING_MODE == "LIVE":
-    import MetaTrader5 as mt5
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        mt5 = None  # Linux host: orders route via Wine tools/mt5_executor.py bridge
 else:
-    from twelvedata import TDClient
+    mt5 = None
+    try:
+        from twelvedata import TDClient
+    except ImportError:
+        TDClient = None
 
 
-class BitcoinEngine:
+class NasdaqEngine:
     def __init__(self):
         self.lows = deque(maxlen=EMA_SLOW)
         self.highs = deque(maxlen=EMA_SLOW)
@@ -236,7 +269,7 @@ class BitcoinEngine:
         self.tr_list = deque(maxlen=ATR_PERIOD)
         self.rsi_gains = deque(maxlen=RSI_PERIOD)
         self.rsi_losses = deque(maxlen=RSI_PERIOD)
-        self.ema50_history = deque(maxlen=EMA_SLOW)   # for the EMA-slope regime gate
+        self.ema50_history = deque(maxlen=EMA_SLOW)
 
         self.prev_close = None
         self.rsi = None
@@ -252,7 +285,7 @@ class BitcoinEngine:
 
         self.balance = STARTING_BALANCE
         self.trade_active = False
-        self.trade_type = "BUY"  # "BUY" or "SELL"
+        self.trade_type = "BUY"
         self.entry_price = 0.0
         self.stop_loss = 0.0
         self.take_profit = 0.0
@@ -269,20 +302,18 @@ class BitcoinEngine:
         self.entry_ema_fast = None
         self.entry_ema_slow = None
 
-        self.load_trade_stats()
-        # Restore open trade if process died mid-trade (status.json)
-        self.restore_open_trade_from_status()
-
-        # Live mode specific
+        # Live mode tracking
         self.active_ticket = None
+        self.active_position_id = None
         self.trade_active_live = False
-        self._last_live_candle_ts = 0  # dedup: never evaluate the same MT5 candle twice
+        self.live_unknown_order = False
+        self._last_live_candle_ts = 0
+        self._warmup_close_ts = 0
 
         self.warmup_logged = False
         self.candles_evaluated = 0
         self.candles_warm = 0
 
-        # Stale-feed guard state (see run_forward_test)
         self._last_price_mono = None
         self._last_stale_alert_mono = None
 
@@ -305,33 +336,38 @@ class BitcoinEngine:
         self.hit_sell_price_near_ema = 0
         self.hit_sell_all = 0
 
+        self.load_trade_stats()
+        self.restore_open_trade_from_status()
+
         if TRADING_MODE == "LIVE":
-            if not mt5.initialize():
-                print(f"MT5 Initialize failed: {mt5.last_error()}")
-                sys.exit(1)
-            account = mt5.account_info()
-            print(f"Connected to MT5 | Account: {account.login} | Balance: {account.balance} {account.currency}")
-            mt5.symbol_select(SYMBOL_MT5, True)
+            if mt5 is not None:
+                if not mt5.initialize():
+                    print(f"MT5 Initialize failed: {mt5.last_error()}")
+                    sys.exit(1)
+                account = mt5.account_info()
+                if account is not None:
+                    print(f"Connected to MT5 | Account: {account.login} | Balance: {account.balance} {account.currency}")
+                mt5.symbol_select(SYMBOL_MT5, True)
+            else:
+                print(f"LIVE mode via Wine MT5 bridge ({MT5_ORDER_DIR})")
+            self.load_history_from_csv()
+            self.load_warmup_from_mt5()
+            self._reconcile_live_on_startup()
+            self.save_status()
         elif DATA_SOURCE == "MT5":
-            # Simulated trading, but real broker data: the Wine sidecar
-            # (tools/mt5_feed.py) publishes closed M5 candles to MT5_FEED_FILE.
             if os.path.isfile(MT5_FEED_FILE):
                 print(f"MT5 feed file found: {MT5_FEED_FILE}")
             else:
-                print(f"NOTE: {MT5_FEED_FILE} not found yet - is the mt5feed sidecar running?")
+                print(f"NOTE: {MT5_FEED_FILE} not found yet - is the mt5feed-nasdaq sidecar running?")
             self.load_history_from_csv()
+            self.load_warmup_from_mt5()
             self.save_status()
         else:
             self.load_history_from_csv()
             self.save_status()
 
     def load_trade_stats(self):
-        """Reload wins/losses/balance/next-trade-num from trades.csv.
-
-        Before this, a restart reset wins/losses to 0 and equity to $200 while
-        numbering restarted wherever the line count happened to be - the same
-        silent-ledger-reset class of bug gold found on 2026-09-09.
-        """
+        """Reload wins/losses/balance/next-trade-num from trades.csv."""
         self.next_trade_num = 1
         self.wins = 0
         self.losses = 0
@@ -352,7 +388,6 @@ class BitcoinEngine:
                 print(f"No trades.csv found - starting fresh (balance ${STARTING_BALANCE:.2f})")
             return
 
-        # Self-heal schema drift (e.g. pre-SELL header + 16-field SELL rows)
         migrate_trades_csv(TRADES_LOG_PATH)
 
         try:
@@ -375,7 +410,6 @@ class BitcoinEngine:
                         self.losses += 1
 
                     try:
-                        # .replace(",", "") tolerates legacy comma-formatted rows
                         bal = float(str(row.get("Balance_After", 0) or 0).replace(",", ""))
                         if bal > 0:
                             last_balance = bal
@@ -397,7 +431,7 @@ class BitcoinEngine:
             self.balance = STARTING_BALANCE
 
     def restore_open_trade_from_status(self):
-        """Restore open simulated trade from status.json after crash/restart."""
+        """Restore open trade metadata from status.json after crash/restart."""
         if not os.path.isfile(STATUS_FILE_PATH):
             return
         try:
@@ -417,7 +451,6 @@ class BitcoinEngine:
             print("status.json marks trade_active but missing entry/SL/TP - ignoring")
             return
 
-        self.trade_active = True
         self.trade_type = data.get("trade_type", "BUY")
         self.entry_price = float(entry)
         self.stop_loss = float(sl)
@@ -432,8 +465,124 @@ class BitcoinEngine:
         self.entry_ema_fast = data.get("entry_ema_fast")
         self.entry_ema_slow = data.get("entry_ema_slow")
 
+        if TRADING_MODE == "LIVE":
+            self.trade_active = False
+            self.trade_active_live = True
+            saved_pos = data.get("active_position_id") or data.get("active_ticket")
+            self.active_ticket = int(saved_pos) if saved_pos is not None else -1
+            self.active_position_id = self.active_ticket if self.active_ticket > 0 else None
+        else:
+            self.trade_active = True
+
         print(f"Restored OPEN {self.trade_type} trade #{self.current_trade_num} | "
               f"Entry=${self.entry_price:,.2f} SL=${self.stop_loss:,.2f} TP=${self.take_profit:,.2f}")
+
+    def _live_magic_positions(self) -> list:
+        """Return currently open broker positions matching SYMBOL_MT5 and MAGIC_NUMBER."""
+        if mt5 is not None:
+            try:
+                raw = mt5.positions_get(symbol=SYMBOL_MT5)
+            except TypeError:
+                raw = mt5.positions_get()
+            if not raw:
+                return []
+            return [
+                p for p in raw
+                if int(getattr(p, "magic", 0) or 0) == MAGIC_NUMBER
+                and str(getattr(p, "symbol", SYMBOL_MT5)) == SYMBOL_MT5
+            ]
+
+        pos_file = os.path.join(MT5_ORDER_DIR, "positions.json")
+        if not os.path.isfile(pos_file):
+            return []
+        try:
+            with open(pos_file, encoding="utf-8") as fh:
+                snap = json.load(fh)
+            return [
+                p for p in (snap.get("positions") or [])
+                if int(p.get("magic", MAGIC_NUMBER)) == MAGIC_NUMBER
+                and str(p.get("symbol", SYMBOL_MT5)) == SYMBOL_MT5
+            ]
+        except Exception:
+            return []
+
+    def _reconcile_live_on_startup(self):
+        """Attach to an open broker position on restart or reconcile an offline close."""
+        open_pos = self._live_magic_positions()
+        if open_pos:
+            p0 = open_pos[0]
+            if isinstance(p0, dict):
+                pid = int(p0.get("position_id") or 0)
+                side = str(p0.get("side") or "BUY")
+                px = float(p0.get("price_open") or self.entry_price or 0.0)
+                sl = float(p0.get("sl") or self.stop_loss or 0.0)
+                tp = float(p0.get("tp") or self.take_profit or 0.0)
+                ts = str(p0.get("time_utc") or self.entry_time or utc_now_str())
+            else:
+                pid = int(getattr(p0, "ticket", 0) or 0)
+                side = "BUY" if int(getattr(p0, "type", 0) or 0) == 0 else "SELL"
+                px = float(getattr(p0, "price_open", 0.0) or self.entry_price or 0.0)
+                sl = float(getattr(p0, "sl", 0.0) or self.stop_loss or 0.0)
+                tp = float(getattr(p0, "tp", 0.0) or self.take_profit or 0.0)
+                ts = self.entry_time or utc_now_str()
+
+            self.trade_active = False
+            self.trade_active_live = True
+            self.active_ticket = pid
+            self.active_position_id = pid
+            self.trade_type = side
+            if px > 0:
+                self.entry_price = px
+            if sl > 0:
+                self.stop_loss = sl
+            if tp > 0:
+                self.take_profit = tp
+            self.entry_time = ts
+            if self.current_trade_num is None:
+                self.current_trade_num = self.next_trade_num
+                self.next_trade_num += 1
+            return
+
+        if self.trade_active_live:
+            self.check_live_exits()
+
+    def _recompute_indicators_from_series(self):
+        closes_list = list(self.closes)
+        highs_list = list(self.highs)
+        lows_list = list(self.lows)
+        self.ema_fast = None
+        self.ema_slow = None
+        self.ema50_history.clear()
+        self.tr_list.clear()
+        self.rsi_gains.clear()
+        self.rsi_losses.clear()
+        self.prev_close = None
+
+        for idx, close in enumerate(closes_list):
+            high = highs_list[idx]
+            low = lows_list[idx]
+            if idx + 1 == EMA_FAST:
+                self.ema_fast = sum(closes_list[:EMA_FAST]) / EMA_FAST
+                self.ema50_history.append(self.ema_fast)
+            elif idx + 1 > EMA_FAST and self.ema_fast is not None:
+                self.ema_fast = (close * self.k_fast) + (self.ema_fast * (1 - self.k_fast))
+                self.ema50_history.append(self.ema_fast)
+
+            if idx + 1 == EMA_SLOW:
+                self.ema_slow = sum(closes_list[:EMA_SLOW]) / EMA_SLOW
+            elif idx + 1 > EMA_SLOW and self.ema_slow is not None:
+                self.ema_slow = (close * self.k_slow) + (self.ema_slow * (1 - self.k_slow))
+
+            if self.prev_close is not None:
+                change = close - self.prev_close
+                self.rsi_gains.append(max(change, 0))
+                self.rsi_losses.append(max(-change, 0))
+                tr = max(high - low, abs(high - self.prev_close), abs(low - self.prev_close))
+                self.tr_list.append(tr)
+            self.prev_close = close
+
+        self.calculate_rsi()
+        self.calculate_atr()
 
     def load_history_from_csv(self):
         if not os.path.isfile(LOG_FILE_PATH):
@@ -461,7 +610,6 @@ class BitcoinEngine:
                     self.highs.append(high)
                     self.closes.append(close)
                     self.volumes.append(volume)
-                    # Seed EMA50 history for the slope gate
                     ema50_str = row.get("EMA_50")
                     try:
                         if ema50_str not in ("Calculating", "", None):
@@ -491,6 +639,43 @@ class BitcoinEngine:
             print(f"Loaded {len(self.closes)} candles")
         except Exception as e:
             print(f"Failed to load history: {e}")
+
+    def load_warmup_from_mt5(self):
+        """Instant Day-0 M15 warm-up: seed indicators from mt5_warmup_candles.json.
+
+        On M15, waiting 200 live bars takes 50 trading hours (>2 days). Instead,
+        tools/mt5_feed.py publishes the last 250 closed M15 bars from XM to
+        mt5_warmup_candles.json on startup. Only used when forward_test_log.csv
+        has fewer than EMA_SLOW bars AND MT5_WARMUP_FILE lives alongside
+        LOG_FILE_PATH / MT5_FEED_FILE (so isolated temp-dir tests never read a
+        production warm-up file).
+        """
+        if len(self.closes) >= EMA_SLOW:
+            return
+        log_dir = os.path.dirname(os.path.abspath(LOG_FILE_PATH))
+        warm_dir = os.path.dirname(os.path.abspath(MT5_WARMUP_FILE))
+        if warm_dir != log_dir or not os.path.isfile(MT5_WARMUP_FILE):
+            return
+        try:
+            with open(MT5_WARMUP_FILE, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            candles = payload.get("candles") if isinstance(payload, dict) else payload
+            if not candles or not isinstance(candles, list):
+                return
+            candles = sorted(candles, key=lambda r: int(r["ts"]))
+            # Only prepend/seed if forward_test_log.csv is currently empty
+            if len(self.closes) == 0:
+                for bar in candles[-EMA_SLOW:]:
+                    self.lows.append(float(bar["low"]))
+                    self.highs.append(float(bar["high"]))
+                    self.closes.append(float(bar["close"]))
+                    self.volumes.append(float(bar.get("tick_volume", 1.0)))
+                self._recompute_indicators_from_series()
+                self._warmup_close_ts = int(candles[-1]["ts"]) + CANDLE_SECONDS
+                print(f"Seeded {len(self.closes)} M15 warm-up bars from {MT5_WARMUP_FILE} "
+                      f"(EMA200={'ready' if self.ema_slow else 'warming'})")
+        except Exception as e:
+            print(f"Failed to load MT5 warm-up bars: {e}")
 
     def calculate_rsi(self):
         if len(self.rsi_gains) < RSI_PERIOD:
@@ -530,15 +715,14 @@ class BitcoinEngine:
     def save_status(self):
         closed = self.wins + self.losses
         win_rate = (self.wins / closed * 100) if closed > 0 else 0.0
-        # Trade fields are always present (null when flat) for dashboard stability
         active_trade = self.trade_active or self.trade_active_live
 
-        # Daily-loss count for circuit-breaker visibility
         recent = load_recent_trades(50)
         daily_losses = get_daily_sl_count(recent)
+        symbol_label = SYMBOL_MT5 if (TRADING_MODE == "LIVE" or DATA_SOURCE == "MT5") else SYMBOL_TD
 
         data = {
-            "symbol": SYMBOL_MT5 if TRADING_MODE == "LIVE" else SYMBOL_TD,
+            "symbol": symbol_label,
             "equity": round(self.balance, 2),
             "total_trades": closed,
             "next_trade_num": self.next_trade_num,
@@ -547,6 +731,8 @@ class BitcoinEngine:
             "win_rate": round(win_rate, 1),
             "trade_active": active_trade,
             "trade_type": self.trade_type if active_trade else None,
+            "active_ticket": self.active_ticket if active_trade else None,
+            "active_position_id": self.active_position_id if active_trade else None,
             "daily_losses": daily_losses,
             "max_daily_losses": MAX_DAILY_LOSSES,
             "last_update": utc_now_str(),
@@ -584,15 +770,15 @@ class BitcoinEngine:
             },
         }
         try:
-            with open(STATUS_FILE_PATH, "w") as f:
-                json.dump(data, f, indent=2)
+            _atomic_write_json(STATUS_FILE_PATH, data)
         except Exception as e:
             print(f"Failed to write status.json: {e}")
 
     def journal(self, event: str, detail: str):
-        """Append an event to the local journal (replaces Telegram noise)."""
+        """Append an event to the local journal."""
         try:
             file_exists = os.path.isfile(JOURNAL_FILE_PATH)
+            os.makedirs(os.path.dirname(JOURNAL_FILE_PATH) or ".", exist_ok=True)
             with open(JOURNAL_FILE_PATH, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 if not file_exists:
@@ -602,7 +788,6 @@ class BitcoinEngine:
             print(f"\nJournal failed: {e}")
 
     def feed_stale_seconds(self, now_mono: float = None) -> float:
-        """Seconds since the last price event (0.0 while the feed is fresh)."""
         if self._last_price_mono is None:
             return 0.0
         if now_mono is None:
@@ -615,7 +800,6 @@ class BitcoinEngine:
         source: str = "price ticks",
         recovery: str = "check the feed",
     ) -> bool:
-        """Rate-limited journal entry for a stalled feed. True if it journaled."""
         if self._last_stale_alert_mono is not None and \
                 time.monotonic() - self._last_stale_alert_mono < STALE_ALERT_COOLDOWN_SECONDS:
             return False
@@ -627,13 +811,7 @@ class BitcoinEngine:
         return True
 
     def mt5_feed_is_stale(self, rates, now_mono=None, now_epoch=None) -> bool:
-        """Alert and return True when the MT5 feed has not advanced for too long.
-
-        Use the UTC age of a bar when the sidecar file is readable; this catches
-        a stale file immediately after restart. If the file is missing or
-        unreadable, fall back to elapsed monotonic time since the last accepted
-        bar (or the runner's startup baseline).
-        """
+        """Alert and return True when the MT5 M15 feed has stalled during open market hours."""
         candle_ts = latest_closed_candle_ts(rates)
         if candle_ts is not None:
             stale_seconds = mt5_closed_candle_age_seconds(candle_ts, now_epoch)
@@ -642,17 +820,22 @@ class BitcoinEngine:
         if stale_seconds <= STALE_FEED_SECONDS:
             return False
 
-        if not is_market_quiet() and self.maybe_alert_stale_feed(
-                stale_seconds,
-                source="new closed M5 candles",
-                recovery="check the mt5feed-btc sidecar",
+        now_dt = datetime.fromtimestamp(now_epoch, tz=timezone.utc) if now_epoch is not None else None
+        if is_market_quiet(now_dt):
+            return True
+
+        if self.maybe_alert_stale_feed(
+            stale_seconds,
+            source="new closed M15 candles",
+            recovery="check the mt5feed sidecar",
         ):
-            print(f"\nStale MT5 feed: no new closed candles for {stale_seconds:.0f}s - "
-                  "check the mt5feed-btc sidecar", flush=True)
+            print(f"\nStale MT5 feed: no new closed M15 candles for {stale_seconds:.0f}s - "
+                  "check the mt5feed sidecar", flush=True)
         return True
 
     def log_candle(self, timestamp, o, h, l, c, ratio, tick_count, vol_ma, dynamic_floor, ema_f, ema_s, tested, rejected, held, vol_conf, trend_conf, rsi_val, atr_val):
         file_exists = os.path.isfile(LOG_FILE_PATH)
+        os.makedirs(os.path.dirname(LOG_FILE_PATH) or ".", exist_ok=True)
         with open(LOG_FILE_PATH, mode="a", newline="") as f:
             writer = csv.DictWriter(
                 f,
@@ -685,25 +868,20 @@ class BitcoinEngine:
                 "ATR": f"{atr_val:.2f}" if atr_val else "Calculating",
             })
 
-    def log_trade(self, exit_price, exit_reason, profit):
+    def log_trade(self, exit_price, exit_reason, profit, exit_time=None):
         file_exists = os.path.isfile(TRADES_LOG_PATH)
         if file_exists:
-            # Never append new-schema rows under an old-schema header
-            # (that misaligns every field and blinds the risk gates - see
-            # migrate_trades_csv). migrate_trades_csv is a no-op if current.
             migrate_trades_csv(TRADES_LOG_PATH)
+        os.makedirs(os.path.dirname(TRADES_LOG_PATH) or ".", exist_ok=True)
         with open(TRADES_LOG_PATH, mode="a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=TRADES_FIELDNAMES)
             if not file_exists:
                 writer.writeheader()
-            # NOTE: plain %.2f, NOT comma-grouped. The old {:,.2f} format wrote
-            # values like "80,000.00" that break naive float() parsing in every
-            # downstream reader. Loaders still strip commas for legacy rows.
             writer.writerow({
                 "Trade_Num": self.current_trade_num,
                 "Trade_Type": self.trade_type,
                 "Entry_Time": self.entry_time,
-                "Exit_Time": utc_now_str(),
+                "Exit_Time": exit_time or utc_now_str(),
                 "Entry_Price": f"{self.entry_price:.2f}",
                 "Stop_Loss": f"{self.stop_loss:.2f}",
                 "Take_Profit": f"{self.take_profit:.2f}",
@@ -726,9 +904,9 @@ class BitcoinEngine:
             raise ValueError(f"Unsupported exit reason: {exit_reason}")
 
         if self.trade_type == "BUY":
-            profit = (exit_price - self.entry_price) * LOT_SIZE
+            profit = (exit_price - self.entry_price) * LOT_SIZE * CONTRACT_SIZE
         else:
-            profit = (self.entry_price - exit_price) * LOT_SIZE
+            profit = (self.entry_price - exit_price) * LOT_SIZE * CONTRACT_SIZE
 
         self.balance += profit
         if exit_reason == "TP":
@@ -743,29 +921,13 @@ class BitcoinEngine:
         self.journal(
             "TRADE_EXIT",
             f"{exit_reason} HIT ({self.trade_type} #{self.current_trade_num}) | "
-            f"Exit: ${exit_price:,.2f} ({pnl_text}) | Equity: ${self.balance:,.2f}",
+            f"Exit: {exit_price:,.2f} ({pnl_text}) | Equity: ${self.balance:,.2f}",
         )
         self.save_status()
         return True
 
     def check_position_on_closed_candle(self, o: float, h: float, l: float, c: float) -> bool:
-        """Evaluate ONE closed candle against an already-open simulated trade.
-
-        Closed-candle OHLC proves barrier touches, not the exact intrabar path, so
-        the MT5 forward-test path uses deterministic, conservative conventions:
-          - BUY:  stop if low <= SL, target if high >= TP
-          - SELL: stop if high >= SL, target if low <= TP
-          - If both barriers print inside one candle, STOP wins (conservative)
-          - Stop gaps fill at the candle open if the bar opens through the stop;
-            otherwise they fill at the stop level
-          - Target touches fill at the target level even if the bar opened beyond
-            it (do not credit favourable OHLC overshoot as an exact fill)
-
-        Call this BEFORE evaluate_candle(): entries happen at the candle close, so
-        a position opened by this candle must not be exposed to this candle's
-        earlier range. A candle that exits an older trade may still open a new
-        trade at its close.
-        """
+        """Evaluate ONE closed M15 candle against an already-open simulated trade."""
         if not self.trade_active:
             return False
 
@@ -790,12 +952,11 @@ class BitcoinEngine:
         return False
 
     def process_closed_candle(self, o, h, l, c, tick_count, candle_ts=None):
-        """MT5 forward-test ordering: exit old trades on the bar, then score the close.
-
-        `candle_ts` is MT5's UTC bar-open timestamp. When supplied, persist the
-        exact close time so restart dedup compares like-for-like timestamps.
-        """
-        self.check_position_on_closed_candle(o, h, l, c)
+        """Exit old trades on the bar first, then evaluate the close for a new signal."""
+        if TRADING_MODE == "LIVE":
+            self.check_live_exits()
+        else:
+            self.check_position_on_closed_candle(o, h, l, c)
         timestamp = None
         if candle_ts is not None:
             close_ts = int(candle_ts) + CANDLE_SECONDS
@@ -809,7 +970,6 @@ class BitcoinEngine:
 
         self.candles_evaluated += 1
 
-        # Calculate wicks (both sides for the bidirectional funnel)
         body_bottom = min(o, c)
         body_top = max(o, c)
         lower_wick = body_bottom - l
@@ -831,17 +991,14 @@ class BitcoinEngine:
             dynamic_ceiling = max(list(self.highs)[-LOOKBACK_PERIOD:])
             volume_ma = sum(list(self.volumes)[-LOOKBACK_PERIOD:]) / LOOKBACK_PERIOD
 
-            # Buy support conditions
             tested_floor = l <= (dynamic_floor * (1 + FLOOR_BUFFER_PCT))
             held_support = c > dynamic_floor
 
-            # Sell resistance conditions
             tested_ceiling = h >= (dynamic_ceiling * (1 - FLOOR_BUFFER_PCT))
             held_resistance = c < dynamic_ceiling
 
             volume_confirmed = tick_count >= (volume_ma * VOLUME_SPIKE_MULTIPLIER) if volume_ma else True
 
-        # Trend evaluations
         if self.ema_fast is not None and self.ema_slow is not None:
             buy_trend_confirmed = self.ema_fast > self.ema_slow
             sell_trend_confirmed = self.ema_fast < self.ema_slow
@@ -858,9 +1015,9 @@ class BitcoinEngine:
                 self.warmup_logged = True
         else:
             print(
-                f"Floor:${dynamic_floor:,.2f} Ceil:${dynamic_ceiling:,.2f} | "
-                f"EMA50:${self.ema_fast:,.2f} EMA200:${self.ema_slow:,.2f} "
-                f"| RSI:{self.rsi} ATR:{self.atr:,.2f} | C:${c:,.2f}"
+                f"Floor:{dynamic_floor:,.2f} Ceil:{dynamic_ceiling:,.2f} | "
+                f"EMA50:{self.ema_fast:,.2f} EMA200:{self.ema_slow:,.2f} "
+                f"| RSI:{self.rsi} ATR:{self.atr:,.2f} | C:{c:,.2f}"
             )
             print(f"   [BUY] Tested:{tested_floor} | Rej:{valid_buy_rejection} ({lower_wick_ratio:.0%}) | Held:{held_support} | Trend:{buy_trend_confirmed}")
             print(f"   [SELL] Tested:{tested_ceiling} | Rej:{valid_sell_rejection} ({upper_wick_ratio:.0%}) | Held:{held_resistance} | Trend:{sell_trend_confirmed}")
@@ -878,7 +1035,6 @@ class BitcoinEngine:
         self.update_indicators(h, l, c)
         self.save_status()
 
-        # --- Regime gates (Slope & Price Proximity) ---
         buy_slope_confirmed = False
         sell_slope_confirmed = False
         if self.ema_fast is not None and len(self.ema50_history) >= EMA_SLOPE_LOOKBACK:
@@ -887,7 +1043,6 @@ class BitcoinEngine:
         if self.ema_fast is not None:
             self.ema50_history.append(self.ema_fast)
 
-        # Proximity to EMA50 (prevent buying collapsed candles or selling spiked candles)
         buy_price_near_ema = False
         sell_price_near_ema = False
         if self.ema_fast is not None and self.atr is not None:
@@ -897,19 +1052,16 @@ class BitcoinEngine:
         vol_ok = volume_confirmed if REQUIRE_VOLUME_CONFIRM else True
         atr_ok = (self.atr is not None and self.atr > MIN_ATR)
 
-        # Long checks
         buy_trend_ok = buy_trend_confirmed if REQUIRE_TREND_CONFIRM else True
         buy_slope_ok = buy_slope_confirmed if REQUIRE_EMA_SLOPE else True
         buy_rsi_ok = (self.rsi is not None and RSI_MIN < self.rsi < RSI_MAX)
 
-        # Short checks (symmetric bounds: 100-70=30 < RSI < 100-40=60)
         sell_trend_ok = sell_trend_confirmed if REQUIRE_TREND_CONFIRM else True
         sell_slope_ok = sell_slope_confirmed if REQUIRE_EMA_SLOPE else True
         sell_rsi_ok = (self.rsi is not None and (100.0 - RSI_MAX) < self.rsi < (100.0 - RSI_MIN))
 
         in_trade = self.trade_active or self.trade_active_live
 
-        # Funnel tracking
         if dynamic_floor is not None:
             if tested_floor:
                 self.hit_tested_floor += 1
@@ -981,10 +1133,10 @@ class BitcoinEngine:
             )
 
             if not allow:
-                msg = (f"BTC BUY SETUP SKIPPED\nReason: `{reason}`\n"
-                       f"Price: `${c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
+                msg = (f"US100Cash BUY SETUP SKIPPED\nReason: `{reason}`\n"
+                       f"Price: `{c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
                 self.journal("BUY_SKIP", msg)
-                print(f"\nBTC Trade skipped -> {reason}\n")
+                print(f"\nUS100Cash Trade skipped -> {reason}\n")
                 return
 
             if TRADING_MODE == "LIVE":
@@ -1002,10 +1154,10 @@ class BitcoinEngine:
             )
 
             if not allow:
-                msg = (f"BTC SELL SETUP SKIPPED\nReason: `{reason}`\n"
-                       f"Price: `${c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
+                msg = (f"US100Cash SELL SETUP SKIPPED\nReason: `{reason}`\n"
+                       f"Price: `{c:,.2f}` | RSI: `{self.rsi:.1f}` | ATR: `{self.atr:,.2f}`")
                 self.journal("SELL_SKIP", msg)
-                print(f"\nBTC Trade skipped -> {reason}\n")
+                print(f"\nUS100Cash Trade skipped -> {reason}\n")
                 return
 
             if TRADING_MODE == "LIVE":
@@ -1013,28 +1165,153 @@ class BitcoinEngine:
             else:
                 self.execute_simulated_trade("SELL", c, upper_wick_ratio, ts)
 
-    def execute_live_trade(self, direction: str, c: float, wick_ratio: float, ts: str):
-        print(f"\nALL CONDITIONS MET! PREPARING LIVE {direction} ORDER...")
-        symbol_info = mt5.symbol_info(SYMBOL_MT5)
-        point = symbol_info.point
-        tick = mt5.symbol_info_tick(SYMBOL_MT5)
-        if tick is None:
-            print("Failed to get tick data")
+    def _execute_live_via_bridge(self, direction: str, c: float, wick_ratio: float, ts: str):
+        """Linux host -> Wine tools/mt5_executor.py atomic file-bridge execution."""
+        if self._live_magic_positions():
+            print("Bridge LIVE guard: broker already holds an open position for our magic; skipping duplicate entry")
+            self.journal("LIVE_DUPLICATE_BLOCKED", f"{direction} skipped - position already open")
             return
 
-        if direction == "BUY":
-            price = tick.ask
-            order_type = mt5.ORDER_TYPE_BUY
-            sl_price = price - (self.atr * ATR_SL_MULT)
-            tp_price = price + (self.atr * ATR_TP_MULT)
-        else:
-            price = tick.bid
-            order_type = mt5.ORDER_TYPE_SELL
-            sl_price = price + (self.atr * ATR_SL_MULT)
-            tp_price = price - (self.atr * ATR_TP_MULT)
+        sl_dist = self.atr * ATR_SL_MULT
+        tp_dist = self.atr * ATR_TP_MULT
+        sl_est = (c - sl_dist) if direction == "BUY" else (c + sl_dist)
+        tp_est = (c + tp_dist) if direction == "BUY" else (c - tp_dist)
+        iid = uuid.uuid4().hex
+        intent = {
+            "intent_id": iid,
+            "ts_utc": utc_now_str(),
+            "ts_epoch": time.time(),
+            "action": "OPEN",
+            "side": direction,
+            "symbol": SYMBOL_MT5,
+            "volume": LOT_SIZE,
+            "sl": round(sl_est, 2),
+            "tp": round(tp_est, 2),
+            "atr": round(self.atr, 4),
+            "sl_dist": round(sl_dist, 4),
+            "tp_dist": round(tp_dist, 4),
+            "magic": MAGIC_NUMBER,
+            "trade_num": self.next_trade_num,
+            "comment": f"Nasdaq Live {direction}",
+        }
+        intent_path = os.path.join(MT5_ORDER_DIR, "intent.json")
+        result_path = os.path.join(MT5_ORDER_DIR, "result.json")
+        _atomic_write_json(intent_path, intent)
 
-        sl_price = round(sl_price / point) * point
-        tp_price = round(tp_price / point) * point
+        deadline = time.monotonic() + MT5_BRIDGE_TIMEOUT_S
+        res = None
+        while time.monotonic() < deadline:
+            if os.path.isfile(result_path):
+                try:
+                    with open(result_path, encoding="utf-8") as fh:
+                        cand = json.load(fh)
+                    if isinstance(cand, dict) and cand.get("intent_id") == iid:
+                        res = cand
+                        break
+                except Exception:
+                    pass
+            time.sleep(0.2)
+
+        if res is None:
+            self.journal("ORDER_BRIDGE_TIMEOUT", f"intent_id={iid} timed out after {MT5_BRIDGE_TIMEOUT_S:.1f}s")
+            print(f"Bridge order timeout waiting for result.json (intent_id={iid})")
+            return
+
+        status = str(res.get("status") or "").upper()
+        if status != "FILLED":
+            self.journal("ORDER_FAILED", f"Bridge status={status} | Msg: {res.get('message')}")
+            print(f"Bridge order not filled ({status}): {res.get('message')}")
+            return
+
+        pos_id = int(res.get("position_id") or res.get("order") or 0)
+        fill_px = float(res.get("fill_price") or c)
+        self.current_trade_num = self.next_trade_num
+        self.next_trade_num += 1
+        self.active_ticket = pos_id
+        self.active_position_id = pos_id
+        self.trade_active = False
+        self.trade_active_live = True
+        self.trade_type = direction
+        self.entry_price = fill_px
+        self.stop_loss = float(res.get("sl") or sl_est)
+        self.take_profit = float(res.get("tp") or tp_est)
+        self.entry_time = ts
+        self.entry_rsi = self.rsi
+        self.entry_atr = self.atr
+        self.entry_wick_ratio = wick_ratio
+        self.entry_ema_fast = self.ema_fast
+        self.entry_ema_slow = self.ema_slow
+
+        self.journal(
+            "LIVE_ENTRY",
+            f"{direction} EXECUTED (bridge) | Pos: {pos_id} | Trade #{self.current_trade_num} | "
+            f"Entry: {self.entry_price:,.2f} | SL: {self.stop_loss:,.2f} | TP: {self.take_profit:,.2f}",
+        )
+        self.save_status()
+
+    def execute_live_trade(self, direction: str, c: float, wick_ratio: float, ts: str):
+        print(f"\nALL CONDITIONS MET! PREPARING LIVE {direction} ORDER...")
+        if self.trade_active_live or self.trade_active:
+            print("Already in trade; skipping duplicate live order.")
+            return
+        if self.live_unknown_order:
+            print("Prior order_send returned None (unknown broker state); refusing retry until reconciled.")
+            return
+
+        if mt5 is None:
+            self._execute_live_via_bridge(direction, c, wick_ratio, ts)
+            return
+
+        # 1. Duplicate-exposure check on the broker
+        if self._live_magic_positions():
+            print(f"Broker already holds an open position for magic {MAGIC_NUMBER}; refusing duplicate order")
+            self.journal("LIVE_DUPLICATE_BLOCKED", f"{direction} blocked - position already open on MT5")
+            return
+
+        symbol_info = mt5.symbol_info(SYMBOL_MT5)
+        if symbol_info is None:
+            print(f"symbol_info({SYMBOL_MT5}) returned None")
+            return
+        point = float(getattr(symbol_info, "point", 0.01) or 0.01)
+
+        # 2. Volume check (never silently upsize)
+        vmin = float(getattr(symbol_info, "volume_min", 0.01) or 0.01)
+        vmax = float(getattr(symbol_info, "volume_max", 100.0) or 100.0)
+        if LOT_SIZE + 1e-9 < vmin or LOT_SIZE - 1e-9 > vmax:
+            msg = f"LOT_SIZE {LOT_SIZE} outside broker [{vmin}, {vmax}]"
+            print(msg)
+            self.journal("ORDER_FAILED", msg)
+            return
+
+        # 3. Live quote & spread guard
+        tick = mt5.symbol_info_tick(SYMBOL_MT5)
+        if tick is None or float(getattr(tick, "bid", 0) or 0) <= 0 or float(getattr(tick, "ask", 0) or 0) < float(tick.bid):
+            print("Failed to get valid tick data")
+            return
+
+        spread = float(tick.ask) - float(tick.bid)
+        sl_dist = self.atr * ATR_SL_MULT
+        tp_dist = self.atr * ATR_TP_MULT
+        if spread > MAX_SPREAD_POINTS or (sl_dist > 0 and spread > MAX_SPREAD_TO_1R * sl_dist):
+            msg = f"Spread {spread:.2f} exceeds guard (max {MAX_SPREAD_POINTS:.2f} pts / {MAX_SPREAD_TO_1R:.0%} of 1R)"
+            print(f"Live order skipped: {msg}")
+            self.journal("LIVE_SPREAD_SKIP", msg)
+            return
+
+        # 4. Recompute SL/TP from live bid/ask so 1:2 R:R holds on actual entry quote
+        if direction == "BUY":
+            price = float(tick.ask)
+            order_type = mt5.ORDER_TYPE_BUY
+            sl_price = round((price - sl_dist) / point) * point
+            tp_price = round((price + tp_dist) / point) * point
+        else:
+            price = float(tick.bid)
+            order_type = mt5.ORDER_TYPE_SELL
+            sl_price = round((price + sl_dist) / point) * point
+            tp_price = round((price - tp_dist) / point) * point
+
+        # 5. Decode symbol_info().filling_mode bitmask -> ORDER_FILLING_* enum
+        filling_type = _select_mt5_filling(symbol_info, mt5)
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -1044,41 +1321,77 @@ class BitcoinEngine:
             "price": price,
             "sl": sl_price,
             "tp": tp_price,
-            "deviation": 50,
+            "deviation": LIVE_DEVIATION_POINTS,
             "magic": MAGIC_NUMBER,
-            "comment": f"BTC Engine Live {direction}",
+            "comment": f"Nasdaq Live {direction}",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
+            "type_filling": filling_type,
         }
         print(f"   Sending: {direction} {LOT_SIZE} {SYMBOL_MT5} @ {price:,.2f} | SL: {sl_price:,.2f} | TP: {tp_price:,.2f}")
 
         result = mt5.order_send(request)
+        if result is None:
+            print("order_send returned None (terminal timeout/disconnect) - checking broker positions before continuing")
+            self.journal("ORDER_UNKNOWN", "order_send returned None; reconciling via positions_get")
+            after_pos = self._live_magic_positions()
+            if after_pos:
+                pid = int(getattr(after_pos[0], "ticket", 0) or 0)
+                self.current_trade_num = self.next_trade_num
+                self.next_trade_num += 1
+                self.active_ticket = pid
+                self.active_position_id = pid
+                self.trade_active_live = True
+                self.trade_type = direction
+                self.entry_price = float(getattr(after_pos[0], "price_open", price) or price)
+                self.stop_loss = sl_price
+                self.take_profit = tp_price
+                self.entry_time = ts
+                self.entry_rsi = self.rsi
+                self.entry_atr = self.atr
+                self.entry_wick_ratio = wick_ratio
+                self.entry_ema_fast = self.ema_fast
+                self.entry_ema_slow = self.ema_slow
+                self.save_status()
+            else:
+                self.live_unknown_order = True
+            return
+
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             print(f"Order failed: {result.retcode} - {result.comment}")
             self.journal("ORDER_FAILED", f"Code: {result.retcode} | Msg: {result.comment}")
-        else:
-            self.current_trade_num = self.next_trade_num
-            self.next_trade_num += 1
-            self.active_ticket = result.order
-            self.trade_active_live = True
-            self.trade_type = direction
-            self.entry_price = price
-            self.stop_loss = sl_price
-            self.take_profit = tp_price
-            self.entry_time = ts
-            self.entry_rsi = self.rsi
-            self.entry_atr = self.atr
-            self.entry_wick_ratio = wick_ratio
-            self.entry_ema_fast = self.ema_fast
-            self.entry_ema_slow = self.ema_slow
+            return
 
-            print(f"ORDER SUCCESS! Ticket: {self.active_ticket} | Trade #{self.current_trade_num}")
-            self.journal(
-                "LIVE_ENTRY",
-                f"{direction} EXECUTED | Ticket: {self.active_ticket} | Trade #{self.current_trade_num} | "
-                f"Entry: ${price:,.2f} | SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}",
-            )
-            self.save_status()
+        pos_id = int(result.order)
+        fill_px = float(getattr(result, "price", 0.0) or price)
+        after_pos = self._live_magic_positions()
+        if after_pos:
+            pos_id = int(getattr(after_pos[-1], "ticket", pos_id) or pos_id)
+            fill_px = float(getattr(after_pos[-1], "price_open", fill_px) or fill_px)
+
+        self.current_trade_num = self.next_trade_num
+        self.next_trade_num += 1
+        self.active_ticket = pos_id
+        self.active_position_id = pos_id
+        self.trade_active = False
+        self.trade_active_live = True
+        self.trade_type = direction
+        self.entry_price = fill_px
+        self.stop_loss = sl_price
+        self.take_profit = tp_price
+        self.entry_time = ts
+        self.entry_rsi = self.rsi
+        self.entry_atr = self.atr
+        self.entry_wick_ratio = wick_ratio
+        self.entry_ema_fast = self.ema_fast
+        self.entry_ema_slow = self.ema_slow
+
+        print(f"ORDER SUCCESS! Position: {self.active_ticket} | Trade #{self.current_trade_num}")
+        self.journal(
+            "LIVE_ENTRY",
+            f"{direction} EXECUTED | Ticket: {self.active_ticket} | Trade #{self.current_trade_num} | "
+            f"Entry: {fill_px:,.2f} | SL: {sl_price:,.2f} | TP: {tp_price:,.2f}",
+        )
+        self.save_status()
 
     def execute_simulated_trade(self, direction: str, c: float, wick_ratio: float, ts: str):
         self.trade_active = True
@@ -1101,16 +1414,11 @@ class BitcoinEngine:
         self.entry_ema_fast = self.ema_fast
         self.entry_ema_slow = self.ema_slow
 
-        msg = (f"BTC {direction} SETUP #{self.current_trade_num}\n"
-               f"Entry: `${self.entry_price:,.2f}`\n"
-               f"RSI: `{self.rsi:.1f}` | ATR: `${self.atr:,.2f}`\n"
-               f"SL: `${self.stop_loss:,.2f}`\n"
-               f"TP: `${self.take_profit:,.2f}`")
         self.journal(
             "TRADE_ENTRY",
-            f"{direction} SETUP #{self.current_trade_num} | Entry: ${self.entry_price:,.2f} | "
-            f"RSI: {self.rsi:.1f} | ATR: ${self.atr:,.2f} | SL: ${self.stop_loss:,.2f} | "
-            f"TP: ${self.take_profit:,.2f}",
+            f"{direction} SETUP #{self.current_trade_num} | Entry: {self.entry_price:,.2f} | "
+            f"RSI: {self.rsi:.1f} | ATR: {self.atr:,.2f} | SL: {self.stop_loss:,.2f} | "
+            f"TP: {self.take_profit:,.2f}",
         )
         print(f"\nAlert sent -> {direction} Trade #{self.current_trade_num}\n")
         self.save_status()
@@ -1131,35 +1439,114 @@ class BitcoinEngine:
             elif price >= self.stop_loss:
                 self.close_simulated_trade(exit_price=price, exit_reason="SL")
 
+    def _record_live_exit(self, exit_price: float, net_profit: float, exit_time: str = None, broker_balance: float = None):
+        reason = "TP" if net_profit > 0 else "SL"
+        if net_profit > 0:
+            self.wins += 1
+        else:
+            self.losses += 1
+
+        if broker_balance is not None and broker_balance > 0:
+            self.balance = float(broker_balance)
+        else:
+            self.balance += net_profit
+
+        self.trade_active = False
+        self.trade_active_live = False
+        self.active_ticket = None
+        self.active_position_id = None
+
+        self.log_trade(exit_price=exit_price, exit_reason=reason, profit=net_profit, exit_time=exit_time)
+        self.journal(
+            "LIVE_EXIT",
+            f"{reason} HIT ({self.trade_type} #{self.current_trade_num}) | "
+            f"Exit: {exit_price:,.2f} | Net Profit: ${net_profit:,.2f} | Balance: ${self.balance:,.2f}",
+        )
+        self.save_status()
+
     def check_live_exits(self):
-        """Checks MT5 history to see if our active live trade has closed."""
-        if not self.trade_active_live or not self.active_ticket:
+        """Reconcile broker-side SL/TP/manual exits by position_id (not entry order ticket)."""
+        if not (self.trade_active_live or self.trade_active):
             return
 
-        history = mt5.history_deals_get(ticket=self.active_ticket)
-        if history:
-            for deal in history:
-                if deal.entry == mt5.DEAL_ENTRY_OUT:  # 1 = entry out (close)
-                    profit = deal.profit
-                    exit_price = deal.price
-                    reason = "TP" if profit > 0 else "SL"
+        target_pos = self.active_position_id or (self.active_ticket if (self.active_ticket and self.active_ticket > 0) else None)
 
-                    if profit > 0:
-                        self.wins += 1
-                    else:
-                        self.losses += 1
-
-                    self.trade_active_live = False
-                    self.active_ticket = None
-
-                    self.log_trade(exit_price=exit_price, exit_reason=reason, profit=profit)
-                    self.journal(
-                        "LIVE_EXIT",
-                        f"{reason} HIT ({self.trade_type} #{self.current_trade_num}) | "
-                        f"Exit: ${exit_price:,.2f} | Profit: ${profit:,.2f}",
+        # Bridge path (Linux host -> Wine tools/mt5_executor.py)
+        if mt5 is None:
+            pos_file = os.path.join(MT5_ORDER_DIR, "positions.json")
+            if not os.path.isfile(pos_file):
+                return
+            try:
+                with open(pos_file, encoding="utf-8") as fh:
+                    snap = json.load(fh)
+            except Exception:
+                return
+            open_ids = {int(p.get("position_id") or 0) for p in (snap.get("positions") or [])}
+            if target_pos and target_pos in open_ids:
+                return
+            for c in reversed(snap.get("closed_recent") or []):
+                cid = int(c.get("position_id") or 0)
+                if target_pos is None or cid == target_pos:
+                    self._record_live_exit(
+                        exit_price=float(c.get("price") or 0.0),
+                        net_profit=float(c.get("profit") or 0.0),
+                        exit_time=c.get("time_utc"),
+                        broker_balance=snap.get("balance"),
                     )
-                    self.save_status()
-                    break
+                    return
+            return
+
+        # Direct MetaTrader5 path
+        open_pos = self._live_magic_positions()
+        if target_pos is not None and any(int(getattr(p, "ticket", 0) or 0) == target_pos for p in open_pos):
+            return
+        if target_pos is None and open_pos:
+            pid = int(getattr(open_pos[0], "ticket", 0) or 0)
+            self.active_ticket = pid
+            self.active_position_id = pid
+            return
+
+        deals = ()
+        if target_pos is not None:
+            try:
+                deals = mt5.history_deals_get(position=target_pos) or ()
+            except TypeError:
+                deals = ()
+        if not deals:
+            dt_from = datetime.now(timezone.utc) - timedelta(days=30)
+            dt_to = datetime.now(timezone.utc) + timedelta(days=1)
+            try:
+                all_deals = mt5.history_deals_get(dt_from, dt_to) or ()
+            except TypeError:
+                all_deals = mt5.history_deals_get() or ()
+            if target_pos is not None:
+                deals = tuple(d for d in all_deals if int(getattr(d, "position_id", 0) or 0) == target_pos)
+            else:
+                # Legacy status.json without active_ticket: attach to the newest closed position
+                out_deals = [d for d in all_deals if int(getattr(d, "entry", -1)) == mt5.DEAL_ENTRY_OUT]
+                if out_deals:
+                    inferred_pos = int(getattr(out_deals[-1], "position_id", 0) or 0)
+                    deals = tuple(d for d in all_deals if int(getattr(d, "position_id", 0) or 0) == inferred_pos)
+
+        if not deals:
+            return
+
+        closing = [d for d in deals if int(getattr(d, "entry", -1)) in (mt5.DEAL_ENTRY_OUT, getattr(mt5, "DEAL_ENTRY_INOUT", 2))]
+        if not closing:
+            return
+
+        last_out = closing[-1]
+        net_profit = sum(_deal_net_profit(d) for d in deals)
+        exit_price = float(getattr(last_out, "price", 0.0) or 0.0)
+        acct = mt5.account_info()
+        # Only override balance from account_info if broker tracks it dynamically;
+        # otherwise apply net_profit delta cleanly.
+        new_bal = self.balance + net_profit
+        if acct is not None and hasattr(acct, "balance"):
+            acct_bal = float(acct.balance)
+            if abs(acct_bal - self.balance) > 1e-6 and acct_bal != STARTING_BALANCE:
+                new_bal = acct_bal
+        self._record_live_exit(exit_price=exit_price, net_profit=net_profit, broker_balance=new_bal)
 
     def aggregate_tick(self, price: float):
         bucket_now = int(datetime.now(timezone.utc).timestamp() // CANDLE_SECONDS)
@@ -1181,25 +1568,31 @@ class BitcoinEngine:
             price = float(event["price"])
             self.check_position(price)
             self.aggregate_tick(price)
-            print(f"${price:,.2f} | ticks: {len(self.tick_pool)}   ", end="\r")
+            print(f"{price:,.2f} | ticks: {len(self.tick_pool)}   ", end="\r")
             sys.stdout.flush()
         except Exception:
             return
 
     def run_live(self):
-        print(f"Bitcoin Engine LIVE starting for {SYMBOL_MT5} (M5)...")
+        """LIVE runner: supports direct MetaTrader5 OR Linux Wine bridge (mt5feed + mt5_executor)."""
+        if mt5 is None:
+            print(f"Nasdaq Engine LIVE (Wine bridge) starting for {SYMBOL_MT5} (M15)...")
+            self._run_sidecar_candle_loop(live_bridge=True)
+            return
+
+        print(f"Nasdaq Engine LIVE (direct MT5) starting for {SYMBOL_MT5} (M15)...")
+        tf_m15 = getattr(mt5, "TIMEFRAME_M15", 15)
         candles_fetched = 0
         while True:
             try:
-                rates = mt5.copy_rates_from_pos(SYMBOL_MT5, mt5.TIMEFRAME_M5, 1, 1)
+                self.check_live_exits()
+                rates = mt5.copy_rates_from_pos(SYMBOL_MT5, tf_m15, 1, 1)
                 if rates is None or len(rates) == 0:
                     time.sleep(5)
                     continue
                 candle_ts = int(rates[0]["time"])
                 if candle_ts == self._last_live_candle_ts:
-                    # Same closed candle as last poll - wait for the next M5 close
-                    self.check_live_exits()  # still watch for SL/TP fills
-                    time.sleep(10)
+                    time.sleep(5)
                     continue
                 self._last_live_candle_ts = candle_ts
                 last_candle = rates[0]
@@ -1211,14 +1604,13 @@ class BitcoinEngine:
                     int(last_candle["tick_volume"]),
                 )
                 self.evaluate_candle(o, h, l, c, vol)
-                self.check_live_exits()  # Check if MT5 closed our trade
-                if candles_fetched % 10 == 0:
-                    print(f"Heartbeat: Processed M5 candle @ "
+                self.check_live_exits()
+                if candles_fetched % 4 == 0:
+                    print(f"Heartbeat: Processed M15 candle @ "
                           f"{datetime.fromtimestamp(candle_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC "
                           f"| Close: {c:,.2f}")
                 candles_fetched += 1
-                for _ in range(12):
-                    time.sleep(5)
+                time.sleep(5)
             except KeyboardInterrupt:
                 print("\nShutting down...")
                 mt5.shutdown()
@@ -1228,9 +1620,7 @@ class BitcoinEngine:
                 time.sleep(10)
 
     def read_mt5_feed(self):
-        """Read the latest closed M5 candle published by tools/mt5_feed.py
-        (Wine sidecar), normalized to the mt5 rate-dict shape, or None if the
-        file is missing/unreadable."""
+        """Read the latest closed M15 candle published by tools/mt5_feed.py."""
         try:
             with open(MT5_FEED_FILE) as f:
                 d = json.load(f)
@@ -1246,49 +1636,31 @@ class BitcoinEngine:
             return None
 
     def mt5_next_candle(self, rates, last_processed_close_ts):
-        """Return (open_ts, o, h, l, c, tick_volume) for a new closed bar.
-
-        MT5 rate `time` is the bar-open timestamp; the persisted log watermark
-        is a bar-close timestamp. Compare `open_ts + CANDLE_SECONDS` to that
-        watermark, so a restart neither replays the old bar nor skips the next
-        one when log processing happened a few seconds after the boundary.
-        """
+        """Return (open_ts, o, h, l, c, tick_volume) for a new closed M15 bar."""
         ts = latest_closed_candle_ts(rates)
-        if ts is None or ts + CANDLE_SECONDS <= last_processed_close_ts:
+        watermark = max(int(last_processed_close_ts or 0), int(self._warmup_close_ts or 0))
+        if ts is None or ts + CANDLE_SECONDS <= watermark:
             return None
         r = rates[0]
         return (ts, float(r["open"]), float(r["high"]), float(r["low"]),
                 float(r["close"]), int(r["tick_volume"]))
 
-    def run_mt5_test(self):
-        """Forward test fed by the Wine MT5 sidecar's closed M5 candles.
-
-        Same strategy/risk code as run_forward_test(), but the data source is
-        the broker feed (tools/mt5_feed.py publishes MT5_FEED_FILE, immune to
-        Twelve Data plan / WS-trial limits). One candle row per closed 5-min
-        bar, deduplicated by candle timestamp.
-
-        Ordering matters: an already-open simulated trade is checked against the
-        newly accepted candle's OHLC BEFORE the candle close is evaluated for a
-        fresh signal. That prevents a trade opened at this candle's close from
-        being stopped by this candle's earlier range, while still allowing an
-        exit candle to open a new trade at the same close if the signal stack
-        says so. Closed-candle fills are deterministic, conservative estimates
-        rather than claims about the exact intrabar path; see
-        check_position_on_closed_candle().
-        """
-        print("Bitcoin Engine FORWARD TEST (MT5 feed) starting...")
-        last_processed_close_ts = last_logged_candle_close_ts(LOG_FILE_PATH)
-        # The watchdog also needs a baseline when the sidecar file is missing.
+    def _run_sidecar_candle_loop(self, live_bridge: bool = False):
+        mode_label = "LIVE (MT5 bridge)" if live_bridge else "FORWARD TEST (MT5 M15 feed)"
+        print(f"Nasdaq Engine {mode_label} starting for {SYMBOL_MT5}...")
+        last_processed_close_ts = max(last_logged_candle_close_ts(LOG_FILE_PATH), self._warmup_close_ts)
         self._last_price_mono = time.monotonic()
         try:
             while True:
+                if live_bridge:
+                    self.check_live_exits()
                 rates = self.read_mt5_feed()
                 stale = self.mt5_feed_is_stale(rates)
 
                 if rates is None or len(rates) == 0:
-                    print(f"MT5: no feed in {MT5_FEED_FILE} - retrying in 5s "
-                          "(is the mt5feed sidecar running? terminal logged in?)", flush=True)
+                    if not is_market_quiet():
+                        print(f"MT5: no feed in {MT5_FEED_FILE} - retrying in 5s "
+                              "(is the mt5feed sidecar running? terminal logged in?)", flush=True)
                 elif not stale:
                     candle = self.mt5_next_candle(rates, last_processed_close_ts)
                     if candle is not None:
@@ -1300,20 +1672,21 @@ class BitcoinEngine:
                         except Exception as e:
                             print(f"\nError evaluating candle @ {ts}: {e}", flush=True)
                         if ts % 3600 == 0:
-                            print(f"Heartbeat: candle @ "
+                            print(f"Heartbeat: M15 candle @ "
                                   f"{datetime.fromtimestamp(ts, tz=timezone.utc):%Y-%m-%d %H:%M} UTC "
                                   f"| close {c:,.2f}", flush=True)
 
-                # The guard above runs every iteration, including missing and
-                # unchanged feeds; neither case may continue around the check.
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nShutting down...")
 
+    def run_mt5_test(self):
+        self._run_sidecar_candle_loop(live_bridge=False)
+
     def run_forward_test(self):
-        print("Bitcoin Engine FORWARD TEST starting...")
-        if not TWELVE_DATA_KEY:
-            print("TWELVE_DATA_API_KEY missing")
+        print(f"Nasdaq Engine FORWARD TEST (Twelve Data {SYMBOL_TD}) starting...")
+        if not TWELVE_DATA_KEY or TDClient is None:
+            print("TWELVE_DATA_API_KEY or twelvedata package missing")
             sys.exit(1)
         while True:
             ws = None
@@ -1328,22 +1701,16 @@ class BitcoinEngine:
                     try:
                         ws.heartbeat()
                         time.sleep(15)
-                        # Stale-feed guard: a silently-dead WebSocket delivers no
-                        # price events and heartbeat() never raises, so without
-                        # this the engine idles forever collecting nothing
-                        # (gold 2026-09-10: two stalls, 2.5h+ of lost data,
-                        # zero alerts). Force a reconnect if the feed is
-                        # quiet beyond STALE_FEED_SECONDS. BTC is 24/7: always alert.
                         stale = self.feed_stale_seconds()
                         if stale > STALE_FEED_SECONDS:
-                            print(f"\nStale feed: no price events for {stale:.0f}s - forcing reconnect")
                             if not is_market_quiet():
+                                print(f"\nStale feed: no price events for {stale:.0f}s - forcing reconnect")
                                 self.maybe_alert_stale_feed(
                                     stale,
                                     source="price ticks",
                                     recovery="forcing a Twelve Data WebSocket reconnect",
                                 )
-                            break
+                                break
                     except Exception as e:
                         print(f"\nConnection issue: {e}")
                         print("Reconnecting in 10s...")
@@ -1373,5 +1740,5 @@ class BitcoinEngine:
 
 
 if __name__ == "__main__":
-    engine = BitcoinEngine()
+    engine = NasdaqEngine()
     engine.run()

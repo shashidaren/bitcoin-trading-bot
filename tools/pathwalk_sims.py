@@ -1,38 +1,10 @@
 #!/usr/bin/env python3
 """
-Sequence-aware exit-rule replay for BTC (port of gold's pathwalk_sims.py).
-
-Answers the "what if the exit were different?" question honestly:
-  - every trade/signal is re-walked bar-by-bar through forward_test_log.csv in
-    TRUE TIME ORDER with its own stop/target levels,
-  - a bar that spans both levels resolves to the STOP (conservative),
-  - the walk never sees the future beyond its horizon, and
-  - rows that end flat at the horizon are marked to market and reported as
-    TIME, never silently replaced by the actual outcome (that fallback is what
-    made gold's pre-review exit table "self-validating" - see its
-    docs/REVIEW-2026-09-15.md §6).
-
-VALIDATION FIRST: the tool walks the trades the engine actually made, inside
-their real exit windows, with the live geometry (SL 2xATR / TP 4xATR) and
-prints the agreement rate. If that row does not reproduce the engine, no other
-row in this file is worth reading.
-
-BTC notes: M5 bars (log rows are stamped at bar close, so the walk starts at
-the next row), exit domain {SL, TP}, no BE ratchet live (the BE grid is a
-candidate measurement only), LOT_SIZE 0.01 => money = price distance x 0.01.
-Legacy ledger rows are comma-grouped and are parsed comma-tolerantly.
+Sequence-aware exit-rule replay for US100Cash M15.
 
 Usage:
-  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.40] [--horizon 240]
-                                 [--census]
-
---spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40 per
-trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9).
-
-Grids:  A) real trades, TP multiple sweep      B) real trades, BE ratchet sweep
-        C) cascade-aware real trades           D) raw signal census (entry stream)
-        E) takeable census through cascade + blackout/daily gates (the honest D)
-Read-only - no files are modified.
+  python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.25] [--horizon 720] [--census]
+"""
 """
 import argparse
 import os
@@ -69,8 +41,8 @@ def main():
     ap.add_argument("--root", default=os.path.dirname(HERE))
     ap.add_argument("--spread", type=float, default=0.0,
                     help="assumed round-trip cost in $ per trade at LOT_SIZE (default 0)")
-    ap.add_argument("--horizon", type=int, default=240,
-                    help="walk horizon in minutes from entry (default 240 = 4h)")
+    ap.add_argument("--horizon", type=int, default=720,
+                    help="walk horizon in minutes from entry (default 720 = 12h)")
     ap.add_argument("--census", action="store_true",
                     help="also replay the reconstructed signal stream (all signals in the log)")
     args = ap.parse_args()
@@ -81,9 +53,13 @@ def main():
     bars = R.load_bars(log_path)
     covered, uncovered = R.coverage(trades, bars)
 
-    print(f"pathwalk_sims - {len(trades)} trades, {len(bars)} M5 bars "
-          f"({bars[0]['dt']} -> {bars[-1]['dt']}), horizon {args.horizon} min, "
+    span_str = f"{bars[0]['dt']} -> {bars[-1]['dt']}" if bars else "empty log"
+    print(f"pathwalk_sims - {len(trades)} trades, {len(bars)} M15 bars "
+          f"({span_str}), horizon {args.horizon} min, "
           f"spread ${args.spread:.2f}/trade")
+    if not trades and not bars:
+        print("0 trades and 0 bars yet (Day-0 US100Cash clean ledger).")
+        return
     print(f"log-covered trades: {len(covered)} (entry >= first bar); "
           f"{len(uncovered)} predate the log and cannot be re-walked\n")
 

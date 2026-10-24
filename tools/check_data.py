@@ -1,27 +1,9 @@
 #!/usr/bin/env python3
 """
-Data-integrity checker for the forward-test CSVs.
+Data-integrity checker for the Nasdaq-100 (US100Cash) M15 forward-test CSVs.
 
-Run this FIRST on every new data drop, before drawing any conclusions:
-a misaligned row or silent ledger reset poisons every statistic derived
-from it (see gold docs/REVIEW-2026-09-09.md and REVIEW-2026-09-10.md).
-
-Checks:
-  trades.csv        header/schema (16-field, Trade_Type column), row widths,
-                    Trade_Type/Exit_Reason domains, numbering, time order,
-                    Balance_After ledger continuity, true P&L from $200,
-                    exit GEOMETRY per era (SL/TP in ATR units - the ledger holds
-                    more than one rule), realized-R sanity (catches lot/size and
-                    schema drift; 09-03 was a 100x-lot pair), entry-gate
-                    conformance (could this row have been taken under TODAY's
-                    trend / RSI / near-EMA rules? catches unrecorded era
-                    boundaries and silently-skipped gates)
-  forward_test_log  header, timestamp ordering, gaps > 15 min (M5 cadence),
-                    M5 bar census (missing slots, duplicate minutes)
-  skipped_trades    header/row width
-  cross-file        every trade entry exists in the price log (+-6 min),
-                    no open trade spans a price-log gap (inclusive bounds),
-                    status.json totals agree with trades.csv
+Safe on Day 0 (empty 0-trade / 0-bar files) and market-hours-aware (CME weekend
+closure and daily 17:00-18:00 ET maintenance break are NOT flagged as outages).
 
 Exit code 0 = clean (warnings allowed), 1 = FAIL-level problems found.
 Read-only - no files are modified.
@@ -32,25 +14,31 @@ import csv
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+try:
+    from trade_filter import is_market_quiet  # noqa: E402
+except Exception:
+    is_market_quiet = lambda dt=None: False
+
 TRADES = os.path.join(ROOT, "trades.csv")
 LOG = os.path.join(ROOT, "forward_test_log.csv")
 SKIPS = os.path.join(ROOT, "skipped_trades.csv")
 STATUS = os.path.join(ROOT, "status.json")
 
 STARTING_BALANCE = 200.00
-GAP_SECONDS = 15 * 60   # M5 log: normal spacing is 5 min, flag > 15 min
-ENTRY_MATCH_SECONDS = 6 * 60  # trade entry must have a log row within +-6 min
+BAR_SECONDS = 900                # M15 = 900s
+GAP_SECONDS = 45 * 60            # M15 log: normal spacing is 15 min, flag > 45 min during open market
+ENTRY_MATCH_SECONDS = 18 * 60    # trade entry must have an M15 log row within +-18 min
+LOT_SIZE = 0.10
 
-# --- engine entry rules, for check_gate_conformance() (keep in sync with engine.py)
-RSI_MIN, RSI_MAX = 40.0, 70.0     # SELL mirrors to 100-RSI_MAX .. 100-RSI_MIN
-MAX_BELOW_EMA_ATR = 0.30          # engine.MAX_BELOW_EMA_ATR (ONE-SIDED adverse distance)
-# When the ported regime gates + SELL funnel were actually taking trades. NOT
-# replay_lib.PORT_DEPLOY (2026-09-09 02:25): the first SELL is 09-10 09:05 and
-# two 09-09 BUY rows violate the near-EMA gate, so 09-09 rows ran older code.
-GATES_LIVE = datetime(2026, 9, 10, 0, 0)   # == replay_lib.GATES_DEPLOY (keep in sync)
+# --- engine entry rules, for check_gate_conformance() (keep in sync with engine.py) ---
+RSI_MIN, RSI_MAX = 40.0, 70.0
+MAX_BELOW_EMA_ATR = 0.50
+GATES_LIVE = datetime(2026, 10, 24, 0, 0)
 
 TRADES_FIELDS = [
     "Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
@@ -87,11 +75,21 @@ def parse_dt(s):
 
 
 def fnum(x):
-    """Comma-tolerant float (legacy rows were written as '80,000.00')."""
     try:
         return float(str(x).replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _gap_is_market_closure(a_naive: datetime, b_naive: datetime) -> bool:
+    """True when every missing M15 slot inside (a, b) falls during CME market closure."""
+    t = a_naive + timedelta(seconds=BAR_SECONDS)
+    while t < b_naive:
+        mid_utc = (t - timedelta(minutes=7)).replace(tzinfo=timezone.utc)
+        if not is_market_quiet(mid_utc):
+            return False
+        t += timedelta(seconds=BAR_SECONDS)
+    return True
 
 
 def check_trades():
@@ -104,16 +102,13 @@ def check_trades():
         fail("empty file")
         return []
     if [h.strip() for h in header] != TRADES_FIELDS:
-        fail(f"header mismatch (pre-SELL 15-field schema? expected Trade_Type column). "
-             f"Run the engine once to auto-migrate, or see engine.migrate_trades_csv(). "
-             f"Got: {header}")
+        fail(f"header mismatch (expected 16-field Trade_Type schema). Got: {header}")
     else:
         ok(f"header matches the 16-field schema ({len(rows)} rows)")
 
     odd = [r for r in rows if len(r) != len(TRADES_FIELDS)]
     if odd:
-        fail(f"{len(odd)} rows with wrong field count (e.g. trade #{odd[0][0]}) - "
-             f"misaligned rows blind the risk gates")
+        fail(f"{len(odd)} rows with wrong field count (e.g. trade #{odd[0][0]})")
     else:
         ok("all rows have 16 fields")
 
@@ -155,8 +150,7 @@ def check_trades():
 
     dup = len(nums) - len(set(nums))
     if dup:
-        warn(f"{dup} duplicate Trade_Num values (ledger-reset history: numbering "
-             f"restarted - see engine.load_trade_stats)")
+        warn(f"{dup} duplicate Trade_Num values")
     else:
         ok("trade numbering unique")
 
@@ -165,16 +159,17 @@ def check_trades():
         if abs(cur["bal"] - (prev["bal"] + cur["profit"])) > 0.02:
             breaks += 1
     if breaks:
-        warn(f"{breaks} Balance_After continuity breaks (silent ledger resets)")
+        warn(f"{breaks} Balance_After continuity breaks")
     else:
         ok("Balance_After ledger continuous")
 
     true_pnl = sum(t["profit"] for t in trades)
     wins = sum(1 for t in trades if t["Exit_Reason"] == "TP")
     losses = len(trades) - wins
-    drift = trades[-1]["bal"] - (STARTING_BALANCE + true_pnl) if trades else 0
+    last_bal = trades[-1]["bal"] if trades else STARTING_BALANCE
+    drift = last_bal - (STARTING_BALANCE + true_pnl) if trades else 0.0
     print(f"  [info] {wins}W/{losses}L over {len(trades)} trades | true P&L from ${STARTING_BALANCE:.0f}: "
-          f"{true_pnl:+.2f} -> ${STARTING_BALANCE + true_pnl:.2f} | engine ledger: ${trades[-1]['bal']:.2f} "
+          f"{true_pnl:+.2f} -> ${STARTING_BALANCE + true_pnl:.2f} | engine ledger: ${last_bal:.2f} "
           f"(drift {drift:+.2f})")
     if abs(drift) > 0.02:
         warn("engine ledger disagrees with sum of profits (reset gap)")
@@ -213,14 +208,17 @@ def check_log():
         fail(f"{regress} timestamp regressions (log must be strictly increasing)")
     else:
         ok("timestamps strictly increasing")
-    gaps = [(a, b) for a, b in zip(dts, dts[1:]) if (b - a).total_seconds() > GAP_SECONDS]
+    gaps = [
+        (a, b) for a, b in zip(dts, dts[1:])
+        if (b - a).total_seconds() > GAP_SECONDS and not _gap_is_market_closure(a, b)
+    ]
     if gaps:
-        warn(f"{len(gaps)} gaps > 15 min: "
+        warn(f"{len(gaps)} open-market gaps > 45 min: "
              + ", ".join(f"{a:%m-%d %H:%M}->{b:%H:%M} ({(b-a).total_seconds()/60:.0f}m)"
                          for a, b in gaps[:8])
              + (" ..." if len(gaps) > 8 else ""))
     else:
-        ok("no gaps > 15 min")
+        ok("no open-market gaps > 45 min")
     return dts
 
 
@@ -244,33 +242,32 @@ def check_cross(trades, log_dts):
             continue
         near = [d for d in log_dts if abs((d - t["entry_dt"]).total_seconds()) <= ENTRY_MATCH_SECONDS]
         if not near:
-            warn(f"trade #{t['num']} entry {t['entry_dt']} has no price-log row within 6 min")
-    ok("trade entries matched to price log" if not any("no price-log row" in w for w in WARNS)
+            warn(f"trade #{t['num']} entry {t['entry_dt']} has no M15 price-log row within 18 min")
+    ok("trade entries matched to price log" if not any("no M15 price-log row" in w for w in WARNS)
        else "see warnings above")
 
-    # no open trade spans a >15 min price-log gap
     spans = 0
     for t in trades:
         if not t.get("entry_dt") or not t.get("exit_dt"):
             continue
         for a, b in zip(log_dts, log_dts[1:]):
-            # inclusive bounds: a trade that entered on the last bar before the gap
-            # or exited on the first bar after it is still exposed to the hole
-            if (b - a).total_seconds() > GAP_SECONDS and t["entry_dt"] <= a and t["exit_dt"] >= b:
+            if (b - a).total_seconds() > GAP_SECONDS and not _gap_is_market_closure(a, b) \
+                    and t["entry_dt"] <= a and t["exit_dt"] >= b:
                 spans += 1
     if spans:
-        warn(f"{spans} trades were open across a price-log gap (exit prices may be unreliable)")
+        warn(f"{spans} trades were open across an unscheduled price-log gap")
     else:
-        ok("no trade open across a price-log gap")
+        ok("no trade open across an unscheduled price-log gap")
 
     if os.path.isfile(STATUS):
         try:
-            st = json.load(open(STATUS))
+            with open(STATUS) as sf:
+                st = json.load(sf)
         except Exception as e:
             warn(f"status.json unparsable: {e}")
             return
         mism = []
-        if trades and st.get("total_trades") not in (None, len(trades)):
+        if st.get("total_trades") not in (None, len(trades)):
             mism.append(f"total_trades {st.get('total_trades')} != {len(trades)}")
         if trades:
             w = sum(1 for t in trades if t["Exit_Reason"] == "TP")
@@ -285,15 +282,10 @@ def check_cross(trades, log_dts):
 
 
 def check_geometry(trades):
-    """Exit geometry per era + realized-R sanity.
-
-    The ledger is not one strategy: rows before 2026-09-06 17:49 UTC ran
-    SL 1.5xATR / TP 2.5xATR (RR 1:1.67) and filled on candles, so their stops
-    overshoot the logged level and their R-multiples are not comparable with
-    today's. Pooling eras silently changes the breakeven win rate (37.5% vs
-    33.3%) - this check keeps that visible instead of letting it average away.
-    """
     print("\n== trades.csv geometry / sizing ==")
+    if not trades:
+        ok("0 closed trades yet (Day-0 clean ledger)")
+        return
     eras = {}
     for t in trades:
         atr = fnum(t.get("ATR_At_Entry"))
@@ -312,15 +304,10 @@ def check_geometry(trades):
         print(f"  [info] SL {slm:.2f}xATR / TP {tpm:.2f}xATR (RR 1:{rr:.2f}, breakeven WR "
               f"{1/(1+rr)*100:.1f}%): n={len(ts)} {w}W/{len(ts)-w}L  {first:%Y-%m-%d %H:%M} -> "
               f"{last:%Y-%m-%d %H:%M}{tag}")
-    if len(eras) > 1:
-        warn(f"{len(eras)} different exit geometries in one ledger - R totals and breakeven "
-             f"WR are era-specific, never pool them (see docs/HANDOFF.md §9)")
 
-    # realized-R sanity on the live-rule era only (older rows fill on candles)
-    LIVE = parse_dt("2026-09-06 17:49:00")
     drift = 0
     for t in trades:
-        if not t.get("entry_dt") or t["entry_dt"] < LIVE:
+        if not t.get("entry_dt") or t["entry_dt"] < GATES_LIVE:
             continue
         atr = fnum(t.get("ATR_At_Entry"))
         entry, sl = fnum(t.get("Entry_Price")), fnum(t.get("Stop_Loss"))
@@ -330,41 +317,40 @@ def check_geometry(trades):
         risk_price = abs(entry - sl)
         if risk_price <= 0:
             continue
-        realized = profit / (risk_price * 0.01)
+        realized = profit / (risk_price * LOT_SIZE)
         planned = -1.0 if t["Exit_Reason"] == "SL" else 2.0
         if abs(realized - planned) > 0.25:
             drift += 1
             warn(f"trade #{t['num']} {t['entry_dt']:%m-%d %H:%M} {t['Exit_Reason']} realized "
-                 f"{realized:+.2f}R vs planned {planned:+.2f}R (lot/size or fill drift)")
+                 f"{realized:+.2f}R vs planned {planned:+.2f}R (lot/size or gap fill drift)")
     if not drift:
-        ok("realized R matches the live 1:2 geometry on every post-09-06 row")
+        ok("realized R matches the live 1:2 geometry on every US100Cash row")
 
 
 def check_bar_census(dts):
-    """M5 bar census: the price log is the basis of every replay, so a hole in it
-    is a hole in every conclusion. check_log() only catches >15 min gaps; a single
-    missing bar leaves a 10-min gap and silently distorts a path walk."""
-    print("\n== forward_test_log.csv bar census ==")
+    print("\n== forward_test_log.csv M15 bar census ==")
     if len(dts) < 2:
+        ok(f"M15 log warming ({len(dts)} bar(s))")
         return
-    step = 300
+    step = BAR_SECONDS
     start = dts[0].replace(second=0)
-    # rows are stamped at bar close (a :01/:02 second offset is normal); group by minute
     have = {}
     for d in dts:
         key = d.replace(second=0)
         have[key] = have.get(key, 0) + 1
     dups = [k for k, v in have.items() if v > 1]
     if dups:
-        warn(f"{len(dups)} minutes with more than one log row (restart re-evaluations?): "
+        warn(f"{len(dups)} slots with more than one log row: "
              + ", ".join(f"{k:%m-%d %H:%M}" for k in sorted(dups)[:6]))
     else:
-        ok("no duplicate minutes in the log")
+        ok("no duplicate M15 bar slots in the log")
     exp, missing = [], []
     t = start
     end = dts[-1]
     while t <= end:
-        exp.append(t)
+        mid_utc = (t - timedelta(minutes=7)).replace(tzinfo=timezone.utc)
+        if not is_market_quiet(mid_utc):
+            exp.append(t)
         t = t + timedelta(seconds=step)
     for x in exp:
         if x not in have:
@@ -376,32 +362,18 @@ def check_bar_census(dts):
                 runs[-1].append(m)
             else:
                 runs.append([m])
-        warn(f"{len(missing)} missing M5 slot(s) in {len(runs)} run(s): "
+        warn(f"{len(missing)} missing open-market M15 slot(s) in {len(runs)} run(s): "
              + ", ".join(f"{r[0]:%m-%d %H:%M}..{r[-1]:%H:%M} ({len(r)} bars)" for r in runs[:6]))
     else:
-        ok(f"complete M5 grid ({len(exp)} slots) with no missing bars")
+        ok(f"complete open-market M15 grid ({len(exp)} slots) with no missing bars")
 
 
 def check_gate_conformance(trades):
-    """Could this row have been taken under the rules the engine runs TODAY?
-
-    Every entry gate that only needs ledger fields is re-applied to the row's
-    own `*_At_Entry` values: trend (EMA50 vs EMA200), the RSI window, and the
-    near-EMA proximity gate. A row that violates one of them means the engine
-    that took it was running DIFFERENT code or DIFFERENT parameters than the
-    ones in the working tree - i.e. an era boundary that no doc recorded, a
-    param that was changed and reverted, or a gate that is silently skipped on
-    some path. All three have happened here (see docs/HANDOFF.md §9).
-
-    GATES_LIVE is deliberately NOT replay_lib.PORT_DEPLOY (2026-09-09 02:25).
-    Evidence the gates went live on 09-10, not 09-09: the first SELL in the
-    ledger is 09-10 09:05 (the SELL funnel arrived with the port), and two of
-    the four 09-09 BUY rows sit 0.57 and 3.11 ATR on the adverse side of a
-    proximity gate that would have blocked them. Rows before GATES_LIVE are
-    counted, not flagged.
-    """
     print("\n== trades.csv entry-gate conformance (today's rules) ==")
-    trend_bad, rsi_bad, prox_bad, pre_era = [], [], [], 0
+    if not trades:
+        ok("0 closed trades yet (conformance ready)")
+        return
+    trend_bad, rsi_bad, prox_bad = [], [], []
     for t in trades:
         side = t.get("Trade_Type")
         e50, e200 = fnum(t.get("EMA50_At_Entry")), fnum(t.get("EMA200_At_Entry"))
@@ -409,7 +381,6 @@ def check_gate_conformance(trades):
         if None in (e50, e200, rsi, atr, entry) or side not in ("BUY", "SELL"):
             continue
         if not t.get("entry_dt") or t["entry_dt"] < GATES_LIVE:
-            pre_era += 1
             continue
         tag = f"#{t.get('num')} {side} {t['entry_dt']:%m-%d %H:%M}"
         if (side == "BUY") != (e50 > e200):
@@ -419,22 +390,18 @@ def check_gate_conformance(trades):
             rsi_bad.append(f"{tag} RSI {rsi:.1f} outside {lo:.0f}-{hi:.0f}")
         adverse = (e50 - entry) if side == "BUY" else (entry - e50)
         if adverse > MAX_BELOW_EMA_ATR * atr + 1e-9:
-            prox_bad.append(f"{tag} entry {adverse / atr:+.2f} ATR on the adverse side of "
-                            f"EMA50 (gate allows {MAX_BELOW_EMA_ATR:.2f})")
+            prox_bad.append(f"{tag} entry {adverse / atr:+.2f} ATR adverse of EMA50")
     for label, hits in (("trend gate (EMA50 vs EMA200)", trend_bad),
                         ("RSI window", rsi_bad),
                         (f"near-EMA gate ({MAX_BELOW_EMA_ATR:.2f} ATR adverse)", prox_bad)):
         if hits:
-            warn(f"{len(hits)} post-{GATES_LIVE:%m-%d} row(s) violate the {label}: " + "; ".join(hits[:4])
-                 + (" ..." if len(hits) > 4 else ""))
+            warn(f"{len(hits)} row(s) violate the {label}: " + "; ".join(hits[:4]))
         else:
-            ok(f"every row from {GATES_LIVE:%m-%d} on satisfies the {label}")
-    print(f"  [info] {pre_era} row(s) predate {GATES_LIVE:%Y-%m-%d %H:%M} UTC and ran older code -"
-          f" not judged (see docs/HANDOFF.md §9 on the era boundary)")
+            ok(f"every row satisfies the {label}")
 
 
 def main():
-    print(f"bitcoin-trading-bot data integrity check - {ROOT}")
+    print(f"nasdaq-trading-bot (US100Cash M15) data integrity check - {ROOT}")
     for path in (TRADES, LOG, SKIPS):
         if not os.path.isfile(path):
             print(f"MISSING: {path}")

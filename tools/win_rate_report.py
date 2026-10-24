@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
 """
-Win-rate report for BTC - "why is the win rate what it is?" (port of gold's
-win_rate_report.py, adapted to M5 / RR 1:2 / exit domain {SL, TP}).
+Win-rate report for US100Cash M15 - "why is the win rate what it is?" (RR 1:2,
+exit domain {SL, TP}).
 
-Read-only. Run after every data drop, next to the other tools:
+Read-only. Run after every data drop:
 
-    python3 tools/win_rate_report.py [--root DIR] [--spread 0.40]
-
-    --spread defaults to 0.0 (gross); the measured XM BTCUSD round trip is $0.40
-    per trade at LOT_SIZE 0.01 (docs/HANDOFF.md §9). Every P/L column below is
-    net of it, and docs/HANDOFF.md quotes these numbers net unless marked gross.
-
-Sections
-  1. Baseline: W/L, decisive win rate with a Wilson 95% CI, P&L, expectancy in
-     $ and in R, and the breakeven WR implied by the live 1:2 geometry.
-  2. Eras: pre-port (before the 2026-09-09 deploy) vs new regime vs last
-     N trades - never average a regime change into "the" win rate.
-  3. Side / day / hour breakdowns (BUY and SELL are different strategies).
-  4. How long each outcome actually takes.
-  5. Exit-geometry sanity grid (compact; full version in tools/pathwalk_sims.py).
-  6. Signal census: every reconstructed signal in the price log, walked with the
-     live geometry - the entry stream's own hit rate, independent of the gates.
-  7. Queued filter candidates (MIN_ATR, RSI floor, wick, side, hours, ATR%-by-day)
-     scored keep-vs-skip, WITH the day-confound control: on 7 days of data every
-     feature split is partly a split on WHICH DAYS the feature selected.
-  8. Cost sensitivity: the spread level at which the current book stops working.
-
-Data gotchas handled (docs/HANDOFF.md §9): comma-grouped legacy rows, M5 bar
-spacing, log coverage starting 2026-09-07 20:20 UTC, 09-03 sizing outliers,
-Trade_Num resets (stats here are row-based, never keyed on Trade_Num).
+    python3 tools/win_rate_report.py [--root DIR] [--spread 0.25]
 """
 import argparse
 import os
@@ -76,26 +53,30 @@ def main():
     ap.add_argument("--root", default=os.path.dirname(HERE))
     ap.add_argument("--spread", type=float, default=0.0,
                     help="round-trip cost $/trade at LOT_SIZE for the P/L columns")
-    ap.add_argument("--horizon", type=int, default=240)
+    ap.add_argument("--horizon", type=int, default=720)
     args = ap.parse_args()
 
     trades = R.load_trades(os.path.join(args.root, "trades.csv"))
     bars = R.load_bars(os.path.join(args.root, "forward_test_log.csv"))
 
-    print(f"win_rate_report - {len(trades)} trades, {len(bars)} M5 bars "
-          f"({bars[0]['dt']} -> {bars[-1]['dt']}), spread ${args.spread:.2f}/trade\n")
+    span_str = f"{bars[0]['dt']} -> {bars[-1]['dt']}" if bars else "empty log"
+    print(f"win_rate_report - {len(trades)} trades, {len(bars)} M15 bars "
+          f"({span_str}), spread ${args.spread:.2f}/trade\n")
+    if not trades and not bars:
+        print("  0 trades and 0 bars yet (Day-0 US100Cash clean ledger).")
+        return
 
     # ---------------------------------------------------------------- baseline
     print("== 1. BASELINE ==")
-    stats_line(trades, "all rows (incl 09-03)", spread=args.spread)
+    stats_line(trades, "all rows", spread=args.spread)
     clean = [t for t in trades if t["et"] >= OUTLIER_ERA]
-    stats_line(clean, "from 09-05 (excl outliers)", spread=args.spread)
+    stats_line(clean, "clean slice", spread=args.spread)
     new = [t for t in trades if t["et"] >= R.PORT_DEPLOY]
-    stats_line(new, "new regime (post-port)", spread=args.spread)
+    stats_line(new, "US100Cash M15 era", spread=args.spread)
     dec_all = sum(1 for t in clean if t["reason"] in ("TP", "SL"))
     w_all = sum(1 for t in clean if t["reason"] == "TP")
     be_wr = 1 / (1 + R.ATR_TP_MULT / R.ATR_SL_MULT) * 100
-    edge = w_all / dec_all * 100 - be_wr
+    edge = (w_all / dec_all * 100 - be_wr) if dec_all else 0.0
     print(f"  breakeven decisive WR at RR 1:{R.ATR_TP_MULT/R.ATR_SL_MULT:.0f} = {be_wr:.1f}% "
           f"-> the book sits {abs(edge):.1f} points {'above' if edge >= 0 else 'below'} it "
           f"(from 09-05, before any spread)")

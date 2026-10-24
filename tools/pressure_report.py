@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI view of the dashboard's read-only BTC tape-pressure composite."""
+"""CLI view of the dashboard's read-only US100Cash M15 tape-pressure composite."""
 import argparse
 import os
 import sys
@@ -18,11 +18,11 @@ def main():
     rows = pressure.read_rows(args.log)
     trades = pressure.read_rows(args.trades)
     read = pressure.pressure(rows[-500:])
-    print("BTC M5 tape-pressure read (descriptive only; not a signal or probability)")
+    print("US100Cash M15 tape-pressure read (descriptive only; not a signal or probability)")
     if read is None:
         print(f"Not enough usable history in {args.log!r}; need at least {pressure.PRESSURE_WINDOW + 1} valid bars with indicators.")
     else:
-        print(f"As of {read['as_of']} | {read['window']} closed bars (~{read['window'] * 5 / 60:g} hours)")
+        print(f"As of {read['as_of']} | {read['window']} closed M15 bars (~{read['window'] * 15 / 60:g} hours)")
         print(f"BUY {read['buy_pct']:.1f}% | SELL {read['sell_pct']:.1f}% | {read['label']}")
         print("Components (raw input; buy-share; weight; weighted points):")
         for item in read["components"]:
@@ -39,7 +39,7 @@ def main():
               f"{item['score_min']:.1f}/{item['score_median']:.1f}/{item['score_max']:.1f}, "
               f"wins/losses={item['wins']}/{item['losses']}, gross Profit=${item['gross_profit']:+.2f}")
     print("\nCaution: EMA trend and slope are already strategy gates; the score can restate trade side. "
-          "Volume is tick-count proxy, not exchange-traded BTC volume. Do not use it to gate or size trades.")
+          "Volume is MT5 tick-count proxy. Do not use it to gate or size trades.")
 
 
 if __name__ == "__main__":

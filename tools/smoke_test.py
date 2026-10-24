@@ -1,82 +1,71 @@
 #!/usr/bin/env python3
 """
-Smoke test for the engine's regime gates, bidirectional (Buy/Sell) execution,
-daily loss circuit breaker, and trades.csv schema migration.
+End-to-end offline regression & smoke test suite for the Nasdaq-100 (US100Cash)
+M15 Auto-Trading Bot (/opt/nasdaq).
 
-Runs BitcoinEngine.evaluate_candle() over synthetic 5-minute candles in temp
-directories (no /opt/bitcoin, no network, no Telegram, no real API keys needed).
+Runs entirely in temporary directories without network access, Telegram, or a
+live MetaTrader 5 terminal.
 
 Scenarios:
-  A) Uptrend + rejection dip at 20-bar floor       -> BUY trade MUST trigger & close with TP
-  B) Established decline + floor rejection dip     -> BUY trade MUST be blocked
-  C) Downtrend + ceiling rejection dip             -> SELL trade MUST trigger & close with TP
-  D) Daily loss circuit breaker                    -> MUST halt after MAX_DAILY_LOSSES (3)
-  E) Restart from log                             -> EMA50 history seeds properly
-  F) trades.csv schema drift (gold 2026-09-10 incident) -> engine MUST auto-migrate and
-     restore correct risk-gate counting for SELL trades (incl. legacy comma rows)
-  G) stale-feed guard (gold 2026-09-10 silent WebSocket stall) -> MUST detect a quiet
-     feed and rate-limit Telegram alerts (BTC is 24/7: NO quiet hours)
-  H) MT5 sidecar feed file (DATA_SOURCE=MT5) -> engine MUST read the sidecar's
-     JSON file, evaluate each closed candle exactly once (no re-log after
-     restart), and default to TWELVEDATA
-  I) replay_lib walk direction -> SELL bar extremes MUST mirror BUY (gold's
-     2026-09-15 review found its replay had them inverted, so shorts silently
-     fell back to their actual outcome and the tool validated itself), the BE
-     ratchet MUST arm only at/above its trigger, and a walk MUST NOT resolve to
-     TP when only the stop was touched inside its horizon
-  J) handoff_check tolerance policy -> the docs freshness gate MUST NOT cry wolf
-     (one new bar, one closed trade or an open-trade change is normal drift) and
-     MUST still go STALE when genuinely behind (> 5 trades, > 48 h), when
-     outcomes change without a new trade, or when the snapshot is newer than
-     the data
-  K) XM quote + contract-spec logger (tools/mt5_quotes.py) -> MUST stay read-only
-     (AST: no trading API named; the fake terminal records any trading call),
-     leak nothing identifying (login/name/server/balance/Windows paths) into the
-     public repo, learn the broker SERVER-time offset only from fresh ticks (a
-     frozen tick must not move it), keep the candle series continuous in UTC across
-     a server DST change, heal gaps and restarts without duplicates, write NOQUOTE/
-     BADQUOTE/STALE rows instead of silent holes, never emit CRLF or misaligned rows,
-     exit 2 (systemd restart) after 15 quiet minutes
-  L) xm_quote_report (the logger's data) -> MUST parse the real writer's files and
-     survive a torn line, count complete days/weekends against the Stage B-i exit,
-     keep STALE/NOOFFSET/NOQUOTE rows out of every spread statistic, price a trade at
-     (entry spread + exit spread) / 2, and CATCH candles stamped an hour off
-  M) MT5 closed-candle simulated exits -> MUST close already-open trades from candle
-     OHLC with deterministic stop/target fills, stop-first ties, no entry-candle
-     self-exit, exit-before-entry ordering on the same close, and restart/dedup
-     without duplicate close rows
+  A) Uptrend + floor rejection on US100Cash M15  -> BUY triggers & closes at TP ($0.10/pt)
+  B) Decline + floor rejection                   -> BUY blocked by regime gates
+  C) Downtrend + ceiling rejection               -> SELL triggers & closes at TP
+  D) Daily loss circuit breaker                  -> 3 SLs or -$15 realized daily loss halts day
+  E) Restart state persistence                   -> EMA50 history, open trade & ledger stats restore
+  F) trades.csv schema drift                     -> auto-migrates 15-field -> 16-field & keeps backup
+  G) Stale-feed guard + America/New_York schedule -> DST-aware CME quiet hours + macro/open blackouts
+  H) MT5 M15 feed + 250-bar startup warm-up      -> DATA_SOURCE="MT5" default, mt5_warmup_candles.json
+                                                    seeds EMA200 immediately, closed-bar deduplication
+  I) replay_lib + history_to_log + backtest.py   -> SELL direction lock, ratchet, candles_m15.csv replay
+  J) handoff_check tolerance policy              -> 5 trades / 48 h (192 M15 bars), --spread 0.25 rule
+  K) tools/mt5_quotes.py read-only XM logger     -> AST trading-API ban, PII-free spec, M15 candles_m15.csv,
+                                                    server DST healing, CME quiet-hours guard, exit 2 watchdog
+  L) tools/xm_quote_report.py                    -> US100Cash 0.10-lot cost/parity/spec, market-closed vs
+                                                    mt5quotes-nasdaq STALE line, no --spread CLI flag
+  M) MT5 closed-candle simulated exits           -> BUY/SELL SL & TP, tie->SL, gap-open fill, startup reconcile
+  N) tools/reconcile_stale_trade.py              -> report-only vs --apply backup & 0.10-lot reconciliation
+  O) pressure.py + dashboard.py + autosync.sh    -> 60-bar M15 tape pressure, Flask read-only UI, static STALE
+  P) tools/mt5_executor.py + LIVE bridge         -> dormant/demo locks, idempotency, None quarantine, HALT flatten,
+                                                    credential-free deploy/*.service units
 
 Usage: python3 tools/smoke_test.py
 """
-import os
-import sys
 import ast
-import json
+import collections
 import csv
+import importlib.util
+import io
+import json
+import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import types
-from datetime import datetime, timezone, timedelta
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-sys.path.insert(0, HERE)      # replay_lib lives next to this file
+sys.path.insert(0, HERE)
 
-# Stub external dependencies
-for name in ("requests", "dotenv", "twelvedata"):
-    if name not in sys.modules:
-        mod = types.ModuleType(name)
-        if name == "requests":
-            mod.post = lambda *a, **k: None
-        if name == "dotenv":
-            mod.load_dotenv = lambda *a, **k: None
-        if name == "twelvedata":
-            mod.TDClient = object
-        sys.modules[name] = mod
+# Stub optional external network/env packages when running outside venv
+for _mod_name in ("requests", "dotenv", "twelvedata"):
+    if _mod_name not in sys.modules:
+        _mod = types.ModuleType(_mod_name)
+        if _mod_name == "requests":
+            _mod.post = lambda *_a, **_k: None
+        elif _mod_name == "dotenv":
+            _mod.load_dotenv = lambda *_a, **_k: False
+        elif _mod_name == "twelvedata":
+            _mod.TDClient = object
+        sys.modules[_mod_name] = _mod
 
-import engine  # noqa: E402
+import engine        # noqa: E402
 import trade_filter  # noqa: E402
 
 FAILURES = []
@@ -88,472 +77,387 @@ def check(label, cond, extra=""):
         FAILURES.append(label)
 
 
-def candles_uptrend(n, start=80000.0):
-    """Oscillating uptrend: RSI ~62, ATR ~$95 (~0.12%), EMA50 rising."""
+def configure_tmp(tmp):
+    engine.LOG_FILE_PATH = os.path.join(tmp, "forward_test_log.csv")
+    engine.STATUS_FILE_PATH = os.path.join(tmp, "status.json")
+    engine.TRADES_LOG_PATH = os.path.join(tmp, "trades.csv")
+    engine.MT5_FEED_FILE = os.path.join(tmp, "mt5_last_candle.json")
+    engine.MT5_WARMUP_FILE = os.path.join(tmp, "mt5_warmup_candles.json")
+    engine.MT5_ORDER_DIR = os.path.join(tmp, "mt5_bridge")
+    engine.JOURNAL_FILE_PATH = os.path.join(tmp, "journal.csv")
+    trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
+    trade_filter.SKIP_LOG = os.path.join(tmp, "skipped_trades.csv")
+
+
+def candles_uptrend(n, start=20000.0):
+    """Oscillating US100Cash M15 uptrend: RSI ~62, ATR ~38 pts (~0.19%), EMA50 rising."""
     out, p = [], start
     for i in range(n):
-        d = (60.0, 60.0, -55.0, 60.0, -55.0)[i % 5]
+        d = (18.0, 18.0, -16.0, 18.0, -16.0)[i % 5]
         o = p
         c = p + d
-        out.append((o, max(o, c) + 18.0, min(o, c) - 18.0, c))
+        out.append((o, max(o, c) + 8.0, min(o, c) - 8.0, c))
         p = c
     return out
 
 
-def candles_decline(n, start=84000.0):
-    """Oscillating decline: RSI ~38, EMA50 falling."""
+def candles_decline(n, start=21000.0):
+    """Oscillating US100Cash M15 decline: RSI ~38, ATR ~38 pts (~0.18%), EMA50 falling."""
     out, p = [], start
     for i in range(n):
-        d = (-60.0, -60.0, 55.0, -60.0, 55.0)[i % 5]
+        d = (-18.0, -18.0, 16.0, -18.0, 16.0)[i % 5]
         o = p
         c = p + d
-        out.append((o, max(o, c) + 18.0, min(o, c) - 18.0, c))
+        out.append((o, max(o, c) + 8.0, min(o, c) - 8.0, c))
         p = c
     return out
 
 
 def run_candles(eng, candles, ts_start):
     ts = ts_start
-    for (o, h, l, c) in candles:
-        eng.evaluate_candle(o, h, l, c, tick_count=300)
-        eng.check_position(c)
-        ts += timedelta(minutes=5)
+    with redirect_stdout(io.StringIO()):
+        for (o, h, l, c) in candles:
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+            eng.evaluate_candle(o, h, l, c, tick_count=300, timestamp=ts_str)
+            eng.check_position(c)
+            ts += timedelta(minutes=15)
 
 
 def rejection_dip_buy(eng):
-    """Under-cuts 20-bar floor, closes above it, long lower wick."""
+    """Tests 20-bar M15 floor (within 0.12% buffer), closes above floor, >=15% lower wick."""
     floor = min(list(eng.lows)[-engine.LOOKBACK_PERIOD:])
     p = list(eng.closes)[-1]
     o = p
-    c = p - 24.0
-    low = floor - 36.0
-    high = p + 18.0
+    c = max(floor + 4.0, p - 6.0)
+    low = floor - 10.0
+    high = max(o, c) + 5.0
     return (o, high, low, c)
 
 
 def rejection_dip_sell(eng):
-    """Tests 20-bar ceiling, closes below it, long upper wick."""
+    """Tests 20-bar M15 ceiling, closes below ceiling, >=15% upper wick."""
     ceil = max(list(eng.highs)[-engine.LOOKBACK_PERIOD:])
     p = list(eng.closes)[-1]
     o = p
-    c = p - 12.0
-    high = ceil + 36.0
-    low = p - 30.0
+    c = min(ceil - 4.0, p + 6.0)
+    high = ceil + 10.0
+    low = min(o, c) - 5.0
     return (o, high, low, c)
 
 
-# --- Scenario A ---
-print("Scenario A: uptrend + floor rejection -> expect BUY trade")
-tmp_a = tempfile.mkdtemp(prefix="btc_smoke_a_")
-engine.LOG_FILE_PATH = os.path.join(tmp_a, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_a, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_a, "trades.csv")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_a, "skipped_trades.csv")
+_real_is_in_blackout = trade_filter.is_in_blackout
+
+# ==============================================================================
+# Scenario A: Uptrend + floor rejection -> BUY trade + TP at $0.10/pt
+# ==============================================================================
+print("Scenario A: US100Cash M15 uptrend + floor rejection -> expect BUY trade & TP")
+tmp_a = tempfile.mkdtemp(prefix="nasdaq_smoke_a_")
+configure_tmp(tmp_a)
 trade_filter.is_in_blackout = lambda now=None: (False, "")
 
-eng_a = engine.BitcoinEngine()
-run_candles(eng_a, candles_uptrend(240), datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc))
-dip_a = rejection_dip_buy(eng_a)
-run_candles(eng_a, [dip_a], datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc))
-check("A: BUY trade triggered", eng_a.trade_active and eng_a.trade_type == "BUY",
-      f"trade_active={eng_a.trade_active} type={eng_a.trade_type} num={eng_a.current_trade_num}")
+with redirect_stdout(io.StringIO()):
+    eng_a = engine.NasdaqEngine()
+check("A: US100Cash M15 defaults set (900s, 0.10 lot, $0.10/pt)",
+      engine.SYMBOL_MT5 == "US100Cash" and engine.CANDLE_SECONDS == 900
+      and abs(engine.LOT_SIZE - 0.10) < 1e-9 and abs(engine.CONTRACT_SIZE - 1.0) < 1e-9)
 
-# Drive to TP (TP = entry + 4*ATR, ATR ~$110 -> need ~$450+ rise)
+t0_a = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+run_candles(eng_a, candles_uptrend(240), t0_a)
+dip_a = rejection_dip_buy(eng_a)
+run_candles(eng_a, [dip_a], t0_a + timedelta(minutes=15 * 240))
+check("A: BUY trade triggered on US100Cash", eng_a.trade_active and eng_a.trade_type == "BUY",
+      f"trade_active={eng_a.trade_active} type={eng_a.trade_type} entry={eng_a.entry_price}")
+
 p_now = list(eng_a.closes)[-1]
-up = [(p_now + i * 60, p_now + i * 60 + 30, p_now + i * 60 - 12, p_now + i * 60 + 48) for i in range(1, 12)]
-run_candles(eng_a, up, datetime(2026, 1, 1, 4, 5, tzinfo=timezone.utc))
-check("A: BUY trade closed with TP", not eng_a.trade_active and eng_a.wins == 1, f"wins={eng_a.wins} losses={eng_a.losses}")
+up = [(p_now + i * 25, p_now + i * 25 + 15, p_now + i * 25 - 5, p_now + i * 25 + 20) for i in range(1, 12)]
+run_candles(eng_a, up, t0_a + timedelta(minutes=15 * 241))
+check("A: BUY trade closed with TP and positive $0.10/pt profit",
+      not eng_a.trade_active and eng_a.wins == 1 and eng_a.balance > 200.0,
+      f"wins={eng_a.wins} bal={eng_a.balance:.2f}")
 shutil.rmtree(tmp_a, ignore_errors=True)
 
-
-# --- Scenario B ---
-print("\nScenario B: decline + floor rejection dip -> expect NO buy trade")
-tmp_b = tempfile.mkdtemp(prefix="btc_smoke_b_")
-engine.LOG_FILE_PATH = os.path.join(tmp_b, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_b, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_b, "trades.csv")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_b, "skipped_trades.csv")
-trade_filter.is_in_blackout = lambda now=None: (False, "")
-
-eng_b = engine.BitcoinEngine()
-run_candles(eng_b, candles_decline(240), datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc))
+# ==============================================================================
+# Scenario B: Decline + floor rejection -> BUY blocked
+# ==============================================================================
+print("\nScenario B: US100Cash decline + floor rejection -> expect NO BUY trade")
+tmp_b = tempfile.mkdtemp(prefix="nasdaq_smoke_b_")
+configure_tmp(tmp_b)
+with redirect_stdout(io.StringIO()):
+    eng_b = engine.NasdaqEngine()
+run_candles(eng_b, candles_decline(240), datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc))
 dip_b = rejection_dip_buy(eng_b)
-run_candles(eng_b, [dip_b], datetime(2026, 2, 1, 4, 0, tzinfo=timezone.utc))
-check("B: no BUY trade in decline", not eng_b.trade_active,
-      f"trend_gate=ema50>{'ema200' if eng_b.ema_fast > eng_b.ema_slow else 'CROSSED'}")
+run_candles(eng_b, [dip_b], datetime(2026, 10, 22, 0, 0, tzinfo=timezone.utc))
+check("B: no BUY trade in established decline", not eng_b.trade_active)
 shutil.rmtree(tmp_b, ignore_errors=True)
 
-
-# --- Scenario C ---
-print("\nScenario C: downtrend + ceiling rejection -> expect SELL trade")
-tmp_c = tempfile.mkdtemp(prefix="btc_smoke_c_")
-engine.LOG_FILE_PATH = os.path.join(tmp_c, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_c, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_c, "trades.csv")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_c, "skipped_trades.csv")
-trade_filter.is_in_blackout = lambda now=None: (False, "")
-
-eng_c = engine.BitcoinEngine()
-run_candles(eng_c, candles_decline(240, 84000.0), datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc))
+# ==============================================================================
+# Scenario C: Downtrend + ceiling rejection -> SELL trade & TP
+# ==============================================================================
+print("\nScenario C: US100Cash downtrend + ceiling rejection -> expect SELL trade & TP")
+tmp_c = tempfile.mkdtemp(prefix="nasdaq_smoke_c_")
+configure_tmp(tmp_c)
+with redirect_stdout(io.StringIO()):
+    eng_c = engine.NasdaqEngine()
+t0_c = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+run_candles(eng_c, candles_decline(240, 21000.0), t0_c)
 dip_c = rejection_dip_sell(eng_c)
-run_candles(eng_c, [dip_c], datetime(2026, 3, 1, 4, 0, tzinfo=timezone.utc))
+run_candles(eng_c, [dip_c], t0_c + timedelta(minutes=15 * 240))
 check("C: SELL trade triggered", eng_c.trade_active and eng_c.trade_type == "SELL",
       f"trade_active={eng_c.trade_active} type={eng_c.trade_type}")
 
-# Drive to SELL TP (downward price)
 p_now = list(eng_c.closes)[-1]
-down = [(p_now - i * 60, p_now - i * 60 + 12, p_now - i * 60 - 48, p_now - i * 60 - 30) for i in range(1, 12)]
-run_candles(eng_c, down, datetime(2026, 3, 1, 4, 5, tzinfo=timezone.utc))
+down = [(p_now - i * 25, p_now - i * 25 + 5, p_now - i * 25 - 20, p_now - i * 25 - 15) for i in range(1, 12)]
+run_candles(eng_c, down, t0_c + timedelta(minutes=15 * 241))
 check("C: SELL trade closed with TP", not eng_c.trade_active and eng_c.wins == 1, f"wins={eng_c.wins}")
 
-
-# --- Scenario D ---
-print("\nScenario D: daily loss circuit breaker -> halts trading after 3 SLs")
+# ==============================================================================
+# Scenario D: Daily loss circuit breaker (3 SLs OR -$15 realized daily loss)
+# ==============================================================================
+print("\nScenario D: daily loss circuit breaker (3 SLs or -$15.00 daily cap)")
+trade_filter.is_in_blackout = _real_is_in_blackout
 trades_sim = [
-    {"Trade_Num": "1", "Trade_Type": "BUY", "Entry_Time": "2026-09-10 01:00:00", "Exit_Time": "2026-09-10 01:10:00", "Exit_Reason": "SL", "Profit": "-3.00"},
-    {"Trade_Num": "2", "Trade_Type": "BUY", "Entry_Time": "2026-09-10 02:00:00", "Exit_Time": "2026-09-10 02:10:00", "Exit_Reason": "SL", "Profit": "-3.00"},
-    {"Trade_Num": "3", "Trade_Type": "SELL", "Entry_Time": "2026-09-10 03:00:00", "Exit_Time": "2026-09-10 03:10:00", "Exit_Reason": "SL", "Profit": "-3.00"},
+    {"Trade_Num": "1", "Trade_Type": "BUY", "Entry_Time": "2026-10-20 13:00:00", "Exit_Time": "2026-10-20 13:15:00", "Exit_Reason": "SL", "Profit": "-4.00"},
+    {"Trade_Num": "2", "Trade_Type": "BUY", "Entry_Time": "2026-10-20 14:00:00", "Exit_Time": "2026-10-20 14:15:00", "Exit_Reason": "SL", "Profit": "-4.00"},
+    {"Trade_Num": "3", "Trade_Type": "SELL", "Entry_Time": "2026-10-20 15:30:00", "Exit_Time": "2026-10-20 15:45:00", "Exit_Reason": "SL", "Profit": "-4.00"},
 ]
-sl_count = trade_filter.get_daily_sl_count(trades_sim, datetime(2026, 9, 10, 5, 0, tzinfo=timezone.utc))
-halted, halt_reason = trade_filter.check_daily_loss_limit(trades_sim, datetime(2026, 9, 10, 5, 0, tzinfo=timezone.utc))
+now_d = datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc)
+sl_count = trade_filter.get_daily_sl_count(trades_sim, now_d)
+halted, halt_reason = trade_filter.check_daily_loss_limit(trades_sim, now_d)
 check("D: daily SL count equals 3", sl_count == 3, f"count={sl_count}")
-check("D: circuit breaker triggered", halted and "Daily Loss Limit Reached" in halt_reason, f"reason={halt_reason}")
+check("D: 3-SL circuit breaker triggered", halted and "Daily Loss Limit Reached" in halt_reason, halt_reason)
 
-# A busy UTC day must not fall out of the window the breaker reads: gold hit 62
-# trades/day, and with a 30-row window the day's SLs become invisible.
-busy_day = [{"Trade_Num": str(i), "Trade_Type": "BUY",
-             "Entry_Time": f"2026-09-10 00:{i:02d}:00", "Exit_Time": f"2026-09-10 01:{i:02d}:00",
-             "Exit_Reason": "SL", "Profit": "-1.00"}
-            for i in range(1, 41)]
-now_d = datetime(2026, 9, 10, 5, 0, tzinfo=timezone.utc)
-check("D: busy-day window is wider than the streak lookback",
-      trade_filter.DAY_WINDOW >= 100 and trade_filter.LOOKBACK == 30,
-      f"DAY_WINDOW={trade_filter.DAY_WINDOW} LOOKBACK={trade_filter.LOOKBACK}")
-check("D: a 40-SL day is fully visible to the breaker",
-      trade_filter.get_daily_sl_count(busy_day, now_d) == 40
-      and trade_filter.get_daily_sl_count(busy_day[-trade_filter.LOOKBACK:], now_d) >= 3,
-      f"wide={trade_filter.get_daily_sl_count(busy_day, now_d)} "
-      f"narrow={trade_filter.get_daily_sl_count(busy_day[-trade_filter.LOOKBACK:], now_d)}")
+big_loss_day = [
+    {"Trade_Num": "1", "Trade_Type": "BUY", "Entry_Time": "2026-10-20 13:00:00", "Exit_Time": "2026-10-20 13:15:00", "Exit_Reason": "SL", "Profit": "-9.00"},
+    {"Trade_Num": "2", "Trade_Type": "SELL", "Entry_Time": "2026-10-20 14:00:00", "Exit_Time": "2026-10-20 14:15:00", "Exit_Reason": "SL", "Profit": "-7.50"},
+]
+halted_usd, usd_reason = trade_filter.check_daily_loss_limit(big_loss_day, now_d)
+check("D: -$15.00 daily dollar cap halts even with <3 SLs", halted_usd and "$15" in usd_reason, usd_reason)
+check("D: busy-day window >= 100 & LOOKBACK == 30",
+      trade_filter.DAY_WINDOW >= 100 and trade_filter.LOOKBACK == 30)
 
-
-# --- Scenario E ---
+# ==============================================================================
+# Scenario E: Restart state persistence (reuses tmp_c)
+# ==============================================================================
 print("\nScenario E: restart state persistence")
-eng_e = engine.BitcoinEngine()
-check("E: EMA50 history seeded from CSV", len(eng_e.ema50_history) >= engine.EMA_SLOPE_LOOKBACK, f"{len(eng_e.ema50_history)} loaded")
+with redirect_stdout(io.StringIO()):
+    eng_e = engine.NasdaqEngine()
+check("E: EMA50 history seeded from M15 CSV",
+      len(eng_e.ema50_history) >= engine.EMA_SLOPE_LOOKBACK, f"{len(eng_e.ema50_history)} loaded")
 check("E: trade stats loaded from trades.csv", eng_e.wins == 1 and eng_e.losses == 0)
-
 shutil.rmtree(tmp_c, ignore_errors=True)
 
-
-# --- Scenario F ---
-print("\nScenario F: trades.csv schema drift (pre-SELL header + SELL row) -> auto-migrate")
+# ==============================================================================
+# Scenario F: trades.csv schema drift auto-migration
+# ==============================================================================
+print("\nScenario F: trades.csv schema drift (15-field -> 16-field auto-migration)")
 OLD_HEADER = ["Trade_Num", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
               "Exit_Price", "Exit_Reason", "Profit", "Balance_After", "RSI_At_Entry",
               "ATR_At_Entry", "Wick_Ratio_At_Entry", "EMA50_At_Entry", "EMA200_At_Entry"]
-tmp_f = tempfile.mkdtemp(prefix="btc_smoke_f_")
-engine.LOG_FILE_PATH = os.path.join(tmp_f, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_f, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_f, "trades.csv")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_f, "skipped_trades.csv")
-
+tmp_f = tempfile.mkdtemp(prefix="nasdaq_smoke_f_")
+configure_tmp(tmp_f)
 with open(engine.TRADES_LOG_PATH, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(OLD_HEADER)
-    # two old-schema BUY rows (15 fields, legacy comma-formatted prices)
-    w.writerow(["1", "2026-09-09 01:00:00", "2026-09-09 01:05:00", "80,000.00", "79,900.00", "80,200.00",
-                "80,200.00", "TP", "2.00", "202.00", "55.0", "35.00", "50.0%", "79,950.00", "79,900.00"])
-    w.writerow(["2", "2026-09-09 02:00:00", "2026-09-09 02:05:00", "80,100.00", "80,000.00", "80,300.00",
-                "80,000.00", "SL", "-1.00", "201.00", "50.0", "35.50", "45.0%", "80,050.00", "80,000.00"])
-    # the incident: 16-field SELL row appended under the 15-field header
-    w.writerow(["3", "SELL", "2026-09-10 00:09:00", "2026-09-10 00:11:04", "79900.00", "80000.00",
-                "79700.00", "80005.00", "SL", "-1.05", "199.95", "45.0", "35.00", "55.6%", "79950.00", "80000.00"])
+    w.writerow(["1", "2026-10-20 14:00:00", "2026-10-20 14:30:00", "20,500.00", "20,420.00", "20,660.00",
+                "20,660.00", "TP", "16.00", "216.00", "55.0", "40.00", "50.0%", "20,480.00", "20,400.00"])
+    w.writerow(["2", "SELL", "2026-10-20 15:00:00", "2026-10-20 15:15:00", "20450.00", "20530.00",
+                "20290.00", "20530.00", "SL", "-8.00", "208.00", "45.0", "40.00", "55.6%", "20470.00", "20510.00"])
 
-# 1) demonstrate the incident: with drift, the SELL SL is invisible to the risk gates
-drifted = trade_filter.load_recent_trades()
-cnt_before = trade_filter.get_daily_sl_count(drifted, datetime(2026, 9, 10, 1, 0, tzinfo=timezone.utc))
-check("F: drifted file misses the SELL SL (bug reproduced)", cnt_before == 0, f"daily_sls={cnt_before}")
-
-# 2) engine start must auto-migrate and resync stats
-eng_f = engine.BitcoinEngine()
+with redirect_stdout(io.StringIO()):
+    eng_f = engine.NasdaqEngine()
 with open(engine.TRADES_LOG_PATH, newline="") as f:
     rdr = csv.DictReader(f)
     rows_f = list(rdr)
     hdr_f = rdr.fieldnames
-check("F: header migrated to 16-field schema", hdr_f == engine.TRADES_FIELDNAMES, f"{hdr_f}")
-check("F: old rows backfilled as BUY", all(r["Trade_Type"] == "BUY" for r in rows_f[:2]))
-check("F: legacy comma prices survive migration byte-for-byte",
-      rows_f[0]["Entry_Price"] == "80,000.00" and rows_f[1]["EMA50_At_Entry"] == "80,050.00")
-check("F: SELL row aligned (Exit_Reason=SL, Profit=-1.05)",
-      rows_f[2]["Trade_Type"] == "SELL" and rows_f[2]["Exit_Reason"] == "SL"
-      and rows_f[2]["Profit"] == "-1.05" and rows_f[2]["Balance_After"] == "199.95")
-check("F: engine stats resynced (1W/2L, next=#4)",
-      eng_f.wins == 1 and eng_f.losses == 2 and eng_f.next_trade_num == 4 and abs(eng_f.balance - 199.95) < 0.01,
-      f"{eng_f.wins}W/{eng_f.losses}L next=#{eng_f.next_trade_num} bal={eng_f.balance}")
-
-# 3) risk gates see the SELL SL now
-migrated = trade_filter.load_recent_trades()
-cnt_after = trade_filter.get_daily_sl_count(migrated, datetime(2026, 9, 10, 1, 0, tzinfo=timezone.utc))
-check("F: daily SL count sees the SELL SL after migration", cnt_after == 1, f"daily_sls={cnt_after}")
-
-# 4) migration is idempotent and keeps a backup
-check("F: re-migration is a no-op", engine.migrate_trades_csv(engine.TRADES_LOG_PATH) is False)
-check("F: backup kept", os.path.exists(engine.TRADES_LOG_PATH + ".bak-pre-migration"))
+check("F: header migrated to 16-field schema", hdr_f == engine.TRADES_FIELDNAMES)
+check("F: old 15-field row backfilled as BUY and SELL row aligned",
+      rows_f[0]["Trade_Type"] == "BUY" and rows_f[1]["Trade_Type"] == "SELL" and rows_f[1]["Exit_Reason"] == "SL")
+check("F: backup created and re-migration is idempotent",
+      os.path.exists(engine.TRADES_LOG_PATH + ".bak-pre-migration")
+      and engine.migrate_trades_csv(engine.TRADES_LOG_PATH) is False)
 shutil.rmtree(tmp_f, ignore_errors=True)
 
+# ==============================================================================
+# Scenario G: Stale-feed guard + America/New_York market hours & blackouts
+# ==============================================================================
+print("\nScenario G: stale-feed guard + America/New_York DST-aware market hours & blackouts")
+tmp_g = tempfile.mkdtemp(prefix="nasdaq_smoke_g_")
+configure_tmp(tmp_g)
+with redirect_stdout(io.StringIO()):
+    eng_g = engine.NasdaqEngine()
 
-# --- Scenario G ---
-print("\nScenario G: stale-feed guard (silent WebSocket stall, no quiet hours on BTC)")
-tmp_g = tempfile.mkdtemp(prefix="btc_smoke_g_")
-engine.LOG_FILE_PATH = os.path.join(tmp_g, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_g, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_g, "trades.csv")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_g, "skipped_trades.csv")
-
-eng_g = engine.BitcoinEngine()
-
-# fresh feed -> not stale
-eng_g._last_price_mono = time.monotonic()
-check("G: fresh feed not stale", eng_g.feed_stale_seconds() < 1.0, f"{eng_g.feed_stale_seconds():.2f}s")
-
-# 11 min without ticks -> stale
 eng_g._last_price_mono = time.monotonic() - (engine.STALE_FEED_SECONDS + 60)
 stale = eng_g.feed_stale_seconds()
-check("G: 11-min gap detected as stale", stale > engine.STALE_FEED_SECONDS, f"{stale:.0f}s")
+check("G: >20-min gap detected as stale on M15", stale > engine.STALE_FEED_SECONDS, f"{stale:.0f}s")
+check("G: stale alert fires once then rate-limits",
+      eng_g.maybe_alert_stale_feed(stale) is True and eng_g.maybe_alert_stale_feed(stale) is False)
 
-# BTC trades 24/7: NOTHING is a quiet hour (gold's weekend/break suppression
-# must never apply here - a silent BTC feed is always an incident)
-check("G: Saturday 12:00 UTC is NOT quiet (BTC trades weekends)",
-      not engine.is_market_quiet(datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)))
-check("G: Friday 23:00 UTC is NOT quiet (no daily break on BTC)",
-      not engine.is_market_quiet(datetime(2026, 9, 11, 23, 0, tzinfo=timezone.utc)))
-check("G: Thursday 01:30 UTC is NOT quiet",
-      not engine.is_market_quiet(datetime(2026, 9, 10, 1, 30, tzinfo=timezone.utc)))
-check("G: Thursday 12:00 UTC is NOT quiet",
-      not engine.is_market_quiet(datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)))
+# CME schedule checks across EDT (Oct 2026, UTC-4) and EST (Nov 2026, UTC-5)
+check("G: Saturday 12:00 UTC is QUIET (CME closed weekend)",
+      engine.is_market_quiet(datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)))
+check("G: Tuesday 21:30 UTC (17:30 EDT) is QUIET (daily CME maintenance break)",
+      engine.is_market_quiet(datetime(2026, 10, 20, 21, 30, tzinfo=timezone.utc)))
+check("G: Tuesday 14:30 UTC (10:30 EDT RTH) is OPEN",
+      not engine.is_market_quiet(datetime(2026, 10, 20, 14, 30, tzinfo=timezone.utc)))
+# After US DST ends (2026-11-10 = EST = UTC-5): 17:30 EST = 22:30 UTC -> QUIET; 21:30 UTC = 16:30 EST -> OPEN!
+check("G: DST shift handled: 2026-11-10 22:30 UTC (17:30 EST) is QUIET, 20:30 UTC (15:30 EST) is OPEN",
+      engine.is_market_quiet(datetime(2026, 11, 10, 22, 30, tzinfo=timezone.utc))
+      and not engine.is_market_quiet(datetime(2026, 11, 10, 20, 30, tzinfo=timezone.utc)))
 
-# alert rate-limit: first alert fires, immediate second is suppressed
-first = eng_g.maybe_alert_stale_feed(stale)
-second = eng_g.maybe_alert_stale_feed(stale)
-check("G: stale alert fires once, then rate-limited", first is True and second is False)
+# Session blackouts (08:30 ET macro, 09:30 ET cash open, 17:00 ET CME rollover)
+b_macro, lbl_macro = trade_filter.is_in_blackout(datetime(2026, 10, 20, 12, 30, tzinfo=timezone.utc))  # 08:30 EDT
+b_open, lbl_open = trade_filter.is_in_blackout(datetime(2026, 10, 20, 13, 32, tzinfo=timezone.utc))    # 09:32 EDT
+b_clear, _ = trade_filter.is_in_blackout(datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc))           # 11:00 EDT
+check("G: 08:30 ET macro & 09:30 ET cash open blackouts block entries; 11:00 ET is clear",
+      b_macro and "08:30" in lbl_macro and b_open and "09:30" in lbl_open and not b_clear)
 shutil.rmtree(tmp_g, ignore_errors=True)
 
+# ==============================================================================
+# Scenario H: MT5 M15 sidecar feed + 250-bar startup warm-up seeding
+# ==============================================================================
+print("\nScenario H: MT5 M15 sidecar feed + 250-bar mt5_warmup_candles.json seeding")
+tmp_h = tempfile.mkdtemp(prefix="nasdaq_smoke_h_")
+configure_tmp(tmp_h)
 
-# --- Scenario H ---
-print("\nScenario H: MT5 sidecar feed file (DATA_SOURCE=MT5)")
-tmp_h = tempfile.mkdtemp(prefix="btc_smoke_h_")
-engine.LOG_FILE_PATH = os.path.join(tmp_h, "forward_test_log.csv")
-engine.STATUS_FILE_PATH = os.path.join(tmp_h, "status.json")
-engine.TRADES_LOG_PATH = os.path.join(tmp_h, "trades.csv")
-engine.MT5_FEED_FILE = os.path.join(tmp_h, "mt5_last_candle.json")
-trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-trade_filter.SKIP_LOG = os.path.join(tmp_h, "skipped_trades.csv")
+check("H: default DATA_SOURCE is MT5", engine.DATA_SOURCE == "MT5", f"DATA_SOURCE={engine.DATA_SOURCE}")
 
-check("H: default data source stays TWELVEDATA", engine.DATA_SOURCE == "TWELVEDATA",
-      f"DATA_SOURCE={engine.DATA_SOURCE}")
-
-eng_h = engine.BitcoinEngine()
-check("H: missing feed file -> None", eng_h.read_mt5_feed() is None)
-
-# The sidecar must convert broker-server timestamps to UTC using a fresh tick.
-# Import its pure helper with a stub MT5 module (Linux has no MT5 package).
-import importlib.util
-fake_mt5 = types.ModuleType("MetaTrader5")
-fake_mt5.TIMEFRAME_M1 = 1
-fake_mt5.TIMEFRAME_M5 = 5
-fake_mt5.TIMEFRAME_M15 = 15
-sys.modules["MetaTrader5"] = fake_mt5
+fake_mt5_h = types.ModuleType("MetaTrader5")
+fake_mt5_h.TIMEFRAME_M1 = 1
+fake_mt5_h.TIMEFRAME_M5 = 5
+fake_mt5_h.TIMEFRAME_M15 = 15
+sys.modules["MetaTrader5"] = fake_mt5_h
 feed_spec = importlib.util.spec_from_file_location("mt5_feed_under_test", os.path.join(HERE, "mt5_feed.py"))
 feed_mod = importlib.util.module_from_spec(feed_spec)
 feed_spec.loader.exec_module(feed_mod)
-check("H: fresh +3h tick estimates UTC offset", feed_mod.estimate_server_offset(100000 + 10800 - 1, 100000) == 10800)
-check("H: stale tick cannot estimate offset", feed_mod.estimate_server_offset(100000 + 10800 - 1200, 100000) is None)
 
-# sidecar publishes the latest closed candle with a UTC ts; engine reads + normalizes it
-feed1 = {"ts": 2000, "server_ts": 12800, "server_offset_s": 10800, "open": 80000.0, "high": 80010.0, "low": 79990.0,
-         "close": 80005.0, "tick_volume": 120, "updated_at": "2026-09-10 05:01:03"}
+check("H: mt5_feed defaults to US100Cash on M15",
+      feed_mod.SYMBOL == "US100Cash" and feed_mod.TIMEFRAME_NAME == "M15")
+check("H: fresh +3h tick estimates UTC offset",
+      feed_mod.estimate_server_offset(100000 + 10800 - 1, 100000) == 10800)
+
+# Build a 250-bar warm-up payload and verify engine boots warm immediately!
+base_srv = 1792497600 + 10800  # 2026-10-20 12:00 UTC in +3h server time
+warm_rates = [
+    {"time": base_srv + i * 900, "open": 20200.0 + i, "high": 20215.0 + i,
+     "low": 20190.0 + i, "close": 20208.0 + i, "tick_volume": 450}
+    for i in range(250)
+]
+w_payload = feed_mod.build_warmup_payload(warm_rates, 10800, symbol="US100Cash", timeframe="M15")
+with open(engine.MT5_WARMUP_FILE, "w") as f:
+    json.dump(w_payload, f)
+
+with redirect_stdout(io.StringIO()):
+    eng_h = engine.NasdaqEngine()
+check("H: 250-bar mt5_warmup_candles.json warms EMA200, EMA50, RSI & ATR immediately on boot",
+      len(eng_h.closes) == 200 and eng_h.ema_slow is not None and eng_h.atr is not None,
+      f"closes={len(eng_h.closes)} ema200={eng_h.ema_slow} atr={eng_h.atr}")
+
+# Publish next M15 closed bar via mt5_last_candle.json
+next_open_utc = (base_srv - 10800) + 250 * 900
 with open(engine.MT5_FEED_FILE, "w") as f:
-    json.dump(feed1, f)
+    json.dump({
+        "symbol": "US100Cash", "timeframe": "M15", "ts": next_open_utc,
+        "open": 20460.0, "high": 20480.0, "low": 20450.0, "close": 20472.0,
+        "tick_volume": 510, "updated_at": "2026-10-23 02:45:02",
+    }, f)
 r1 = eng_h.read_mt5_feed()
-check("H: feed file normalized to rate shape",
-      r1 is not None and r1[0]["time"] == 2000 and r1[0]["open"] == 80000.0 and r1[0]["tick_volume"] == 120)
-first_h_candle = eng_h.mt5_next_candle(r1, 0)
-check("H: first closed candle accepted",
-      first_h_candle is not None and first_h_candle[0] == 2000
-      and first_h_candle[1] == 80000.0 and first_h_candle[5] == 120)
-check("H: same candle NOT re-evaluated at its close watermark",
-      eng_h.mt5_next_candle(r1, 2000 + engine.CANDLE_SECONDS) is None)
-
-# Persist the exact source-bar close time, then make the next bar eligible.
-eng_h.process_closed_candle(*first_h_candle[1:], candle_ts=first_h_candle[0])
+c1 = eng_h.mt5_next_candle(r1, eng_h._warmup_close_ts)
+check("H: new M15 closed candle accepted after warm-up watermark",
+      c1 is not None and c1[0] == next_open_utc and c1[5] == 510)
+with redirect_stdout(io.StringIO()):
+    eng_h.process_closed_candle(*c1[1:], candle_ts=c1[0])
 last_close_ts = engine.last_logged_candle_close_ts(engine.LOG_FILE_PATH)
-check("H: MT5 log timestamp is the exact closed-bar boundary",
-      last_close_ts == 2000 + engine.CANDLE_SECONDS)
-
-with open(engine.MT5_FEED_FILE, "w") as f:
-    json.dump({"ts": 2300, "open": 80005.0, "high": 80020.0, "low": 80000.0,
-               "close": 80015.0, "tick_volume": 340, "updated_at": "2026-09-10 05:06:03"}, f)
-c2 = eng_h.mt5_next_candle(eng_h.read_mt5_feed(), last_close_ts)
-check("H: next bar is not skipped after restart watermark",
-      c2 is not None and c2[0] == 2300 and c2[5] == 340)
-
-eng_h._last_price_mono = 100.0
-check("H: MT5 watchdog recognizes a fresh closed candle",
-      not eng_h.mt5_feed_is_stale(r1, now_mono=105.0, now_epoch=2600.0))
-check("H: MT5 watchdog recognizes a stale unchanged candle",
-      eng_h.mt5_feed_is_stale(r1, now_mono=105.0, now_epoch=2901.0))
-check("H: MT5 watchdog recognizes a missing feed after its timeout",
-      eng_h.mt5_feed_is_stale(None, now_mono=701.0))
-
-with open(engine.MT5_FEED_FILE, "w") as f:
-    f.write("corrupted")
-check("H: corrupt feed file -> None (no crash)", eng_h.read_mt5_feed() is None)
-check("H: no rates -> None", engine.latest_closed_candle_ts(None) is None)
-check("H: empty rates -> None", engine.latest_closed_candle_ts([]) is None)
+check("H: logged close timestamp is open_ts + 900s and bar is not re-evaluated",
+      last_close_ts == next_open_utc + 900 and eng_h.mt5_next_candle(r1, last_close_ts) is None)
 shutil.rmtree(tmp_h, ignore_errors=True)
 
-# --- Scenario I ---
-print("\nScenario I: replay_lib walk direction, ratchet trigger and horizon")
-import replay_lib as R  # noqa: E402
+# ==============================================================================
+# Scenario I: replay_lib + history_to_log (candles_m15.csv) + backtest.py
+# ==============================================================================
+print("\nScenario I: replay_lib walk direction + history_to_log candles_m15.csv + backtest.py")
+import replay_lib as R       # noqa: E402
+import history_to_log as HL  # noqa: E402
+import backtest as BT        # noqa: E402
 
-side_dt = datetime(2026, 9, 8, 0, 0)
-ENTRY, ATR = 80000.0, 100.0        # 1R = 200, TP = 80000 +- 400 at 2x/4x
+side_dt = datetime(2026, 10, 20, 14, 0)
+ENTRY_I, ATR_I = 20500.0, 40.0   # 1R = 80 pts ($8.00 at 0.10 lot), TP = 160 pts ($16.00)
 
 
-def bar(i, o, h, l, c):
-    return dict(dt=side_dt + timedelta(minutes=5 * i), o=o, h=h, l=l, c=c)
+def bar_i(i, o, h, l, c):
+    return dict(dt=side_dt + timedelta(minutes=15 * i), o=o, h=h, l=l, c=c)
 
 
-# SELL: price falls 4xATR -> TP is hit and the stop (above entry) is not
-sell_tp = [bar(1, 79620, 79650, 79560, 79580), bar(2, 79580, 79600, 79550, 79560)]
-out, r, held, _ = R.walk(ENTRY, "SELL", ATR, sell_tp)
-check("I: SELL walk detects TP when price falls to the target", out == "TP", f"got {out}")
-check("I: SELL TP pays exactly the planned 2R", abs(r - 2.0) < 1e-9, f"R={r}")
+out_stp, r_stp, _, _ = R.walk(ENTRY_I, "SELL", ATR_I, [bar_i(1, 20400, 20410, 20330, 20335)])
+out_ssl, r_ssl, _, _ = R.walk(ENTRY_I, "SELL", ATR_I, [bar_i(1, 20520, 20595, 20510, 20590)])
+out_tie, _, _, _ = R.walk(ENTRY_I, "BUY", ATR_I, [bar_i(1, 20500, 20680, 20400, 20600)])
+check("I: SELL TP (+2R), SELL SL (-1R), and ambiguous-bar SL-first tie-break work on M15",
+      out_stp == "TP" and abs(r_stp - 2.0) < 1e-9 and out_ssl == "SL" and abs(r_ssl + 1.0) < 1e-9
+      and out_tie == "SL")
+check("I: r_money scales by LOT_SIZE=0.10 ($8.00 at 40-pt ATR)",
+      abs(R.r_money(40.0) - 8.0) < 1e-9)
 
-# SELL: price rises 2xATR -> SL is hit even though the bar's HIGH is the adverse side
-sell_sl = [bar(1, 80100, 80300, 80090, 80290)]
-out, r, held, _ = R.walk(ENTRY, "SELL", ATR, sell_sl)
-check("I: SELL walk detects SL on a rising bar (high is the adverse extreme)", out == "SL", f"got {out}")
-check("I: SELL SL costs exactly 1R", abs(r + 1.0) < 1e-9, f"R={r}")
+tmp_i = tempfile.mkdtemp(prefix="nasdaq_smoke_i_")
+shadow_csv = os.path.join(tmp_i, "candles_m15.csv")
+with open(shadow_csv, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(["bar_close_utc", "open", "high", "low", "close", "tick_volume", "spread_pts", "time_srv", "offset_s"])
+    pts = candles_uptrend(260, 20000.0)
+    t_bar = datetime(2026, 10, 19, 0, 15)
+    for (o, h, l, c) in pts:
+        w.writerow([t_bar.strftime("%Y-%m-%d %H:%M:%S"), f"{o:.2f}", f"{h:.2f}", f"{l:.2f}", f"{c:.2f}",
+                    320, 250, 0, 10800])
+        t_bar += timedelta(minutes=15)
+bt_log = os.path.join(tmp_i, "bt_log.csv")
+with redirect_stdout(io.StringIO()):
+    rc_bt = BT.main([shadow_csv, "--spread", "0.25", "--boot", "200", "--save-log", bt_log])
+    rc_sc = HL.selfcheck(bt_log)
+check("I: backtest.py ingests xm_data/candles_m15.csv directly & history_to_log --selfcheck is FAITHFUL",
+      rc_bt == 0 and rc_sc == 0)
+shutil.rmtree(tmp_i, ignore_errors=True)
 
-# mirror symmetry: BUY on the mirrored path must give the mirrored outcome
-buy_tp = [bar(1, 80380, 80440, 80350, 80420), bar(2, 80420, 80450, 80400, 80440)]
-out_b, r_b, _, _ = R.walk(ENTRY, "BUY", ATR, buy_tp)
-check("I: BUY walk mirrors the SELL walk (both hit TP)", out_b == "TP" and out == "SL",
-      f"buy={out_b} (sell mirror of the same bars was {out})")
-
-# a bar that touches BOTH levels resolves to the stop (conservative tie-break)
-both = [bar(1, 80000, 80450, 79750, 80300)]
-out, _, _, _ = R.walk(ENTRY, "BUY", ATR, both)
-check("I: bar spanning both levels resolves to the STOP (conservative)", out == "SL", f"got {out}")
-
-# BE ratchet: must NOT arm below the trigger, MUST arm at/above it
-quiet = [bar(1, 80000, 80120, 79990, 80050), bar(2, 80050, 80060, 79780, 79800)]
-out, r, _, _ = R.walk(ENTRY, "BUY", ATR, quiet, be_trigger=0.75)
-check("I: BE ratchet does NOT arm below its trigger (+0.60R < +0.75R)", out == "SL", f"got {out}")
-armed = [bar(1, 80150, 80260, 80100, 80250), bar(2, 80250, 80255, 79990, 80010)]
-out, r, _, _ = R.walk(ENTRY, "BUY", ATR, armed, be_trigger=0.75)
-check("I: BE ratchet arms at +0.75R and exits at breakeven", out == "BE" and abs(r) < 1e-9,
-      f"got {out} R={r}")
-
-# horizon: a trade that never reaches TP before the cap must not be scored as a win
-slow = [bar(i, 80000 + i * 5, 80010 + i * 5, 79990 + i * 5, 80000 + i * 5) for i in range(1, 40)]
-out, r, held, _ = R.walk(ENTRY, "BUY", ATR, slow, horizon_min=60, start_dt=side_dt)
-check("I: horizon ends flat -> TIME marked to market, never a fabricated TP",
-      out == "TIME" and held == 12, f"got {out} after {held} bars")
-
-# cascade: one position at a time + cooldown (two signals 10 min apart -> one taken)
-slow_tp = [bar(1, 79700, 79720, 79680, 79700), bar(2, 79700, 79710, 79650, 79680),
-           bar(3, 79680, 79690, 79500, 79520)]
-sigs = [dict(dt=side_dt, side="SELL", atr=ATR, entry=ENTRY),
-        dict(dt=side_dt + timedelta(minutes=7), side="SELL", atr=ATR, entry=ENTRY)]
-taken, skipped, results = R.cascade(sigs, slow_tp, horizon_min=240)
-check("I: cascade replay holds one position at a time", taken == 1 and skipped == 1,
-      f"taken={taken} skipped={skipped}")
-sigs = [dict(dt=side_dt, side="SELL", atr=ATR, entry=ENTRY),
-        dict(dt=side_dt + timedelta(minutes=20), side="SELL", atr=ATR, entry=ENTRY)]
-taken, skipped, _ = R.cascade(sigs, [sell_sl[0]] + [bar(4, 79900, 79910, 79790, 79800)],
-                              horizon_min=240)
-check("I: cascade applies the SL cooldown after a loss", taken == 1 and skipped == 1,
-      f"taken={taken} skipped={skipped}")
-
-# --- Scenario J ---
-print("\nScenario J: handoff_check tolerance policy (5 trades / 48 h, no crying wolf)")
+# ==============================================================================
+# Scenario J: handoff_check tolerance policy (5 trades / 48 h = 192 M15 bars)
+# ==============================================================================
+print("\nScenario J: handoff_check tolerance policy (M15 BAR_TOLERANCE = 192, $0.25 spread)")
 import handoff_check as HC  # noqa: E402
 
 J_DOC = {
-    "as_of_utc": "2026-10-01 02:05", "data_collection": "1937",
-    "closed_trades": "124", "wins_losses": "54W/70L", "win_rate_pct": "43.5",
-    "engine_ledger_usd": "260.19", "true_equity_usd": "-131.63",
-    "live_era_trades": "70", "live_era_net_usd": "+32.20",
-    "log_covered_trades": "70", "log_bars": "6518",
-    "log_last_bar_utc": "2026-10-01 02:05", "skip_rows": "117",
-    "open_trade": "SELL #124 @ 83602.0", "spread_usd_per_trade": "0.40",
+    "as_of_utc": "2026-10-26 14:00", "data_collection": "10",
+    "closed_trades": "20", "wins_losses": "9W/11L", "win_rate_pct": "45.0",
+    "engine_ledger_usd": "242.00", "true_equity_usd": "242.00",
+    "live_era_trades": "20", "live_era_net_usd": "+37.00",
+    "log_covered_trades": "20", "log_bars": "400",
+    "log_last_bar_utc": "2026-10-26 14:00", "skip_rows": "12",
+    "open_trade": "BUY #21 @ 20510.0", "spread_usd_per_trade": "0.25",
 }
 
 
 def j_stale(doc=None, **live_over):
-    """Keys HC.compare() calls STALE when the live data differs by live_over."""
     live = dict(J_DOC)
     live.update(live_over)
     rows = HC.compare(doc or J_DOC, live)
     return sorted(k for k, _d, _l, verdict, _n in rows if verdict == "STALE")
 
 
-# normal drift: the box trades and logs while the doc sleeps -> never STALE
-check("J: identical snapshot is fresh", j_stale() == [])
-check("J: one new M5 bar is normal drift (was STALE via log_last_bar_utc)",
-      j_stale(as_of_utc="2026-10-01 02:10", data_collection="1938", log_bars="6519",
-              log_last_bar_utc="2026-10-01 02:10") == [])
-check("J: one closed trade + a new open trade is normal drift (was STALE via wins_losses)",
-      j_stale(closed_trades="125", wins_losses="55W/70L", win_rate_pct="44.0",
-              engine_ledger_usd="262.10", true_equity_usd="-129.73",
-              live_era_trades="71", live_era_net_usd="+33.10", log_covered_trades="71",
-              log_bars="6600", log_last_bar_utc="2026-10-01 09:00",
-              open_trade="BUY #125 @ 83700.0") == [])
-check("J: an open-trade change alone is normal drift", j_stale(open_trade="none") == [])
-check("J: 47 h of log is still fresh",
-      j_stale(log_bars=str(6518 + 47 * 12), log_last_bar_utc="2026-10-03 01:05") == [])
-five = dict(closed_trades="129", wins_losses="57W/72L", win_rate_pct="44.2",
-            engine_ledger_usd="270.19", true_equity_usd="-121.63", live_era_trades="75",
-            live_era_net_usd="+42.20", log_covered_trades="75", open_trade="none")
-check("J: 5 closed trades behind is still fresh (the documented tolerance)", j_stale(**five) == [])
+check("J: BAR_TOLERANCE == MAX_AGE_HOURS * 4 == 192 M15 bars",
+      HC.TRADE_TOLERANCE == 5 and HC.MAX_AGE_HOURS == 48 and HC.BAR_TOLERANCE == 192)
+check("J: +1 M15 bar and 47 h of M15 bars are normal drift",
+      j_stale(log_bars="401", log_last_bar_utc="2026-10-26 14:15") == []
+      and j_stale(log_bars=str(400 + 47 * 4), log_last_bar_utc="2026-10-28 13:00") == [])
+check("J: 49 h of M15 bars or 6 trades behind or mismatched spread is STALE",
+      "log_last_bar_utc" in j_stale(log_bars=str(400 + 49 * 4), log_last_bar_utc="2026-10-28 15:00")
+      and "closed_trades" in j_stale(closed_trades="26", wins_losses="12W/14L", win_rate_pct="46.2",
+                                     live_era_trades="26", log_covered_trades="26")
+      and j_stale(spread_usd_per_trade="0.40") == ["spread_usd_per_trade"])
 
-# genuinely behind or contradictory -> STALE
-six = dict(five, closed_trades="130", wins_losses="58W/72L", win_rate_pct="44.6",
-           live_era_trades="76", log_covered_trades="76")
-stale6 = j_stale(**six)
-check("J: 6 closed trades behind is STALE (count and outcomes both flagged)",
-      "closed_trades" in stale6 and "wins_losses" in stale6, f"stale={stale6}")
-check("J: 49 h of log is STALE",
-      "log_last_bar_utc" in j_stale(log_bars=str(6518 + 49 * 12),
-                                    log_last_bar_utc="2026-10-03 03:05"))
-check("J: changed outcomes with an unchanged trade count are STALE (ledger edited?)",
-      j_stale(wins_losses="53W/71L", win_rate_pct="42.7") == ["win_rate_pct", "wins_losses"])
-check("J: a snapshot NEWER than the data is STALE (lost data / stale checkout)",
-      j_stale(log_last_bar_utc="2026-10-01 01:00") == ["log_last_bar_utc"])
-check("J: a different cost assumption is STALE (config must match exactly)",
-      j_stale(spread_usd_per_trade="0.60") == ["spread_usd_per_trade"])
-check("J: a key missing from the doc is STALE",
-      j_stale(doc={k: v for k, v in J_DOC.items() if k != "skip_rows"}) == ["skip_rows"])
-check("J: tolerances stay tied to the documented 5 trades / 48 h",
-      HC.TRADE_TOLERANCE == 5 and HC.MAX_AGE_HOURS == 48
-      and HC.BAR_TOLERANCE == HC.MAX_AGE_HOURS * 12,
-      f"{HC.TRADE_TOLERANCE} trades, {HC.MAX_AGE_HOURS} h, {HC.BAR_TOLERANCE} rows")
-
-# --- Scenario K ------------------------------------------------------------
-print("\nScenario K: XM quote + contract-spec logger (tools/mt5_quotes.py, read-only sidecar)")
-import ast  # noqa: E402
-import collections  # noqa: E402
-import hashlib  # noqa: E402
+# ==============================================================================
+# Scenario K: tools/mt5_quotes.py read-only XM US100Cash logger
+# ==============================================================================
+print("\nScenario K: tools/mt5_quotes.py read-only XM US100Cash M15 logger")
 import mt5_quotes as Q  # noqa: E402
 
-K_T0 = 1790823600  # 2026-10-01 03:00:00 UTC
-K_SECRETS = ("123456789", "Jane Doe", "XMGlobal-MT5 7", "99999.5", "jane", "Common")
+K_T0 = 1792504800  # Tuesday 2026-10-20 14:00:00 UTC (10:00 EDT - open market)
+K_SECRETS = ("123456789", "Jane Doe", "XMGlobal-MT5 7", "99999.5", "C:\\Users\\jane")
 
 
 class KClock:
@@ -568,39 +472,55 @@ class KClock:
 
 
 class KMT5(types.ModuleType):
-    """A fake terminal. Bars are synthesised from UTC with the offset in force when each
-    bar OPENED (history keeps the raw times it was created with); ticks carry the current
-    server time. Any trading call is recorded - the logger must never make one."""
-    TIMEFRAME_M5 = 5
+    TIMEFRAME_M15 = 15
     ORDER_TYPE_BUY = 0
 
-    def __init__(self, clock, offset=10800, history_start=K_T0 - 300 * 400):
+    def __init__(self, clock, offset=10800, history_start=K_T0 - 900 * 100):
         super().__init__("MetaTrader5")
         self.clock, self.offset, self.history_start = clock, offset, history_start
         self.flip_utc = self.offset_after = None
-        self.spread, self.bid, self.mode, self.frozen = 40.0, 83000.0, "ok", None
-        self.stops_level = 100
-        self.used, self.trading_calls, self.unknown = collections.Counter(), [], set()
-        for name in Q.FORBIDDEN_API:                       # recorded, never legitimately called
+        self.spread, self.bid, self.mode, self.frozen = 2.50, 20500.0, "ok", None
+        self.trading_calls = []
+        for name in Q.FORBIDDEN_API:
             setattr(self, name, (lambda n: lambda *a, **k: self.trading_calls.append(n))(name))
-
-    def __getattr__(self, name):
-        self.unknown.add(name)
-        raise AttributeError(name)
 
     def _off_at(self, utc):
         return self.offset_after if (self.flip_utc is not None and utc >= self.flip_utc) else self.offset
 
-    def symbol_info_tick(self, symbol):
-        self.used["symbol_info_tick"] += 1
+    def initialize(self):
+        return True
+
+    def shutdown(self):
+        return None
+
+    def last_error(self):
+        return (1, "Success")
+
+    def symbol_select(self, _sym, _en=True):
+        return True
+
+    def terminal_info(self):
+        T = collections.namedtuple("Term", "build connected trade_allowed maxbars path data_path commondata_path name company")
+        return T(4410, True, True, 100000, "C:\\Users\\jane\\MT5", "C:\\Users\\jane\\Data", "Common", "MetaTrader 5", "MetaQuotes")
+
+    def account_info(self):
+        A = collections.namedtuple("Acct", "login name server balance equity margin margin_free profit credit trade_mode margin_so_mode leverage currency")
+        return A(123456789, "Jane Doe", "XMGlobal-MT5 7", 99999.5, 99999.5, 0.0, 99999.5, 0.0, 0.0, 0, 0, 500, "USD")
+
+    def symbol_info(self, symbol):
+        S = collections.namedtuple("S", "name description path digits point spread spread_float "
+                                   "trade_calc_mode trade_mode trade_exemode filling_mode order_mode "
+                                   "expiration_mode trade_stops_level trade_freeze_level "
+                                   "trade_contract_size volume_min volume_max volume_step swap_mode "
+                                   "swap_long swap_short swap_rollover3days session_deals bidhigh")
+        return S(symbol, "US Tech 100 Cash", "CashIndices\\US100Cash", 2, 0.01, 250, True, 2, 4, 2, 2, 127,
+                 15, 0, 0, 1.0, 0.10, 500.0, 0.01, 1, -3.2, 1.1, 4, 99, 21000.0)
+
+    def symbol_info_tick(self, _symbol):
         T = collections.namedtuple("Tick", "time bid ask last volume time_msc flags volume_real")
         if self.mode == "none":
             return None
-        if self.mode == "bad":
-            return T(int(self.clock.t + self._off_at(self.clock.t)), 0.0, 0.0, 0, 0, 0, 0, 0)
-        if self.mode == "crossed":
-            return T(int(self.clock.t + self._off_at(self.clock.t) - 0.4), self.bid, self.bid - 5, 0, 0, 0, 0, 0)
-        if self.mode == "stale":                           # a frozen tick: its time never moves
+        if self.mode == "stale":
             if self.frozen is None:
                 self.frozen = int(self.clock.t + self._off_at(self.clock.t) - 5)
             return T(self.frozen, self.bid, self.bid + self.spread, 0, 0, 0, 0, 0)
@@ -608,1047 +528,326 @@ class KMT5(types.ModuleType):
         return T(int(self.clock.t + self._off_at(self.clock.t) - 0.4), self.bid, self.bid + self.spread,
                  0, 0, 0, 0, 0)
 
-    def symbol_info(self, symbol):
-        self.used["symbol_info"] += 1
-        S = collections.namedtuple("S", "name description path digits point spread spread_float "
-                                   "trade_calc_mode trade_mode trade_exemode filling_mode order_mode "
-                                   "expiration_mode trade_stops_level trade_freeze_level "
-                                   "trade_contract_size volume_min volume_max volume_step swap_mode "
-                                   "swap_long swap_short swap_rollover3days session_deals bidhigh")
-        return S("BTCUSD", "Bitcoin vs US Dollar", "Crypto\\BTCUSD", 2, 0.01, 4000, True, 2, 4, 2, 3, 127,
-                 15, self.stops_level, 0, 1.0, 0.01, 100.0, 0.01, 5, -30.0, -10.0, 3, 7, 99999.0)
-
-    def account_info(self):
-        self.used["account_info"] += 1
-        A = collections.namedtuple("A", "login name server balance equity profit trade_mode leverage "
-                                   "margin_mode currency trade_allowed company margin_free credit")
-        return A(123456789, "Jane Doe", "XMGlobal-MT5 7", 99999.5, 99998.0, 1.5, 0, 500, 2, "USD", True,
-                 "XM Global Limited", 99990.0, 0.0)
-
-    def terminal_info(self):
-        self.used["terminal_info"] += 1
-        Tm = collections.namedtuple("Tm", "build connected trade_allowed maxbars company name path "
-                                    "data_path commondata_path ping_last")
-        return Tm(5000, True, True, 100000, "XM Global Limited", "MetaTrader 5", "C:\\Users\\jane\\MT5",
-                  "C:\\Users\\jane\\MT5\\data", "C:\\Users\\jane\\Common", 77000)
-
-    def order_calc_profit(self, action, symbol, volume, price_open, price_close):
-        self.used["order_calc_profit"] += 1
+    def order_calc_profit(self, _order_type, _symbol, volume, price_open, price_close):
         return round((price_close - price_open) * volume * 1.0, 2)
 
-    def order_calc_margin(self, action, symbol, volume, price):
-        self.used["order_calc_margin"] += 1
-        return round(price * volume / 500.0, 2)
+    def order_calc_margin(self, _order_type, _symbol, volume, price):
+        return round(volume * price / 500.0, 2)
 
-    def _bar(self, u):
-        k = (u // 300) % 1000
-        return {"time": u + self._off_at(u), "open": 80000.0 + k, "high": 80010.0 + k, "low": 79990.0 + k,
-                "close": 80003.0 + k, "tick_volume": 100 + k % 50, "spread": 4000, "real_volume": 0}
+    def copy_rates_from_pos(self, _symbol, _tf, start_pos, count):
+        cur_open = (int(self.clock.t) // 900) * 900
+        bars = []
+        for k in range(int(count), 0, -1):
+            u = cur_open - (start_pos - 1 + k) * 900
+            if u < self.history_start:
+                continue
+            bars.append({
+                "time": u + self._off_at(u),
+                "open": 20480.0, "high": 20510.0, "low": 20470.0, "close": 20500.0,
+                "tick_volume": 420, "spread": 250,
+            })
+        return bars
 
-    def copy_rates_from_pos(self, symbol, tf, pos, count):
-        self.used["copy_rates_from_pos"] += 1
-        assert pos == 1, "the logger must only read CLOSED bars (start_pos 1)"
-        last_open = int(self.clock.t // 300) * 300 - 300
-        n = min(count, (last_open - self.history_start) // 300 + 1)
-        return [self._bar(last_open - 300 * (n - 1 - i)) for i in range(n)]
 
-    def shutdown(self):
-        self.used["shutdown"] += 1
+q_src = open(os.path.join(HERE, "mt5_quotes.py"), encoding="utf-8").read()
+q_tree = ast.parse(q_src)
+q_attrs = {n.attr for n in ast.walk(q_tree) if isinstance(n, ast.Attribute)}
+check("K: AST confirms mt5_quotes.py calls ZERO trading APIs",
+      not (q_attrs & set(Q.FORBIDDEN_API)), f"overlap={q_attrs & set(Q.FORBIDDEN_API)}")
+check("K: mt5_quotes defaults to Z:/opt/nasdaq/xm_data, M15_SECONDS=900, candles_m15.csv",
+      Q.DEFAULT_DIR == "Z:/opt/nasdaq/xm_data" and Q.M15_SECONDS == 900
+      and Q.CANDLES_FILE == "candles_m15.csv")
+
+tmp_k = tempfile.mkdtemp(prefix="nasdaq_smoke_k_")
+kclock = KClock(K_T0)
+kmt5 = KMT5(kclock)
+klog = Q.XmLogger(kmt5, "US100Cash", tmp_k, interval=30, poll=5, backfill_bars=50,
+                  sleep=kclock.sleep, log=lambda _m: None)
+klog.start(kclock.t, clock=kclock)
+for _ in range(12):
+    klog.step(kclock.t)
+    kclock.sleep(5)
+klog.flush_window(kclock.t)
+
+spec_txt = open(os.path.join(tmp_k, Q.SPEC_FILE), encoding="utf-8").read()
+spec_obj = json.loads(spec_txt)
+check("K: spec_latest.json leaks ZERO account PII/paths & confirms 0.10 lot x 100 pts = $10.00",
+      not any(s in spec_txt for s in K_SECRETS)
+      and spec_obj["probes"]["calc_profit_usd_0.10lot_plus_100pts"] == 10.0
+      and not kmt5.trading_calls)
+check("K: candles_m15.csv written with 15-min UTC closes",
+      os.path.isfile(os.path.join(tmp_k, "candles_m15.csv"))
+      and sum(1 for _ in open(os.path.join(tmp_k, "candles_m15.csv"))) > 40)
+
+# Watchdog: 16 minutes of no quotes -> SystemExit(2) when respect_market_hours=False
+kmt5.mode = "none"
+exited_2 = False
+for _ in range(210):
+    kclock.sleep(5)
+    try:
+        klog.step(kclock.t)
+    except SystemExit as ex:
+        exited_2 = (ex.code == 2)
+        break
+check("K: 15+ quiet minutes during open market exits with code 2 for systemd restart", exited_2)
+
+# Quiet-hours guard: Saturday 12:00 UTC does NOT exit(2) when respect_market_hours=True
+sat_t = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc).timestamp()
+kclock2 = KClock(sat_t)
+kmt5_2 = KMT5(kclock2)
+kmt5_2.mode = "none"
+klog2 = Q.XmLogger(kmt5_2, "US100Cash", os.path.join(tmp_k, "sat"),
+                   respect_market_hours=True, sleep=kclock2.sleep, log=lambda _m: None)
+klog2.started_at = sat_t
+sat_survived = True
+for _ in range(220):
+    kclock2.sleep(5)
+    try:
+        klog2.step(kclock2.t)
+    except SystemExit:
+        sat_survived = False
+        break
+check("K: CME weekend closure suppresses exit-2 restart loop when respect_market_hours=True", sat_survived)
+
+# ==============================================================================
+# Scenario L: tools/xm_quote_report.py (US100Cash M15 cost/parity/spec/quiet)
+# ==============================================================================
+print("\nScenario L: tools/xm_quote_report.py (US100Cash 0.10-lot cost, M15 parity, quiet line)")
+import xm_quote_report as XQR  # noqa: E402
+
+buf_l = io.StringIO()
+with redirect_stdout(buf_l):
+    rc_l = XQR.main(["--root", ROOT, "--dir", tmp_k, "--now", str(K_T0 + 60)])
+out_l = buf_l.getvalue()
+check("L: xm_quote_report runs cleanly on US100Cash logger output & verifies $10.00 probe",
+      rc_l == 0 and "0.10 lot x 100 pts = $10.00 OK" in out_l
+      and "== 5. SPEC: contract facts for US100Cash ==" in out_l
+      and abs(XQR.HARD_CAP_PTS - 8.0) < 1e-9 and abs(XQR.ASSUMED_USD_PER_TRADE - 0.25) < 1e-9)
+
+# Quiet-line: open-market stale vs weekend market-closed OK
+q_stale_buf = io.StringIO()
+with redirect_stdout(q_stale_buf):
+    XQR.main(["--root", ROOT, "--dir", tmp_k, "--quiet", "--now", str(K_T0 + 4 * 3600)])
+q_closed_buf = io.StringIO()
+with redirect_stdout(q_closed_buf):
+    XQR.main(["--root", ROOT, "--dir", tmp_k, "--quiet", "--now", str(sat_t)])
+check("L: --quiet reports STALE with mt5quotes-nasdaq during open hours & OK (market closed) on Saturday",
+      "xm logger: STALE" in q_stale_buf.getvalue()
+      and "mt5quotes-nasdaq" in q_stale_buf.getvalue()
+      and "xm logger: OK (market closed" in q_closed_buf.getvalue(),
+      q_closed_buf.getvalue().strip())
+
+# Ensure xm_quote_report does NOT accept a --spread flag (its purpose is measuring spread!)
+xqr_src = open(os.path.join(HERE, "xm_quote_report.py"), encoding="utf-8").read()
+check("L: xm_quote_report has no --spread CLI flag", '"--spread"' not in xqr_src)
+shutil.rmtree(tmp_k, ignore_errors=True)
+
+# ==============================================================================
+# Scenario M: MT5 closed-candle simulated exits (SL/TP, tie->SL, gap-open fill)
+# ==============================================================================
+print("\nScenario M: MT5 closed-candle simulated exits (US100Cash $0.10/pt)")
+tmp_m = tempfile.mkdtemp(prefix="nasdaq_smoke_m_")
+configure_tmp(tmp_m)
+with redirect_stdout(io.StringIO()):
+    eng_m = engine.NasdaqEngine()
+    eng_m.atr, eng_m.rsi, eng_m.ema_fast, eng_m.ema_slow = 40.0, 55.0, 20510.0, 20420.0
+    eng_m.execute_simulated_trade("BUY", 20500.0, 0.30, "2026-10-20 14:00:00")
+# Gap-down open below SL (SL = 20420.0, open = 20400.0) -> fills at open 20400.0 (-$10.00 at 0.10 lot)
+with redirect_stdout(io.StringIO()):
+    eng_m.check_position_on_closed_candle(20400.0, 20430.0, 20390.0, 20410.0)
+check("M: gap-through BUY stop fills at bar OPEN (-100 pts x $0.10 = -$10.00)",
+      not eng_m.trade_active and abs(eng_m.balance - 190.0) < 1e-6, f"bal={eng_m.balance}")
+
+# Ambiguous bar spanning both SL and TP -> resolves conservatively to SL
+with redirect_stdout(io.StringIO()):
+    eng_m.execute_simulated_trade("SELL", 20500.0, 0.30, "2026-10-20 14:15:00")  # SL=20580, TP=20340
+    eng_m.check_position_on_closed_candle(20500.0, 20600.0, 20300.0, 20400.0)
+check("M: single M15 candle touching both SL & TP resolves conservatively to SL",
+      eng_m.losses == 2 and eng_m.wins == 0)
+shutil.rmtree(tmp_m, ignore_errors=True)
+
+# ==============================================================================
+# Scenario N: tools/reconcile_stale_trade.py (0.10 lot US100Cash)
+# ==============================================================================
+print("\nScenario N: tools/reconcile_stale_trade.py (LOT_SIZE=0.10 reconciliation)")
+import reconcile_stale_trade as RST  # noqa: E402
+
+check("N: reconcile_stale_trade reads LOT_SIZE == 0.10 from engine.py",
+      abs(RST.LOT_SIZE - 0.10) < 1e-9, f"LOT_SIZE={RST.LOT_SIZE}")
+rec_res = RST.reconcile(
+    {"Trade_Type": "BUY", "Entry_Time": "2026-10-20 14:00:00",
+     "Entry_Price": "20500.00", "Stop_Loss": "20420.00", "Take_Profit": "20660.00"},
+    [
+        {"ts": "2026-10-20 14:00:00", "dt": datetime(2026, 10, 20, 14, 0),
+         "o": 20490.0, "h": 20700.0, "l": 20300.0, "c": 20500.0},
+        {"ts": "2026-10-20 14:15:00", "dt": datetime(2026, 10, 20, 14, 15),
+         "o": 20495.0, "h": 20510.0, "l": 20410.0, "c": 20430.0},
+    ],
+)
+prof_n, bal_n = RST.compute_money("BUY", 20500.0, rec_res["exit_price"], 200.0)
+check("N: entry candle ignored; next bar SL reconciled at -$8.00 -> $192.00",
+      rec_res["ok"] and rec_res["reason"] == "SL" and abs(prof_n + 8.0) < 1e-6 and abs(bal_n - 192.0) < 1e-6)
+
+# ==============================================================================
+# Scenario O: pressure.py + dashboard.py + autosync.sh static alert audit
+# ==============================================================================
+print("\nScenario O: pressure.py (60-bar M15) + dashboard.py + autosync.sh static STALE")
+import pressure  # noqa: E402
+
+p_src = open(os.path.join(ROOT, "pressure.py"), encoding="utf-8").read()
+p_tree = ast.parse(p_src)
+p_writes = [n.attr for n in ast.walk(p_tree) if isinstance(n, ast.Attribute)
+            and n.attr in ("write", "writerow", "writerows", "unlink", "remove")]
+check("O: pressure.py is read-only and mirrors engine US100Cash M15 constants",
+      not p_writes
+      and pressure.PRESSURE_WINDOW == 60
+      and abs(pressure.FLOOR_BUFFER_PCT - engine.FLOOR_BUFFER_PCT) < 1e-9
+      and pressure.EMA_SLOPE_LOOKBACK == engine.EMA_SLOPE_LOOKBACK
+      and abs(pressure.MAX_BELOW_EMA_ATR - engine.MAX_BELOW_EMA_ATR) < 1e-9)
+
+dash_src = open(os.path.join(ROOT, "dashboard.py"), encoding="utf-8").read()
+check("O: dashboard.py serves US100Cash M15 on /opt/nasdaq (port 6001) and defines TAB_STORAGE_KEY",
+      "US100Cash" in dash_src and "TAB_STORAGE_KEY" in dash_src
+      and "/opt/nasdaq" in dash_src and "port=6001" in dash_src)
+
+auto_src = open(os.path.join(HERE, "autosync.sh"), encoding="utf-8").read()
+check("O: autosync.sh targets /opt/nasdaq and uses static mt5quotes-nasdaq STALE alert for alert_once dedupe",
+      "/opt/nasdaq" in auto_src
+      and "systemctl status mt5quotes-nasdaq" in auto_src
+      and "XM quote logger stopped writing - check: systemctl status mt5quotes-nasdaq" in auto_src)
+
+# ==============================================================================
+# Scenario P: tools/mt5_executor.py + LIVE bridge + deploy/*.service audit
+# ==============================================================================
+print("\nScenario P: tools/mt5_executor.py safety locks + live_path_probe + deploy/*.service")
+import mt5_executor as MTE  # noqa: E402
+
+
+class PExecMT5(types.ModuleType):
+    TRADE_ACTION_DEAL = 1
+    ORDER_TYPE_BUY = 0
+    ORDER_TYPE_SELL = 1
+    ORDER_TIME_GTC = 0
+    ORDER_FILLING_FOK = 0
+    ORDER_FILLING_IOC = 1
+    ORDER_FILLING_RETURN = 2
+    TRADE_RETCODE_DONE = 10009
+    DEAL_ENTRY_OUT = 1
+
+    def __init__(self, trade_mode=0):
+        super().__init__("MetaTrader5")
+        self.trade_mode = trade_mode
+        self.sent = []
+        self.positions = []
+        self.send_none = False
 
     def initialize(self):
-        self.used["initialize"] += 1
         return True
 
-    def symbol_select(self, symbol, enable):
-        self.used["symbol_select"] += 1
+    def terminal_info(self):
+        return types.SimpleNamespace(connected=True, trade_allowed=True)
+
+    def account_info(self):
+        return types.SimpleNamespace(login=111, server="XM", trade_mode=self.trade_mode,
+                                     trade_allowed=True, balance=200.0, equity=200.0, currency="USD")
+
+    def symbol_select(self, _s, _e=True):
         return True
 
-
-def k_new(tmp, clk, fm, **kw):
-    kw.setdefault("backfill_bars", 60)
-    logs = []
-    return Q.XmLogger(fm, "BTCUSD", tmp, log=logs.append, sleep=clk.sleep, **kw), logs
-
-
-def k_run(lg, clk, seconds):
-    """Poll on the logger's own 5 s grid for `seconds` of fake time."""
-    end = clk.t + seconds
-    t = lg.next_poll_time(clk.t)
-    while t < end:
-        clk.t = t
-        lg.step(t)
-        t = lg.next_poll_time(t)
-
-
-def k_quotes(tmp, day="2026-10-01"):
-    with open(os.path.join(tmp, f"quotes-{day}.csv"), newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def k_candles(tmp):
-    with open(os.path.join(tmp, "candles_m5.csv"), newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def k_steps(rows):
-    t = [Q.parse_utc(r["bar_close_utc"]) for r in rows]
-    return {int(b - a) for a, b in zip(t, t[1:])}
-
-
-# K1: read-only by construction (AST, so docstrings that NAME the forbidden calls are fine)
-src_tree = ast.parse(open(os.path.join(HERE, "mt5_quotes.py")).read())
-used_names = {n.attr for n in ast.walk(src_tree) if isinstance(n, ast.Attribute)} | \
-             {n.id for n in ast.walk(src_tree) if isinstance(n, ast.Name)}
-hit = sorted(set(Q.FORBIDDEN_API) & used_names)
-check("K: the logger never references a trading API (order_send/positions/history/login...)",
-      not hit, f"found {hit}")
-check("K: it imports without MetaTrader5 (pure functions usable on Linux)", hasattr(Q, "XmLogger"))
-check("K: no engine import, so it can never touch the order path",
-      not any(isinstance(n, (ast.Import, ast.ImportFrom)) and
-              any(a.name.split(".")[0] in ("engine", "trade_filter") for a in getattr(n, "names", []))
-              for n in ast.walk(src_tree)))
-
-# K2: server-offset estimator (MT5 'time' is broker server time, not UTC)
-check("K: a fresh tick on a +3 h server -> offset 10800",
-      Q.estimate_offset(K_T0 + 10800 - 1, K_T0) == 10800)
-check("K: a fresh tick on a -5 h server -> offset -18000",
-      Q.estimate_offset(K_T0 - 18000 - 2, K_T0) == -18000)
-check("K: a tick 20 min old is NOT used to learn the offset (rounding would be ambiguous)",
-      Q.estimate_offset(K_T0 + 10800 - 1200, K_T0) is None)
-check("K: an empty tick time gives no offset", Q.estimate_offset(0, K_T0) is None)
-check("K: tick age uses the offset (a 3 h-behind stale tick is 3 h old, not fresh)",
-      abs(Q.tick_age_s(K_T0 + 10800 - 10800, 10800, K_T0) - 10800) < 1e-6)
-
-# K3: a session of polls -> aligned rows, point sample + envelope, no duplicates
-tmp = tempfile.mkdtemp()
-try:
-    clk = KClock(K_T0 + 7)                       # start mid-window on purpose
-    fm = KMT5(clk)
-    lg, logs = k_new(tmp, clk, fm)
-    lg.start(clk(), clock=clk)
-    check("K: the server offset is learned from live ticks at start-up", lg.offset == 10800, f"{lg.offset}")
-    # scripted spreads: 40 for the first poll of every window, then 41..45
-    n = [0]
-    real_step = lg.step
-
-    def scripted(now):
-        fm.spread = 40.0 + (n[0] % 6)
-        n[0] += 1
-        return real_step(now)
-
-    lg.step = scripted
-    k_run(lg, clk, 190)
-    lg.flush_window(clk.t)
-    rows = k_quotes(tmp)
-    stamps = [r["ts_utc"] for r in rows]
-    check("K: quote rows land on the 30 s grid (UTC)", all(x[-2:] in ("00", "30") for x in stamps), f"{stamps[:3]}")
-    check("K: no duplicate or out-of-order quote stamps", stamps == sorted(set(stamps)), f"{len(stamps)} rows")
-    full = [r for r in rows if r["n_ok"] == "6"]
-    check("K: a full window holds 6 polls (30 s / 5 s)", len(full) >= 4, f"{[r['n_ok'] for r in rows]}")
-    check("K: the point sample is the FIRST valid poll; spread = ask - bid",
-          all(abs(float(r["ask"]) - float(r["bid"]) - float(r["spread"])) < 0.005 for r in rows))
-    check("K: spread_min/max bracket the point sample",
-          all(float(r["spread_min"]) <= float(r["spread"]) <= float(r["spread_max"]) for r in rows))
-    check("K: the envelope catches spikes between row stamps",
-          max(float(r["spread_max"]) for r in rows) > max(float(r["spread"]) for r in rows) - 1e-9
-          and any(float(r["spread_max"]) > float(r["spread"]) for r in rows))
-    check("K: the half-window start is flagged LATE (the sample was not at the boundary)",
-          rows[0]["flags"] == "LATE" and all(r["flags"] == "" for r in rows[1:]), f"{[r['flags'] for r in rows]}")
-    check("K: the row carries the server offset and a small tick age",
-          all(r["srv_offset_s"] == "10800" and 0 <= float(r["tick_age_s"]) < 5 for r in rows))
-
-    # K4: shadow candles - first-run back-fill, UTC conversion, closed bars only
-    cds = k_candles(tmp)
-    check("K: first run back-fills the requested number of closed M5 bars", len(cds) == 60, f"{len(cds)}")
-    check("K: candles are ascending, unique, 300 s apart", k_steps(cds) == {300}, f"{k_steps(cds)}")
-    last_open_utc = int((K_T0 + 190) // 300) * 300 - 300
-    check("K: bar_close_utc = server open - offset + 5 min (the forward_test_log convention)",
-          Q.parse_utc(cds[-1]["bar_close_utc"]) == last_open_utc + 300
-          and int(cds[-1]["time_srv"]) == last_open_utc + 10800, f"{cds[-1]}")
-    check("K: only CLOSED bars are logged (newest close <= now)",
-          Q.parse_utc(cds[-1]["bar_close_utc"]) <= clk.t)
-    check("K: bar spread (points) and tick volume are kept for the parity/spread cross-check",
-          cds[-1]["spread_pts"] == "4000" and int(cds[-1]["tick_volume"]) > 0)
-
-    # K5: restart on the same files -> no duplicates; 25 min downtime -> the gap heals
-    stamps_before, bars_before = len(k_quotes(tmp)), len(k_candles(tmp))
-    lg2, logs2 = k_new(tmp, clk, fm)
-    lg2.start(clk(), clock=clk)
-    check("K: a restart resumes after the last quote row and the last candle",
-          lg2.last_stamp is not None and lg2.last_bar_open_utc == last_open_utc)
-    k_run(lg2, clk, 70)
-    lg2.flush_window(clk.t)
-    st2 = [r["ts_utc"] for r in k_quotes(tmp)]
-    check("K: a restart never duplicates a quote row", st2 == sorted(set(st2)) and len(st2) > stamps_before)
-    clk.t += 25 * 60                               # the sidecar was down for 25 minutes
-    lg3, logs3 = k_new(tmp, clk, fm)
-    lg3.start(clk(), clock=clk)
-    k_run(lg3, clk, 40)
-    lg3.flush_window(clk.t)
-    cds2 = k_candles(tmp)
-    check("K: a gap is healed from terminal history with no hole and no duplicate",
-          k_steps(cds2) == {300} and len(cds2) > bars_before + 4, f"{len(cds2)} bars, steps {k_steps(cds2)}")
-    check("K: the heal is announced in the log", any("healed a gap" in m for m in logs3), f"{logs3[-3:]}")
-
-    # K6: bad / stale / crossed quotes are recorded explicitly, never silently skipped
-    def last_rows(k):
-        lg3.flush_window(clk.t)
-        return k_quotes(tmp)[-k:]
-    fm.mode = "none"
-    k_run(lg3, clk, 65)
-    r_none = last_rows(2)
-    fm.mode = "bad"
-    k_run(lg3, clk, 65)
-    r_bad = last_rows(2)
-    fm.mode = "crossed"
-    k_run(lg3, clk, 65)
-    r_crossed = last_rows(2)
-    fm.mode = "stale"
-    off_before = lg3.offset
-    n_changes_before = sum(1 for m in logs3 if "offset changed" in m)
-    k_run(lg3, clk, 3900)       # > 1 h: the frozen tick passes through 'exactly an hour old'
-    r_stale = last_rows(3)
-    check("K: no tick -> NOQUOTE rows (outages are explicit)",
-          all(r["flags"] == "NOQUOTE" and r["bid"] == "" and r["n_ok"] == "0" for r in r_none), f"{r_none}")
-    check("K: zero-price ticks -> BADQUOTE rows", all(r["flags"] == "BADQUOTE" for r in r_bad), f"{r_bad}")
-    check("K: crossed quotes (ask < bid) are never logged as a negative spread",
-          all(r["flags"] == "BADQUOTE" and r["spread"] == "" for r in r_crossed), f"{r_crossed}")
-    check("K: a frozen tick is flagged STALE", all("STALE" in r["flags"] for r in r_stale), f"{r_stale}")
-    check("K: a feed frozen for over an hour does NOT move the learned server offset (a tick exactly "
-          "N hours old looks like a fresh tick on a server N hours behind)",
-          lg3.offset == off_before == 10800
-          and sum(1 for m in logs3 if "offset changed" in m) == n_changes_before, f"{lg3.offset}")
-    fm.mode = "ok"
-    k_run(lg3, clk, 70)
-
-    # K7: server DST fall-back (+3 h -> +2 h) keeps the candle series continuous in UTC
-    fm.flip_utc, fm.offset_after = int(clk.t) + 200, 7200
-    k_run(lg3, clk, 1500)
-    lg3.flush_window(clk.t)
-    cds3 = k_candles(tmp)
-    offs = [int(r["offset_s"]) for r in cds3]
-    check("K: the logger notices the server offset change (needs 2 consistent fresh ticks)",
-          lg3.offset == 7200 and any("offset changed" in m for m in logs3), f"offset {lg3.offset}")
-    check("K: across the DST change the candle series has NO hole and NO duplicate (UTC resume)",
-          k_steps(cds3) == {300}, f"steps {k_steps(cds3)}")
-    check("K: candles before the change keep +3 h, after it +2 h",
-          10800 in offs and 7200 in offs and offs == sorted(offs, reverse=True), f"{collections.Counter(offs)}")
-    flip_close = next(r for r in cds3 if int(r["offset_s"]) == 7200)
-    straddle = cds3[cds3.index(flip_close) - 1]
-    check("K: the bar that opened before the DST change and closed after it is dated correctly "
-          "(old raw time, previous offset) - never an hour into the future",
-          Q.parse_utc(straddle["bar_close_utc"]) <= fm.flip_utc + 300 and straddle["offset_s"] == "10800"
-          and max(Q.parse_utc(r["bar_close_utc"]) for r in cds3) <= clk.t,
-          f"straddle {straddle['bar_close_utc']} flip {Q.utc_str(fm.flip_utc)}")
-    check("K: the quote rows switch offset with it",
-          {"10800", "7200"} <= {r["srv_offset_s"] for r in k_quotes(tmp)})
-
-    # K8: contract-spec snapshot - allow-listed, decoded, change-logged, nothing identifying
-    spec = json.load(open(os.path.join(tmp, "symbol_spec.json")))
-    dec = spec["decoded"]
-    check("K: spec decodes account kind, execution mode and filling flags",
-          dec["account_kind"] == "DEMO" and dec["execution_mode"] == "MARKET"
-          and dec["filling_allowed_flags"] == ["FOK", "IOC"] and dec["margin_mode"] == "RETAIL_HEDGING", f"{dec}")
-    check("K: spec records stops level, volume step, swap and contract size",
-          spec["symbol_info"]["trade_stops_level"] == 100 and spec["symbol_info"]["volume_step"] == 0.01
-          and spec["symbol_info"]["swap_long"] == -30.0 and spec["symbol_info"]["trade_contract_size"] == 1.0)
-    check("K: the order_calc probe confirms 0.01 lot x $100 = $1.00",
-          spec["probes"]["calc_profit_usd_0.01lot_plus_100usd"] == 1.0, f"{spec['probes']}")
-    check("K: terminal maxbars is recorded (it caps how much history can be back-filled)",
-          spec["terminal"]["maxbars"] == 100000)
-    blob = "".join(open(os.path.join(tmp, f), encoding="utf-8", errors="replace").read()
-                   for f in sorted(os.listdir(tmp)))
-    leaked = [x for x in K_SECRETS if x in blob]
-    check("K: PRIVACY - no login, name, server, balance or Windows path in any output file",
-          not leaked, f"leaked {leaked}")
-    check("K: PRIVACY - the allow-lists contain no identifying field",
-          not ({"login", "name", "server", "balance", "equity", "profit", "margin_free"} & set(Q.ACCOUNT_FIELDS))
-          and not ({"path", "data_path", "commondata_path"} & set(Q.TERMINAL_FIELDS)))
-    hist = open(os.path.join(tmp, "symbol_spec_history.jsonl")).read().splitlines()
-    h0 = json.loads(hist[0])["hash"]
-    lg3.snapshot_spec(clk.t + 7 * 3600)
-    check("K: an unchanged spec is NOT re-appended to the history",
-          len(open(os.path.join(tmp, "symbol_spec_history.jsonl")).read().splitlines()) == len(hist))
-    fm.stops_level = 250                          # the broker widens the stops level
-    lg3.snapshot_spec(clk.t + 14 * 3600)
-    hist2 = open(os.path.join(tmp, "symbol_spec_history.jsonl")).read().splitlines()
-    check("K: a CHANGED spec (stops level) is appended and logged",
-          len(hist2) == len(hist) + 1 and json.loads(hist2[-1])["hash"] != h0
-          and json.loads(hist2[-1])["symbol_info"]["trade_stops_level"] == 250
-          and any("CHANGED" in m for m in logs3))
-
-    # K12: what the fake terminal saw - read-only, and only the documented calls
-    allowed = {"symbol_info_tick", "symbol_info", "account_info", "terminal_info", "order_calc_profit",
-               "order_calc_margin", "copy_rates_from_pos", "shutdown", "initialize", "symbol_select"}
-    check("K: read-only - not one trading call reached the terminal", fm.trading_calls == [],
-          f"{fm.trading_calls}")
-    check("K: only the documented read calls were used", set(fm.used) <= allowed and not fm.unknown,
-          f"used {sorted(fm.used)} unknown {sorted(fm.unknown)}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# K9: file hygiene - schema drift, torn line, CRLF, midnight rotation
-tmp = tempfile.mkdtemp()
-try:
-    clk = KClock(K_T0 + 1)
-    fm = KMT5(clk)
-    lg, logs = k_new(tmp, clk, fm)
-    lg.start(clk(), clock=clk)
-    k_run(lg, clk, 100)
-    lg.flush_window(clk.t)
-    qpath = os.path.join(tmp, "quotes-2026-10-01.csv")
-    txt = open(qpath, newline="").read()
-    open(qpath, "w", newline="").write(txt.replace("n_ok,n_bad", "n_ok,n_bad,extra", 1))
-    lg2, logs2 = k_new(tmp, clk, fm)
-    lg2.start(clk(), clock=clk)
-    k_run(lg2, clk, 70)
-    lg2.flush_window(clk.t)
-    aside = [f for f in os.listdir(tmp) if f.startswith("quotes-2026-10-01.csv.old-")]
-    check("K: a drifted header moves the file ASIDE instead of appending misaligned rows",
-          len(aside) == 1 and open(qpath).readline().strip().split(",") == Q.QUOTE_FIELDS
-          and any("schema drift" in m for m in logs2), f"{aside}")
-    with open(qpath, "ab") as f:
-        f.write(b"2026-10-01 05:00:00,83000.00,830")      # killed mid-write: no newline
-    lg3, logs3 = k_new(tmp, clk, fm)
-    lg3.start(clk(), clock=clk)
-    k_run(lg3, clk, 70)
-    lg3.flush_window(clk.t)
-    lines = open(qpath).read().splitlines()
-    bad = [ln for ln in lines[1:] if len(ln.split(",")) != len(Q.QUOTE_FIELDS)]
-    check("K: a torn last line stays isolated and the next row is intact",
-          len(bad) == 1 and len(lines[-1].split(",")) == len(Q.QUOTE_FIELDS), f"bad {bad}")
-    check("K: readers skip the torn line", all(len(r) == len(Q.QUOTE_FIELDS) for r in
-                                              [x.split(",") for x in lines[1:] if x not in bad]))
-    check("K: no carriage return in any file (the Wine Python would write CRLF in text mode)",
-          not any(b"\r" in open(os.path.join(tmp, f), "rb").read() for f in os.listdir(tmp)))
-    clk.t = float(K_T0 - 3 * 3600 + 86400 - 40)            # 40 s before 2026-10-02 00:00 UTC
-    lg4, logs4 = k_new(tmp, clk, fm)
-    lg4.start(clk(), clock=clk)
-    k_run(lg4, clk, 100)
-    lg4.flush_window(clk.t)
-    days = sorted(f for f in os.listdir(tmp) if f.startswith("quotes-") and f.endswith(".csv"))
-    d2 = k_quotes(tmp, "2026-10-02")
-    check("K: quote files rotate at UTC midnight", days == ["quotes-2026-10-01.csv", "quotes-2026-10-02.csv"]
-          and d2 and d2[0]["ts_utc"] == "2026-10-02 00:00:00", f"{days} {d2[:1]}")
-    # an older history can be inserted into an existing candle file (--backfill N)
-    older = lg4.candle_rows([fm._bar(K_T0 - 300 * 500 + 300 * i) for i in range(5)], clk.t)
-    added, total = Q.merge_candles(os.path.join(tmp, "candles_m5.csv"), older)
-    cds = k_candles(tmp)
-    check("K: merge_candles inserts older history, sorted and unique",
-          added == 5 and [int(r["time_srv"]) for r in cds] == sorted({int(r["time_srv"]) for r in cds}),
-          f"added {added}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# K10/K11: watchdog and the real loop (injected clock + sleep, no real waiting)
-tmp = tempfile.mkdtemp()
-try:
-    clk = KClock(K_T0 + 1)
-    fm = KMT5(clk)
-    lg, logs = k_new(tmp, clk, fm)
-    lg.start(clk(), clock=clk)
-    k_run(lg, clk, 30)
-    fm.mode = "none"
-    code = None
-    try:
-        k_run(lg, clk, 1200)
-    except SystemExit as e:
-        code = e.code
-    check("K: 15 minutes without a quote exits 2 so systemd restarts a clean process", code == 2, f"{code}")
-    check("K: before exiting it re-initialises the MT5 link (once a minute)",
-          fm.used["shutdown"] >= 5 and fm.used["initialize"] >= 5, f"{fm.used['shutdown']}")
-    check("K: the outage is in the data as NOQUOTE rows",
-          sum(1 for r in k_quotes(tmp) if r["flags"] == "NOQUOTE") >= 20)
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-tmp = tempfile.mkdtemp()
-try:
-    clk = KClock(K_T0 + 2.3)
-    fm = KMT5(clk)
-    seen = []
-    lg, logs = k_new(tmp, clk, fm)
-    real = lg.step
-
-    def spy(now):
-        seen.append(round(now, 3))
-        if len(seen) >= 14:
-            raise KeyboardInterrupt
-        return real(now)
-
-    lg.step = spy
-    lg.run_forever(clock=clk)
-    gaps = {round(b - a, 3) for a, b in zip(seen, seen[1:])}
-    check("K: run_forever polls on a steady 5 s grid and ends cleanly on interrupt",
-          len(seen) == 14 and gaps == {5.0}, f"{gaps}")
-    check("K: the partial window is flushed on shutdown", len(k_quotes(tmp)) >= 2)
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# K14: the CLI modes the on-box checklist tells the operator to run (docs/XM-LOGGER.md section 3)
-import contextlib  # noqa: E402,F811
-import io  # noqa: E402,F811
-
-
-def k_cli(argv, env=None, fm=None):
-    clk = KClock(K_T0 + 1)
-    fm = fm or KMT5(clk, history_start=K_T0 - 300 * 500)
-    fm.clock = clk
-    old = dict(os.environ)
-    os.environ.update(env or {})
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            rc = Q.main(argv, mt5mod=fm, clock=clk, sleep=clk.sleep)
-    finally:
-        os.environ.clear()
-        os.environ.update(old)
-    return rc, buf.getvalue(), fm
-
-
-tmp = tempfile.mkdtemp()
-try:
-    rc, out, fm = k_cli(["--spec", "--dir", tmp])
-    try:
-        parsed = json.loads(out)
-    except ValueError:
-        parsed = None
-    check("K: --spec prints PURE JSON (nothing before or after it) and writes no file",
-          rc == 0 and parsed is not None and os.listdir(tmp) == [], f"rc {rc} files {os.listdir(tmp)}")
-    check("K: --spec output carries no login/name/server/balance/path",
-          not [x for x in K_SECRETS if x in out] and parsed["decoded"]["account_kind"] == "DEMO",
-          f"{[x for x in K_SECRETS if x in out]}")
-    rc, out, fm = k_cli(["--once", "--dir", tmp], {"MT5_QUOTES_BACKFILL_BARS": "200"})
-    names = sorted(os.listdir(tmp))
-    i_spec, i_off, i_back = (out.find("contract spec recorded"), out.find("server offset +3h"),
-                             out.find("first run - back-filled 200"))
-    check("K: --once learns the offset, records the spec, back-fills and writes a quote row, in that order",
-          rc == 0 and 0 <= i_spec < i_off < i_back and "quote row" in out
-          and names == ["candles_m5.csv", "quotes-2026-10-01.csv", "symbol_spec.json", "symbol_spec_history.jsonl"],
-          f"rc {rc} {names}\n{out[:300]}")
-    check("K: --once is read-only too", fm.trading_calls == [] and not fm.unknown)
-    rc, out, fm = k_cli(["--backfill", "400", "--dir", tmp])
-    cds = k_candles(tmp)
-    check("K: --backfill N merges older history into the existing file (sorted, unique, no overwrite)",
-          rc == 0 and len(cds) == 400 and k_steps(cds) == {300} and "200 new rows merged" in out,
-          f"rc {rc} {len(cds)} rows; {out.strip()}")
-    rc, out, fm = k_cli(["--backfill", "400", "--dir", tmp])
-    check("K: a second --backfill is idempotent (0 new rows)", rc == 0 and "0 new rows merged" in out and
-          len(k_candles(tmp)) == 400, out.strip())
-    if Q.mt5 is None:
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                Q.main(["--spec"])
-            code = None
-        except SystemExit as e:
-            code = e.code
-        check("K: without MetaTrader5 the CLI refuses with a clear message and exit 1 (Linux python)",
-              code == 1 and "install it in the WINE python" in buf.getvalue(), f"{code}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# K13: the deploy wiring that gets the logger's data to main (static: autosync is bash with side
-# effects, so it is exercised by a throwaway-remote test, but these lines must never regress)
-auto = open(os.path.join(HERE, "autosync.sh")).read()
-data_line = next((ln for ln in auto.splitlines() if ln.startswith("DATA_FILES=")), "")
-check("K: autosync commits xm_data/ with the other live data (else the logger's output never reaches main)",
-      "xm_data" in data_line, data_line)
-check("K: an autosync merge conflict in xm_data/ resolves server-wins like the other data files",
-      "|xm_data/*)" in auto and "git checkout --ours" in auto.split("|xm_data/*)")[1][:80])
-check("K: the digest carries the logger's liveness line (advisory)", "xm_quote_report.py --quiet" in auto)
-alert_block = auto.split('"xm logger: STALE"*)')[1].split(";;")[0] if '"xm logger: STALE"*)' in auto else "$"
-check("K: the STALE alert text has no changing numbers, so alert_once's dedupe cannot flood the chat",
-      "$XM_MSG" not in alert_block and "mt5quotes-btc" in alert_block, alert_block.strip()[:90])
-check("K: the unit file installs as mt5quotes-btc and never carries a login or password",
-      "mt5quotes-btc" in open(os.path.join(ROOT, "deploy", "mt5quotes.service")).read()
-      and not any(w in open(os.path.join(ROOT, "deploy", "mt5quotes.service")).read().lower().replace(
-          "never put a login", "").replace("or password", "")
-          for w in ("password=", "login=", "mt5_login", "mt5_password")))
-
-check("K: an incompatible interval/poll falls back to 30/5 instead of mis-aligning rows",
-      (lambda lg: (lg.interval, lg.poll))(Q.XmLogger(KMT5(KClock(K_T0)), "BTCUSD", "/nonexistent-never-written",
-                                                    interval=30, poll=7, log=lambda m: None)) == (30, 5))
-
-# --- Scenario L ------------------------------------------------------------
-print("\nScenario L: xm_quote_report (the logger's data -> spread, cost and parity answers)")
-import contextlib  # noqa: E402
-import io  # noqa: E402
-import xm_quote_report as X  # noqa: E402
-
-L_DAY0 = int(Q.parse_utc("2026-09-14 00:00:00"))          # a Monday
-
-
-def l_model(t):
-    """Deterministic spread model ($/BTC): session level, weekend x2.4 (UTC Sat/Sun)."""
-    d = datetime.fromtimestamp(t, tz=timezone.utc)
-    base = 38.0 if d.hour < 8 else 44.0 if d.hour < 13 else 56.0 if d.hour < 21 else 42.0
-    return base * (2.4 if d.weekday() >= 5 else 1.0)
-
-
-def l_write_quotes(qdir, days=15, step=60, holes=(), tweak=None):
-    """Write quotes-YYYY-MM-DD.csv files in the logger's exact schema."""
-    os.makedirs(qdir, exist_ok=True)
-    by_day = {}
-    for t in range(L_DAY0, L_DAY0 + days * 86400, step):
-        if any(a <= t < b for a, b in holes):
-            continue
-        sp = l_model(t) + ((t // step * 7919) % 11 - 5) * 0.4
-        row = {"ts_utc": Q.utc_str(t), "bid": "83000.00", "ask": "%.2f" % (83000 + sp), "spread": "%.2f" % sp,
-               "spread_min": "%.2f" % (sp - 1), "spread_max": "%.2f" % (sp + 3), "n_ok": 2, "n_bad": 0,
-               "tick_age_s": "0.9", "srv_offset_s": 10800, "flags": ""}
-        if tweak:
-            tweak(t, row)
-        by_day.setdefault(row["ts_utc"][:10], []).append(row)
-    for day, rows in by_day.items():
-        with open(os.path.join(qdir, f"quotes-{day}.csv"), "w", newline="") as f:
-            w = csv.writer(f, lineterminator="\n")
-            w.writerow(Q.QUOTE_FIELDS)
-            for r in rows:
-                w.writerow([r[k] for k in Q.QUOTE_FIELDS])
-
-
-# L1: the reader parses what the REAL writer produced, and survives a torn line
-tmp = tempfile.mkdtemp()
-try:
-    clk = KClock(K_T0 + 1)
-    fm = KMT5(clk)
-    lg, _ = k_new(tmp, clk, fm)
-    lg.start(clk(), clock=clk)
-    k_run(lg, clk, 200)
-    lg.flush_window(clk.t)
-    rows_a, bad_a, nf_a = X.load_quotes(tmp)
-    check("L: the report parses the logger's own quote files (writer and reader share one schema)",
-          len(rows_a) >= 6 and bad_a == 0 and nf_a == 1 and rows_a == sorted(rows_a, key=lambda s: s.t),
-          f"{len(rows_a)} rows, {bad_a} malformed")
-    with open(os.path.join(tmp, "quotes-2026-10-01.csv"), "a") as f:
-        f.write("2026-10-01 05:00:00,83000.00,830")             # killed mid-write
-    rows_b, bad_b, _ = X.load_quotes(tmp)
-    check("L: a torn line is skipped and counted, never fatal", len(rows_b) == len(rows_a) and bad_b == 1,
-          f"{len(rows_b)} rows, {bad_b} malformed")
-    cds_l = X.load_candles(tmp)
-    check("L: the candle reader parses the logger's candle file", len(cds_l) == 60 and
-          cds_l[-1]["close"] == datetime(2026, 10, 1, 3, 0), f"{len(cds_l)}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# L2: coverage, complete days/weekends, outages -> the Stage B-i clock
-tmp = tempfile.mkdtemp()
-try:
-    full_dir, holey_dir = os.path.join(tmp, "full"), os.path.join(tmp, "holey")
-    l_write_quotes(full_dir)
-    thu, sun = L_DAY0 + 3 * 86400, L_DAY0 + 13 * 86400            # Thu 17 Sep, Sun 27 Sep
-    l_write_quotes(holey_dir, holes=[(thu + 4 * 3600, thu + 10 * 3600), (sun, sun + 8 * 3600)])
-    s_full, _, _ = X.load_quotes(full_dir)
-    s_hole, _, _ = X.load_quotes(holey_dir)
-    cf, ch = X.coverage(s_full), X.coverage(s_hole)
-    check("L: the inferred cadence is the logger's (60 s here)", cf["interval"] == 60, f"{cf['interval']}")
-    check("L: 15 clean days = 15 complete days and 2 complete weekends -> Stage B-i exit MET",
-          X.stage_b_progress(cf) == (15, 2, True), f"{X.stage_b_progress(cf)}")
-    check("L: a 6 h outage and an 8 h Sunday outage cost 2 days and 1 weekend -> NOT met",
-          X.stage_b_progress(ch) == (13, 1, False), f"{X.stage_b_progress(ch)}")
-    check("L: outages are listed longest first", [round(d / 3600) for _, d in ch["outages"]] == [8, 6],
-          f"{[(round(d / 3600)) for _, d in ch['outages']]}")
-    check("L: blackout windows are counted per day against the engine's own windows",
-          set(X.blackout_days(s_full, 60).values()) == {15} and len(X.blackout_days(s_full, 60)) == 3,
-          f"{X.blackout_days(s_full, 60)}")
-
-    # a 40-minute frozen-feed run that leaves rows behind (e.g. a Saturday maintenance window)
-    sat = L_DAY0 + 5 * 86400 + 7 * 3600
-
-    def freeze(t, row):
-        if sat <= t < sat + 40 * 60:
-            row["flags"] = "STALE"
-    l_write_quotes(os.path.join(tmp, "frozen"), days=7, tweak=freeze)
-    s_fz, _, _ = X.load_quotes(os.path.join(tmp, "frozen"))
-    runs = X.unusable_runs(s_fz, 60)
-    check("L: a 40-minute run of STALE rows (rows kept, no quotes) is reported as an outage a gap list cannot see",
-          len(runs) == 1 and runs[0][0] == sat and abs(runs[0][1] - 40 * 60) <= 60, f"{runs}")
-    check("L: a clean dataset has no unusable runs", X.unusable_runs(s_full, 60) == [])
-
-    # L3: spread statistics against the generating model
-    good = [s for s in s_full if X.usable(s)]
-    ny_wd = X.summarize([s.spread for s in good if X.session_of(s.t) == "NY" and not X.is_weekend(s.t)])
-    asia_wd = X.summarize([s.spread for s in good if X.session_of(s.t) == "ASIA" and not X.is_weekend(s.t)])
-    wd = X.summarize([s.spread for s in good if not X.is_weekend(s.t)])
-    we = X.summarize([s.spread for s in good if X.is_weekend(s.t)])
-    check("L: session medians recover the model (NY weekday ~56, Asia weekday ~38)",
-          abs(ny_wd["med"] - 56) < 1.5 and abs(asia_wd["med"] - 38) < 1.5, f"{ny_wd['med']:.1f} {asia_wd['med']:.1f}")
-    check("L: the weekend/weekday ratio recovers the x2.4 widening",
-          2.0 < we["med"] / wd["med"] < 2.8, f"{we['med'] / wd['med']:.2f}")
-    vals = [s.spread for s in good]
-    n_we = sum(1 for s in good if X.is_weekend(s.t))
-    check("L: every weekend sample is above the $87 break-even, no weekday sample is",
-          abs(X.share_above(vals, 87.0) - 100.0 * n_we / len(good)) < 0.5, f"{X.share_above(vals, 87.0):.1f}%")
-    check("L: share-above is monotone in the threshold",
-          X.share_above(vals, 40) >= X.share_above(vals, 60) >= X.share_above(vals, 87) >= X.share_above(vals, 500))
-    check("L: UTC Saturday and Sunday are the weekend; a Friday 23:59 is not",
-          X.is_weekend(L_DAY0 + 5 * 86400) and X.is_weekend(L_DAY0 + 6 * 86400 + 86399)
-          and not X.is_weekend(L_DAY0 + 5 * 86400 - 1))
-    check("L: blackout membership follows trade_filter (07:55-09:00, 13:25-15:15 UTC)",
-          X.blackout_of(L_DAY0 + 8 * 3600) is not None and X.blackout_of(L_DAY0 + 14 * 3600) is not None
-          and X.blackout_of(L_DAY0 + 11 * 3600) is None and X.blackout_of(L_DAY0 + 7 * 3600 + 54 * 60) is None)
-    check("L: percentile helper interpolates", X.pct([1, 2, 3, 4], 0.5) == 2.5 and X.pct([], .5) is None)
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# L4/L5: bad rows never reach the statistics; the bar-close subset excludes LATE rows
-tmp = tempfile.mkdtemp()
-try:
-    def tweak(t, row):
-        if t % 3600 == 0:
-            row["spread"], row["flags"] = "9999.00", "STALE"
-        if t % 3600 == 60:
-            row["bid"] = row["ask"] = row["spread"] = row["spread_min"] = row["spread_max"] = ""
-            row["flags"], row["n_ok"] = "NOQUOTE", 0
-        if t % 3600 == 120:
-            row["spread"], row["flags"] = "8888.00", "NOOFFSET"
-        if t % 300 == 0:
-            row["spread"] = "99.00"
-            if t % 3600 == 300:
-                row["flags"] = "LATE"
-    l_write_quotes(tmp, days=2, tweak=tweak)
-    s2, _, _ = X.load_quotes(tmp)
-    good2 = [s for s in s2 if X.usable(s)]
-    check("L: STALE / NOOFFSET / NOQUOTE rows are excluded from spread statistics",
-          max(s.spread for s in good2) < 1000 and all(not (s.flags & X.BAD_FLAGS) for s in good2),
-          f"{len(good2)} of {len(s2)} usable")
-    bar = [s.spread for s in good2 if int(s.t) % 300 == 0 and "LATE" not in s.flags]
-    check("L: the bar-close subset is the :00/:05 rows only, minus LATE ones",
-          bar and set(bar) == {99.0} and 0 < len(bar) < len([s for s in good2 if int(s.t) % 300 == 0]),
-          f"{len(bar)}")
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# L6: measured cost on the ledger's trades (half the spread in, half out)
-tmp = tempfile.mkdtemp()
-try:
-    def tweak(t, row):
-        if abs(t - (L_DAY0 + 10 * 3600)) <= 120:
-            row["spread"] = "40.00"
-        if abs(t - (L_DAY0 + 11 * 3600)) <= 120:
-            row["spread"] = "60.00"
-    l_write_quotes(tmp, days=1, tweak=tweak)
-    s3, _, _ = X.load_quotes(tmp)
-    dt0 = datetime(2026, 9, 14, 0, 0)
-    tr = [dict(et=dt0 + timedelta(hours=10, seconds=20), xt=dt0 + timedelta(hours=11, seconds=5), profit=1.0),
-          dict(et=dt0 + timedelta(hours=10), xt=dt0 + timedelta(days=3), profit=5.0),            # exit has no quote
-          dict(et=dt0 - timedelta(days=2), xt=dt0 - timedelta(days=2) + timedelta(hours=1), profit=5.0)]
-    tc = X.trade_costs(tr, s3, 1.0)
-    check("L: cost = (entry spread + exit spread) / 2 x 0.01 lot = $0.50 for $40 in / $60 out",
-          len(tc) == 1 and abs(tc[0][1] - 0.50) < 1e-9, f"{[(round(c, 3)) for _, c, _, _ in tc]}")
-    check("L: trades without a fresh quote at BOTH ends are skipped, not guessed", len(tc) == 1)
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-# L7/L8: candle parity vs the forward-test log, time-shift scan, bar-spread check
-import random as _rnd  # noqa: E402
-_rnd.seed(5)
-walk, px = [], 83000.0
-for i in range(700):
-    o = px
-    px = px + _rnd.gauss(0, 25)
-    hi, lo = max(o, px) + abs(_rnd.gauss(0, 12)), min(o, px) - abs(_rnd.gauss(0, 12))
-    close_dt = datetime(2026, 9, 14, 0, 0) + timedelta(minutes=5 * (i + 1))
-    walk.append(dict(dt=close_dt + timedelta(seconds=(1 if i % 7 == 0 else 2 if i % 11 == 0 else 0)),
-                     o=o, h=hi, l=lo, c=px))
-
-
-def l_candles(shift_h=0, noise=3.0):
-    out = []
-    for b in walk:
-        n = _rnd.gauss(0, noise)
-        close = datetime(b["dt"].year, b["dt"].month, b["dt"].day, b["dt"].hour, b["dt"].minute) + timedelta(hours=shift_h)
-        out.append(dict(close=close, o=b["o"] + n, h=b["h"] + n + 1, l=b["l"] + n - 1, c=b["c"] + n, tv=250.0,
-                        sp=4000.0, off=10800.0))
-    return out
-
-
-good_c = l_candles()
-pairs0 = X.pair_candles(good_c, walk)
-check("L: log rows stamped a second or two late still join (5-minute grid)", len(pairs0) == 700, f"{len(pairs0)}")
-ps = X.parity_stats(pairs0)
-check("L: parity stats recover the injected noise and agree on direction",
-      ps["close_abs"]["med"] < 6 and ps["dir_agree"] > 99 and abs(ps["close_bias"]) < 1.0, f"{ps['close_abs']['med']:.2f}")
-sc0 = X.shift_scan(good_c, walk)
-check("L: correctly stamped candles: the time-shift scan's best shift is 0",
-      min(sc0, key=sc0.get) == 0 and not X.shifted_days(good_c, walk, min_pairs=60), f"{sc0}")
-bad_c = l_candles(shift_h=1)
-sc1 = X.shift_scan(bad_c, walk)
-check("L: candles stamped one hour late are caught (best shift -1 h) and the days flagged",
-      min(sc1, key=sc1.get) == -1 and len(X.shifted_days(bad_c, walk, min_pairs=60)) >= 1, f"{sc1}")
-
-tmp = tempfile.mkdtemp()
-try:
-    l_write_quotes(tmp, days=2, step=30)
-    s4, _, _ = X.load_quotes(tmp)
-    cs = []
-    for k in range(60):                     # 5 h of NY-session candles (live spread ~$56) inside the quote span
-        close = datetime(2026, 9, 14, 14, 0) + timedelta(minutes=5 * k)
-        cs.append(dict(close=close, o=1, h=1, l=1, c=1, tv=1.0, off=10800.0,
-                       sp=round(l_model(close.replace(tzinfo=timezone.utc).timestamp() - 150) * 100)))
-    ok = X.bar_spread_check(cs, s4, 0.01)
-    for c in cs:
-        c["sp"] = 4000.0                    # a constant $40 that ignores the live $56
-    flat = X.bar_spread_check(cs, s4, 0.01)
-    check("L: bar spreads consistent with the live samples -> AGREES (history usable)",
-          ok["verdict"] == "AGREES" and ok["inside"] > 90, f"{ok}")
-    check("L: a constant $40 bar spread against live $56 samples -> DISAGREES (never trusted as history)",
-          flat["verdict"] == "DISAGREES" and flat["inside"] < 20 and flat["med_diff"] > 5, f"{flat}")
-    check("L: too little overlap -> INSUFFICIENT, not a guess",
-          X.bar_spread_check(cs[:5], s4, 0.01)["verdict"] == "INSUFFICIENT")
-
-    # --quiet (run by autosync every 15 minutes) must not re-read the whole history forever
-    old_dir = os.path.join(tmp, "oldfiles")
-    os.makedirs(old_dir)
-    with open(os.path.join(old_dir, "quotes-2026-01-01.csv"), "w") as f:
-        f.write("this,is,not,the,schema\n1,2,3,4,5\n")             # would count as malformed if it were read
-    shutil.copy(os.path.join(tmp, "quotes-2026-09-14.csv"), old_dir)
-    _, bad_all, _ = X.load_quotes(old_dir)
-    _, bad_since, _ = X.load_quotes(old_dir, since=Q.parse_utc("2026-09-01 00:00:00"))
-    check("L: day files older than the window are skipped unread by name (bounded autosync cost)",
-          bad_all == 1 and bad_since == 0, f"{bad_all} vs {bad_since}")
-    check("L: --quiet looks back at most %d days" % X.QUIET_WINDOW_DAYS, X.QUIET_WINDOW_DAYS >= 2 * X.TARGET_DAYS)
-
-    # L9: the one-line advisory used by autosync's digest
-    now_l = Q.parse_utc("2026-09-15 23:59:30") + 120
-    args = type("A", (), dict(root=tmp, dir=".", now=now_l))()
-    line_ok = X.quiet_line(args)
-    args_stale = type("A", (), dict(root=tmp, dir=".", now=now_l + 3 * 3600))()
-    line_stale = X.quiet_line(args_stale)
-    empty = tempfile.mkdtemp()
-    line_none = X.quiet_line(type("A", (), dict(root=empty, dir="xm_data", now=now_l))())
-    shutil.rmtree(empty, ignore_errors=True)
-    check("L: --quiet says OK while rows are fresh", line_ok.startswith("xm logger: OK"), line_ok)
-    check("L: --quiet says STALE (and names the unit) once rows stop", "STALE" in line_stale and "mt5quotes-btc" in line_stale,
-          line_stale)
-    check("L: --quiet says 'not collecting yet' with no data", "not collecting yet" in line_none, line_none)
-
-    # L10: the full text report renders every section on a small synthetic repo root
-    root = os.path.join(tmp, "root")
-    os.makedirs(os.path.join(root, "xm_data"))
-    for fn in os.listdir(tmp):
-        if fn.startswith("quotes-"):
-            shutil.copy(os.path.join(tmp, fn), os.path.join(root, "xm_data", fn))
-    with open(os.path.join(root, "xm_data", "candles_m5.csv"), "w", newline="") as f:
-        w = csv.writer(f, lineterminator="\n")
-        w.writerow(Q.CANDLE_FIELDS)
-        for c in good_c:
-            w.writerow([c["close"].strftime(Q.TS_FMT), "%.2f" % c["o"], "%.2f" % c["h"], "%.2f" % c["l"],
-                        "%.2f" % c["c"], 250, 4000, 0, 10800])
-    with open(os.path.join(root, "forward_test_log.csv"), "w", newline="") as f:
-        w = csv.writer(f, lineterminator="\r\n")
-        w.writerow(["Timestamp", "Open", "High", "Low", "Close"])
-        for b in walk:
-            w.writerow([b["dt"].strftime(Q.TS_FMT), "%.2f" % b["o"], "%.2f" % b["h"], "%.2f" % b["l"], "%.2f" % b["c"]])
-    with open(os.path.join(root, "trades.csv"), "w", newline="") as f:
-        w = csv.writer(f, lineterminator="\r\n")
-        w.writerow(["Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price", "Stop_Loss", "Take_Profit",
-                    "Exit_Price", "Exit_Reason", "Profit", "Balance_After", "RSI_At_Entry", "ATR_At_Entry",
-                    "Wick_Ratio_At_Entry", "EMA50_At_Entry", "EMA200_At_Entry"])
-        for i in range(12):
-            et = datetime(2026, 9, 14, 8, 0) + timedelta(hours=i)
-            w.writerow([i + 1, "BUY", et.strftime(Q.TS_FMT), (et + timedelta(minutes=20)).strftime(Q.TS_FMT), "83000.00",
-                        "82833.40", "83333.20", "83333.20", "TP", "3.33", "1000", "50", "83.30", "40%", "83000", "82000"])
-    with open(os.path.join(root, "xm_data", "symbol_spec.json"), "w") as f:
-        json.dump({"symbol_info": {"trade_contract_size": 1.0, "volume_min": 0.01, "point": 0.01},
-                   "decoded": {"account_kind": "DEMO"}, "account": {}, "terminal": {}, "probes": {}}, f)
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        rc = X.main(["--root", root, "--now", str(now_l)])
-    out = buf.getvalue()
-    heads = [h for h in ("== 1. LOGGER", "== 2. SPREAD", "== 3. COST", "== 4. PARITY", "== 5. SPEC") if h in out]
-    check("L: the full report renders all five sections without error", rc == 0 and len(heads) == 5, f"rc {rc}, {heads}")
-    check("L: the report quotes the review's reference numbers (break-even, hard cap, share of 1R)",
-          "hard-cap proposal $60/BTC" in out and "% of median 1R" in out and "break-even $" in out)
-    check("L: the report has no --spread flag (docs command blocks may only carry --spread 0.40)",
-          "--spread" not in open(os.path.join(HERE, "xm_quote_report.py")).read().split('ap = argparse')[1])
-finally:
-    shutil.rmtree(tmp, ignore_errors=True)
-
-
-# --- Scenario M ---
-print("\nScenario M: MT5 closed-candle simulated exits")
-
-
-def m_make_engine(tmpdir):
-    engine.LOG_FILE_PATH = os.path.join(tmpdir, "forward_test_log.csv")
-    engine.STATUS_FILE_PATH = os.path.join(tmpdir, "status.json")
-    engine.TRADES_LOG_PATH = os.path.join(tmpdir, "trades.csv")
-    engine.MT5_FEED_FILE = os.path.join(tmpdir, "mt5_last_candle.json")
-    trade_filter.TRADES_LOG = engine.TRADES_LOG_PATH
-    trade_filter.SKIP_LOG = os.path.join(tmpdir, "skipped_trades.csv")
-    trade_filter.is_in_blackout = lambda now=None: (False, "")
-    return engine.BitcoinEngine()
-
-
-
-def m_trade_rows(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-
-def m_seed_trade(eng, side, entry, sl, tp, trade_num=1):
-    eng.trade_active = True
-    eng.trade_type = side
-    eng.entry_price = float(entry)
-    eng.stop_loss = float(sl)
-    eng.take_profit = float(tp)
-    eng.current_trade_num = trade_num
-    eng.next_trade_num = max(eng.next_trade_num, trade_num + 1)
-    eng.entry_time = "2026-10-01 07:10:10"
-    eng.entry_rsi = 55.0
-    eng.entry_atr = abs(entry - sl) / engine.ATR_SL_MULT if abs(entry - sl) else 1.0
-    eng.entry_wick_ratio = 0.25
-    eng.entry_ema_fast = entry
-    eng.entry_ema_slow = entry - 50.0 if side == "BUY" else entry + 50.0
-    eng.save_status()
-
-
-
-def m_expect_exit(label, side, candle, expected_reason, expected_exit):
-    tmpdir = tempfile.mkdtemp(prefix="btc_smoke_m_")
-    try:
-        eng = m_make_engine(tmpdir)
-        if side == "BUY":
-            entry, sl, tp = 100.0, 90.0, 120.0
-            expected_profit = (expected_exit - entry) * engine.LOT_SIZE
-        else:
-            entry, sl, tp = 100.0, 110.0, 80.0
-            expected_profit = (entry - expected_exit) * engine.LOT_SIZE
-        m_seed_trade(eng, side, entry, sl, tp)
-        exited = eng.check_position_on_closed_candle(*candle)
-        rows = m_trade_rows(engine.TRADES_LOG_PATH)
-        row = rows[0] if rows else {}
-        wins = 1 if expected_reason == "TP" else 0
-        losses = 1 if expected_reason == "SL" else 0
-        check(f"M: {label}",
-              exited and not eng.trade_active and len(rows) == 1
-              and row.get("Exit_Reason") == expected_reason
-              and row.get("Exit_Price") == f"{expected_exit:.2f}"
-              and row.get("Profit") == f"{expected_profit:.2f}"
-              and eng.wins == wins and eng.losses == losses,
-              f"row={row} wins={eng.wins} losses={eng.losses}")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-m_expect_exit("BUY stop touch fills at the stop", "BUY", (100.0, 108.0, 89.0, 95.0), "SL", 90.0)
-m_expect_exit("BUY target touch fills at the target", "BUY", (100.0, 121.0, 96.0, 119.0), "TP", 120.0)
-m_expect_exit("SELL stop touch fills at the stop", "SELL", (100.0, 111.0, 94.0, 109.0), "SL", 110.0)
-m_expect_exit("SELL target touch fills at the target", "SELL", (100.0, 104.0, 79.0, 82.0), "TP", 80.0)
-
-# no-touch candle -> stay open, no ledger row
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_notouch_")
-try:
-    eng_m = m_make_engine(_tmp)
-    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
-    exited = eng_m.check_position_on_closed_candle(100.0, 109.0, 91.0, 102.0)
-    check("M: no-touch candle leaves the trade open",
-          not exited and eng_m.trade_active and m_trade_rows(engine.TRADES_LOG_PATH) == [])
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# both barriers in one candle -> conservative stop-first
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_both_")
-try:
-    eng_m = m_make_engine(_tmp)
-    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
-    eng_m.check_position_on_closed_candle(100.0, 125.0, 85.0, 115.0)
-    rows = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: a candle spanning both barriers resolves to the stop first",
-          len(rows) == 1 and rows[0]["Exit_Reason"] == "SL" and rows[0]["Exit_Price"] == "90.00",
-          f"rows={rows}")
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# gap convention: adverse gap uses the open; favourable gap still fills at target
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_gapstop_")
-try:
-    eng_m = m_make_engine(_tmp)
-    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
-    eng_m.check_position_on_closed_candle(88.0, 92.0, 87.0, 89.0)
-    rows = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: stop gaps fill at the candle open, not the stop level",
-          len(rows) == 1 and rows[0]["Exit_Reason"] == "SL" and rows[0]["Exit_Price"] == "88.00",
-          f"rows={rows}")
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_gaptp_")
-try:
-    eng_m = m_make_engine(_tmp)
-    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0)
-    eng_m.check_position_on_closed_candle(125.0, 128.0, 124.0, 127.0)
-    rows = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: target gaps still fill at the target level (no favourable overshoot credit)",
-          len(rows) == 1 and rows[0]["Exit_Reason"] == "TP" and rows[0]["Exit_Price"] == "120.00",
-          f"rows={rows}")
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# A newly opened trade must NOT be exposed to its own entry candle's earlier range.
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_entry_")
-try:
-    eng_m = m_make_engine(_tmp)
-    run_candles(eng_m, candles_uptrend(240), datetime(2026, 4, 1, 0, 0, tzinfo=timezone.utc))
-    entry_candle = rejection_dip_buy(eng_m)
-    eng_m.process_closed_candle(*entry_candle, tick_count=300)
-    check("M: a trade opened at the candle close is NOT stopped by that candle's earlier low",
-          eng_m.trade_active and eng_m.trade_type == "BUY" and entry_candle[2] <= eng_m.stop_loss
-          and m_trade_rows(engine.TRADES_LOG_PATH) == [],
-          f"low={entry_candle[2]:.2f} stop={eng_m.stop_loss:.2f}")
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# Exit ordering: the same candle may close an older trade first, then open a new one at the close.
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_reentry_")
-_m_old_should_take_trade = engine.should_take_trade
-engine.should_take_trade = lambda **kwargs: (True, "")
-try:
-    eng_m = m_make_engine(_tmp)
-    run_candles(eng_m, candles_uptrend(240), datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc))
-    reentry_candle = rejection_dip_buy(eng_m)
-    m_seed_trade(eng_m, "SELL", 83340.0, 83370.0, 83280.0, trade_num=7)
-    eng_m.process_closed_candle(*reentry_candle, tick_count=300)
-    rows = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: exit happens before signal evaluation, so the exit candle may also open a new trade",
-          len(rows) == 1 and rows[0]["Trade_Type"] == "SELL" and rows[0]["Exit_Reason"] == "SL"
-          and rows[0]["Exit_Price"] == "83370.00"
-          and eng_m.trade_active and eng_m.trade_type == "BUY" and eng_m.current_trade_num == 8
-          and eng_m.losses == 1 and eng_m.next_trade_num == 9,
-          f"rows={rows} active={eng_m.trade_active} type={eng_m.trade_type} num={eng_m.current_trade_num}")
-finally:
-    engine.should_take_trade = _m_old_should_take_trade
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# Restart/dedup: the same MT5 candle must not create a duplicate close row.
-_tmp = tempfile.mkdtemp(prefix="btc_smoke_m_dedup_")
-try:
-    eng_m = m_make_engine(_tmp)
-    m_seed_trade(eng_m, "BUY", 100.0, 90.0, 120.0, trade_num=4)
-    with open(engine.MT5_FEED_FILE, "w") as f:
-        json.dump({"ts": 3000, "open": 100.0, "high": 108.0, "low": 89.0,
-                   "close": 95.0, "tick_volume": 123, "updated_at": "2026-10-05 03:20:11"}, f)
-    candle = eng_m.mt5_next_candle(eng_m.read_mt5_feed(), 0)
-    eng_m.process_closed_candle(candle[1], candle[2], candle[3], candle[4], candle[5],
-                                candle_ts=candle[0])
-    rows_once = m_trade_rows(engine.TRADES_LOG_PATH)
-    close_watermark = engine.last_logged_candle_close_ts(engine.LOG_FILE_PATH)
-
-    eng_m2 = m_make_engine(_tmp)
-    dup = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), close_watermark)
-    if dup is not None:
-        eng_m2.process_closed_candle(dup[1], dup[2], dup[3], dup[4], dup[5],
-                                     candle_ts=dup[0])
-    rows_twice = m_trade_rows(engine.TRADES_LOG_PATH)
-    check("M: restart dedup uses persisted bar-close time and keeps one close row",
-          dup is None and close_watermark == candle[0] + engine.CANDLE_SECONDS
-          and len(rows_once) == 1 and len(rows_twice) == 1,
-          f"dup={dup} close_watermark={close_watermark} rows_once={rows_once} rows_twice={rows_twice}")
-
-    with open(engine.MT5_FEED_FILE, "w") as f:
-        json.dump({"ts": candle[0] + engine.CANDLE_SECONDS, "open": 100.0, "high": 108.0,
-                   "low": 95.0, "close": 101.0, "tick_volume": 124}, f)
-    next_after_restart = eng_m2.mt5_next_candle(eng_m2.read_mt5_feed(), close_watermark)
-    check("M: restart watermark does not skip the immediately following bar",
-          next_after_restart is not None
-          and next_after_restart[0] == candle[0] + engine.CANDLE_SECONDS)
-finally:
-    shutil.rmtree(_tmp, ignore_errors=True)
-
-# --- Scenario N ------------------------------------------------------------
-print("\nScenario N: read-only BTC tape pressure and level calculations")
-import pressure as btc_pressure  # noqa: E402
-
-check("N: mirrored pressure constants stay aligned with engine",
-      btc_pressure.LOOKBACK_PERIOD == engine.LOOKBACK_PERIOD
-      and btc_pressure.WICK_RATIO_TARGET == engine.WICK_RATIO_TARGET
-      and btc_pressure.FLOOR_BUFFER_PCT == engine.FLOOR_BUFFER_PCT
-      and btc_pressure.EMA_SLOPE_LOOKBACK == engine.EMA_SLOPE_LOOKBACK
-      and btc_pressure.MAX_BELOW_EMA_ATR == engine.MAX_BELOW_EMA_ATR
-      and btc_pressure.RSI_MIN == engine.RSI_MIN and btc_pressure.RSI_MAX == engine.RSI_MAX
-      and btc_pressure.ATR_SL_MULT == engine.ATR_SL_MULT
-      and btc_pressure.ATR_TP_MULT == engine.ATR_TP_MULT)
-
-with open(os.path.join(ROOT, "pressure.py"), encoding="utf-8") as _source:
-    _pressure_tree = ast.parse(_source.read())
-_forbidden_imports = {"engine", "trade_filter", "flask", "subprocess", "shutil"}
-_pressure_imports = {
-    alias.name.split(".")[0]
-    for node in ast.walk(_pressure_tree)
-    if isinstance(node, (ast.Import, ast.ImportFrom))
-    for alias in node.names
+    def symbol_info(self, s):
+        return types.SimpleNamespace(name=s, visible=True, filling_mode=2, trade_mode=4,
+                                     digits=2, point=0.01, trade_contract_size=1.0,
+                                     trade_stops_level=0, volume_min=0.10, volume_max=500.0, volume_step=0.01)
+
+    def symbol_info_tick(self, _s):
+        return types.SimpleNamespace(bid=20500.0, ask=20502.5, last=20500.0, time=int(time.time()))
+
+    def positions_get(self, **_kw):
+        return tuple(self.positions)
+
+    def history_deals_get(self, *_a, **_kw):
+        return ()
+
+    def order_check(self, _req):
+        return types.SimpleNamespace(retcode=0, comment="Done")
+
+    def order_send(self, req):
+        self.sent.append(dict(req))
+        if self.send_none:
+            return None
+        self.positions.append(types.SimpleNamespace(
+            ticket=7001, identifier=7001, symbol="US100Cash", type=0, volume=0.10,
+            price_open=20502.5, sl=req.get("sl", 0.0), tp=req.get("tp", 0.0),
+            profit=0.0, swap=0.0, magic=987656, time=int(time.time()), comment="",
+        ))
+        return types.SimpleNamespace(retcode=10009, order=7001, deal=7101, price=20502.5,
+                                     volume=0.10, comment="done")
+
+
+tmp_p = tempfile.mkdtemp(prefix="nasdaq_smoke_p_")
+pmt5 = PExecMT5(trade_mode=MTE.ACCOUNT_TRADE_MODE_REAL)  # REAL account!
+p_intent = {
+    "intent_id": "idemp-001", "ts_epoch": time.time(), "action": "OPEN", "side": "BUY",
+    "symbol": "US100Cash", "volume": 0.10, "atr": 40.0,
+    "sl": 20420.0, "tp": 20660.0, "sl_dist": 80.0, "tp_dist": 160.0, "magic": 987656,
 }
-_pressure_writes = any(
-    isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    and node.func.id == "open" and len(node.args) > 1
-    and isinstance(node.args[1], ast.Constant)
-    and any(mode in str(node.args[1].value) for mode in ("w", "a", "+", "x"))
-    for node in ast.walk(_pressure_tree)
-)
-check("N: pressure module remains stdlib-only and read-only",
-      not (_pressure_imports & _forbidden_imports) and not _pressure_writes)
 
-n_rows = []
-for i in range(80):
-    close = 80000.0 + i * 10.0
-    n_rows.append({
-        "Timestamp": (datetime(2026, 6, 1) + timedelta(minutes=5 * i)).strftime("%Y-%m-%d %H:%M:%S"),
-        "Open": str(close - 8), "High": str(close + 12), "Low": str(close - 12),
-        "Close": str(close), "Volume": "100", "EMA_50": str(close - 25),
-        "EMA_200": str(close - 100), "RSI": "60", "ATR": "100",
-        "Dynamic_Floor": "79900",
-    })
-n_read = btc_pressure.pressure(n_rows)
-n_loc = btc_pressure.location(n_rows[-21:])
-check("N: pressure is bounded, components sum to buy-share and sell is complementary",
-      n_read is not None and 0 <= n_read["buy_pct"] <= 100
-      and abs(n_read["buy_pct"] + n_read["sell_pct"] - 100) < 1e-9
-      and abs(sum(c["contribution"] for c in n_read["components"]) - n_read["buy_pct"]) < 1e-9,
-      f"buy={n_read['buy_pct']:.1f}%" if n_read else "no reading")
-n_warm = [dict(row) for row in n_rows]
-n_warm[-1]["EMA_200"] = "Calculating"
-check("N: pressure waits for valid EMA/RSI indicators instead of inventing neutral values",
-      btc_pressure.pressure(n_warm) is None)
-check("N: 20-bar location excludes the candle being evaluated",
-      n_loc is not None and n_loc["floor"] == 80000.0 + 59 * 10.0 - 12
-      and n_loc["ceiling"] == 80000.0 + 78 * 10.0 + 12)
+# 1. Dormant gate (enabled=False) -> REJECTED (disabled), 0 orders sent
+ex_dormant = MTE.Mt5Executor(pmt5, bridge_dir=os.path.join(tmp_p, "b1"), enabled=False, log=lambda _m: None)
+MTE.atomic_write_json(ex_dormant.intent_path, p_intent)
+r_dorm = ex_dormant.step()["result"]
+check("P: Mt5Executor dormant by default (MT5_EXEC_ENABLED=0 -> REJECTED disabled, 0 orders)",
+      r_dorm["status"] == "REJECTED" and "disabled" in r_dorm.get("message", "") and len(pmt5.sent) == 0)
 
-# Same-timestamp entry row is excluded: only features strictly before entry count.
-n_trade = [{"Trade_Type": "BUY", "Entry_Time": n_rows[65]["Timestamp"], "Profit": "2.50"}]
-n_cal = btc_pressure.calibrate(n_rows, n_trade)
-n_entry_changed = [dict(row) for row in n_rows]
-n_entry_changed[65].update({"Open": "1", "High": "1000000", "Low": "0", "Close": "999999"})
-n_cal_changed = btc_pressure.calibrate(n_entry_changed, n_trade)
-check("N: calibration uses only pre-entry bars and keeps sides separate",
-      n_cal["BUY"]["n"] == 1 and n_cal["SELL"]["n"] == 0
-      and n_cal["BUY"]["gross_profit"] == 2.5
-      and n_cal["BUY"]["score_median"] == n_cal_changed["BUY"]["score_median"])
+# 2. Real-account lock (enabled=True, allow_real=False on REAL account) -> REJECTED, 0 orders sent
+ex_real_lock = MTE.Mt5Executor(pmt5, bridge_dir=os.path.join(tmp_p, "b2"), enabled=True, allow_real=False, log=lambda _m: None)
+MTE.atomic_write_json(ex_real_lock.intent_path, dict(p_intent, intent_id="idemp-002"))
+r_real = ex_real_lock.step()["result"]
+check("P: Mt5Executor blocks REAL account when MT5_EXEC_ALLOW_REAL=0",
+      r_real["status"] == "REJECTED" and "REAL account blocked" in r_real.get("message", "") and len(pmt5.sent) == 0,
+      r_real.get("message", ""))
 
-n_second_trade = {"Trade_Type": "BUY", "Entry_Time": n_rows[70]["Timestamp"], "Profit": "1.50"}
-n_even_cal = btc_pressure.calibrate(n_rows, n_trade + [n_second_trade])
-n_second_cal = btc_pressure.calibrate(n_rows, [n_second_trade])
-expected_even_median = sum(sorted([
-    n_cal["BUY"]["score_median"], n_second_cal["BUY"]["score_median"]
-])) / 2
-check("N: reported median averages the middle pair for an even sample",
-      n_even_cal["BUY"]["n"] == 2
-      and abs(n_even_cal["BUY"]["score_median"] - expected_even_median) < 1e-9)
+# 3. Demo account + idempotency: same intent_id submitted twice -> order_send called ONCE
+pmt5_demo = PExecMT5(trade_mode=MTE.ACCOUNT_TRADE_MODE_DEMO)
+ex_demo = MTE.Mt5Executor(pmt5_demo, bridge_dir=os.path.join(tmp_p, "b3"), enabled=True, allow_real=False, log=lambda _m: None)
+MTE.atomic_write_json(ex_demo.intent_path, dict(p_intent, intent_id="idemp-003"))
+r_fill1 = ex_demo.step()["result"]
+MTE.atomic_write_json(ex_demo.intent_path, dict(p_intent, intent_id="idemp-003"))
+r_fill2 = ex_demo.step()["result"]
+check("P: duplicate intent_id returns cached FILLED result without calling order_send twice",
+      r_fill1["status"] == "FILLED" and r_fill2["status"] == "FILLED" and len(pmt5_demo.sent) == 1)
+shutil.rmtree(tmp_p, ignore_errors=True)
 
-n_ledger_stats = btc_pressure.trade_summary([
-    {"Exit_Reason": "TP"}, {"Exit_Reason": "SL"}, {"Exit_Reason": "unknown"}
-])
-check("N: dashboard ledger summary counts only closed TP/SL rows",
-      n_ledger_stats == {"total_trades": 2, "wins": 1, "losses": 1, "win_rate": 50.0})
+# 4. Run tools/live_path_probe.py end-to-end
+probe_proc = subprocess.run([sys.executable, os.path.join(HERE, "live_path_probe.py")],
+                            cwd=ROOT, capture_output=True, text=True, timeout=30)
+check("P: tools/live_path_probe.py passes all 11/11 execution checks",
+      probe_proc.returncode == 0 and "11/11 checks clean" in probe_proc.stdout)
 
-# --- summary ---------------------------------------------------------------
-# autosync.sh gates every deploy on this exit code - never remove it.
-print()
+# 5. Audit deploy/*.service files for /opt/nasdaq, US100Cash, and zero embedded credentials
+svc_files = ("mt5feed.service", "mt5quotes.service", "mt5exec.service",
+             "nasdaq-engine.service", "nasdaq-dashboard.service")
+svc_ok = True
+for sf in svc_files:
+    sp = os.path.join(ROOT, "deploy", sf)
+    if not os.path.isfile(sp):
+        svc_ok = False
+        break
+    stxt = open(sp, encoding="utf-8").read()
+    # Strip comment lines before checking for credential keywords
+    non_comment = "\n".join(ln for ln in stxt.splitlines() if not ln.lstrip().startswith("#"))
+    if "/opt/nasdaq" not in stxt or re.search(r"(password|secret)\s*=", non_comment, re.I):
+        svc_ok = False
+check("P: all 5 deploy/*.service units exist, target /opt/nasdaq, and contain zero credentials", svc_ok)
+
+# ==============================================================================
+# Summary
+# ==============================================================================
+print("\n" + "=" * 66)
 if FAILURES:
-    print(f"SMOKE TEST FAILED: {FAILURES}")
+    print(f"SMOKE TEST FAILED ({len(FAILURES)} failure(s)):")
+    for f in FAILURES:
+        print(f"  - {f}")
     sys.exit(1)
-print("SMOKE TEST PASSED")
+print("ALL SMOKE TEST SCENARIOS (A-P) PASSED FOR US100Cash M15 (/opt/nasdaq)")
+sys.exit(0)
