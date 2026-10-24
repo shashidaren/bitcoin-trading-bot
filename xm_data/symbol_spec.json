@@ -14,7 +14,7 @@
     "trade_expert": true,
     "trade_mode": 2
   },
-  "captured_utc": "2026-10-24 15:43:29",
+  "captured_utc": "2026-10-24 16:03:33",
   "decoded": {
     "account_kind": "REAL",
     "calc_mode": "CFD_LEVERAGE",
@@ -43,7 +43,7 @@
     "symbol_trade_mode": "FULL"
   },
   "hash": "83f0d4817d8b",
-  "label": "XM US100Cash demo",
+  "label": "XM US100Cash",
   "probes": {
     "calc_margin_usd_0.10lot": 2.9,
     "calc_profit_usd_0.10lot_plus_100pts": 10.0,
