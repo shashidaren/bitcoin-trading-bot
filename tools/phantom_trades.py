@@ -8,21 +8,23 @@ daily-loss halt, or the %-based ATR bounds. Those skips have no trade record,
 so their value/cost is invisible in trades.csv.
 
 This tool reconstructs each blocked signal from forward_test_log.csv and
-simulates the trade it WOULD have been (SL 2xATR / TP 4xATR, LOT_SIZE 0.01),
+simulates the trade it WOULD have been (SL 2xATR / TP 4xATR, LOT_SIZE 0.10),
 then walks the log forward to see whether it would have hit TP or SL. That
 turns the skip log into measurable evidence: did the cooldowns / blackouts /
 halts save money or burn it?
 
 Since 2026-09-15 the walk comes from tools/replay_lib.py (ONE copy of the
-direction-safe excursion logic for every analysis tool - gold's 09-15 review
-found its own duplicated walks had SELL extremes inverted, so shorts silently
+direction-safe excursion logic for every analysis tool - the pre-Nasdaq 09-15
+review found duplicated walks with SELL extremes inverted, so shorts silently
 "fell back to their actual outcome" and the tool looked self-validating).
 Signals the log cannot resolve within the 24 h horizon are marked to market at
 the last available bar and reported separately as TIME instead of vanishing
 into an "open" column.
 
-Output is a per-skip table + summary by skip reason. P&L is in $ at 0.01 lot
-(price distance x LOT_SIZE), raw distances without spread/slippage.
+Output is a per-skip table + summary by skip reason. P&L is in $ at 0.10 lot on
+US100Cash M15 (CONTRACT_SIZE 1.0 -> $0.10 per index point, 1R = 2 x ATR x 0.10,
+e.g. a 40-pt ATR risks $8.00 and a 4xATR TP pays $16.00), raw distances without
+spread/slippage. --spread applies the ~$0.25-$0.29 XM round trip at ~29,000 index.
 
 Usage: python3 tools/phantom_trades.py [--root DIR] [--log LOG] [--skips SKIPS]
                                        [--since "YYYY-MM-DD HH:MM"]
@@ -187,8 +189,13 @@ def main():
     print(f"  {'TOTAL':<11} {g2[0]:>3} taken  -> {g2[1]}W/{g2[2]}L/{g2[3]}T "
           f"({wr:.0f}% WR over decisive) phantom {g2[4]:+8.2f} gross"
           + (f"  {g2[4] - args.spread * g2[0]:+8.2f} net" if args.spread else ""))
-    print("\n  compare: the traded book is "
-          f"{len(R.load_trades(os.path.join(args.root, 'trades.csv')))} rows at 41% decisive")
+    # Book comparison read live from trades.csv - never hardcoded (a Day-0 ledger
+    # has zero decisive rows, and a stale pre-Nasdaq figure would mislead).
+    book = R.load_trades(os.path.join(args.root, "trades.csv"))
+    book_dec = sum(1 for t in book if t["reason"] in ("TP", "SL"))
+    book_wr = (f"{sum(1 for t in book if t['reason'] == 'TP') / book_dec * 100:.0f}% decisive"
+               if book_dec else "no decisive rows yet")
+    print(f"\n  compare: the traded book is {len(book)} rows ({book_wr})")
 
     print("\nNote: raw ATR-geometry distances x 0.10 lot (US100Cash)"
           + (f", net of ${args.spread:.2f}/trade round trip" if args.spread else

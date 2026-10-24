@@ -27,6 +27,8 @@ Scenarios:
   O) pressure.py + dashboard.py + autosync.sh    -> 60-bar M15 tape pressure, Flask read-only UI, static STALE
   P) tools/mt5_executor.py + LIVE bridge         -> dormant/demo locks, idempotency, None quarantine, HALT flatten,
                                                     credential-free deploy/*.service units
+  Q) Day-0 ledger guards (tools/win_rate_report.py) -> §6 SIGNAL CENSUS and §8 cost grid never divide by
+                                                    zero on empty / signal-free logs (0 takeable early-out)
 
 Usage: python3 tools/smoke_test.py
 """
@@ -917,9 +919,133 @@ for base, dirs, files in os.walk(ROOT):
             legacy_hits.append(os.path.relpath(fp, ROOT))
 check("P: zero retired-instrument strings (legacy crypto ticker/paths) anywhere in the repo",
       not legacy_hits, f"hits={legacy_hits}")
+# Legacy-instrument WORDING tripwire (separate from the ticker scan above): no .py or
+# .md may still describe the pre-Nasdaq book. Both patterns are assembled from fragments
+# so this scanner never matches its own source, and both are anchored so the NUMERIC
+# symbol-spec values that are still correct on US100Cash survive untouched:
+# point=0.01, volume_step=0.01, volume_min=0.01, trade_tick_size, and the live "0.10 lot".
+_METAL = "g" + "old"                                    # retired metal, never literal here
+_LOT_WORD = r"0\." + "0" + r"1\s*[- ]?\s*lot\b"          # retired micro-lot phrase
+_LOT_CONST = r"LOT_SIZE\s*[=:]?\s*0\." + "01" + r"\b"     # retired micro-lot constant
+LEGACY_WORD_RE = re.compile("|".join((
+    r"\b" + _METAL + r"\b",
+    _LOT_WORD,
+    _LOT_CONST,
+)), re.I)
+
+# Self-test first: a tripwire that cannot fire is noise, and one that fires on the live
+# US100Cash symbol spec would block every deploy. Both directions are asserted.
+_should_hit = [_METAL.upper() + " 09-15 review",
+               "sized at " + "0." + "01 lot",
+               "0." + "01" + "-lot account",
+               "LOT_SIZE = " + "0." + "01"]
+_should_miss = ["point=0.01", "volume_step=0.01", "volume_min=0.01",
+                "trade_tick_size=0.01", "0.10 lot", "0.10-lot account",
+                "LOT_SIZE = 0.10", "volume_min <= 0.10"]
+check("P: legacy-wording tripwire self-test (fires on retired wording, ignores 0.01 symbol-spec values)",
+      all(LEGACY_WORD_RE.search(x) for x in _should_hit)
+      and not any(LEGACY_WORD_RE.search(x) for x in _should_miss),
+      f"missed={[x for x in _should_hit if not LEGACY_WORD_RE.search(x)]} "
+      f"false_pos={[x for x in _should_miss if LEGACY_WORD_RE.search(x)]}")
+
+wording_hits = []
+for base, dirs, files in os.walk(ROOT):
+    dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", "venv", ".venv")]
+    for fn in files:
+        if not fn.endswith((".py", ".md")):
+            continue
+        fp = os.path.join(base, fn)
+        try:
+            txt = open(fp, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for ln, line in enumerate(txt.splitlines(), 1):
+            if LEGACY_WORD_RE.search(line):
+                wording_hits.append(f"{os.path.relpath(fp, ROOT)}:{ln}")
+check("P: zero legacy instrument wording (retired metal / micro-lot sizing) in any .py/.md",
+      not wording_hits, f"hits={wording_hits[:8]}")
+
 check("P: docs/NASDAQ-OPS.md exists and the one-time restructure runbook is gone",
       os.path.isfile(os.path.join(ROOT, "docs", "NASDAQ-OPS.md"))
       and not os.path.exists(os.path.join(ROOT, "docs", "NASDAQ-RESTRUCTURE-2026-10-24.md")))
+
+# ==============================================================================
+# Scenario Q: Day-0 ledger guards in tools/win_rate_report.py
+# ==============================================================================
+print("\nScenario Q: tools/win_rate_report.py Day-0 / no-signal census guards")
+
+_Q_HDR = ["Timestamp", "Open", "High", "Low", "Close", "Wick_Ratio", "Volume", "Vol_MA",
+          "Vol_Confirmed", "Dynamic_Floor", "EMA_50", "EMA_200", "Trend_Confirmed",
+          "Tested_Floor", "Valid_Rejection", "Held_Floor", "RSI", "ATR"]
+
+
+def _q_log(path, rows):
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(_Q_HDR)
+        w.writerows(rows)
+
+
+def _q_report(root):
+    return subprocess.run([sys.executable, os.path.join(HERE, "win_rate_report.py"),
+                           "--root", root, "--spread", "0.25"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=60)
+
+
+_q_t0 = datetime(2026, 10, 24, 0, 0)
+# (a) 300 rising M15 bars that never test the 20-bar floor -> zero full signals
+_q_quiet = []
+_q_p = 29000.0
+for _i in range(300):
+    _o, _c = _q_p, _q_p + 2.0
+    _q_quiet.append([(_q_t0 + timedelta(minutes=15 * _i)).strftime("%Y-%m-%d %H:%M:%S"),
+                     f"{_o:.2f}", f"{_c + 1.0:.2f}", f"{_o - 1.0:.2f}", f"{_c:.2f}",
+                     "0.5", "100", "100", "True", f"{_o - 40:.2f}",
+                     f"{28900 + 1.5 * _i:.2f}", f"{28800 + _i:.2f}", "True",
+                     "False", "False", "False", "55.0", "30.0"])
+    _q_p = _c
+# (b) 200 floor-touching bars -> many full signals, but all walk to TIME (0 decisive)
+_q_signals = []
+for _i in range(200):
+    _o = 28999.0 if _i % 2 == 0 else 29005.0
+    _c = 29005.0 if _i % 2 == 0 else 28999.0
+    _q_signals.append([(_q_t0 + timedelta(minutes=15 * _i)).strftime("%Y-%m-%d %H:%M:%S"),
+                       f"{_o:.2f}", "29010.00", "28990.00", f"{_c:.2f}",
+                       "0.75", "100", "100", "True", "28990.00",
+                       f"{29005 + 0.02 * _i:.2f}", "28960.00", "True",
+                       "True", "True", "True", "55.0", "30.0"])
+
+_q_tmp = tempfile.mkdtemp(prefix="nasdaq_smoke_q_")
+try:
+    # (a) both files header-only: the existing Day-0 early-out, no traceback
+    open(os.path.join(_q_tmp, "trades.csv"), "w").close()
+    _q_log(os.path.join(_q_tmp, "forward_test_log.csv"), [])
+    _q_empty = _q_report(_q_tmp)
+    check("Q: win_rate_report exits 0 on empty trades.csv + forward_test_log.csv (Day-0 early-out)",
+          _q_empty.returncode == 0 and "0 trades and 0 bars yet" in _q_empty.stdout
+          and "Traceback" not in _q_empty.stderr,
+          (_q_empty.stderr or _q_empty.stdout).strip()[-160:])
+
+    # (b) bars but zero full signals: §6 must print the 0-takeable early-out, not divide by zero
+    open(os.path.join(_q_tmp, "trades.csv"), "w").close()
+    _q_log(os.path.join(_q_tmp, "forward_test_log.csv"), _q_quiet)
+    _q_nosig = _q_report(_q_tmp)
+    check("Q: win_rate_report §6 prints '0 takeable signals yet (Day-0 ledger)' on a signal-free log",
+          _q_nosig.returncode == 0
+          and "0 takeable signals yet (Day-0 ledger)" in _q_nosig.stdout
+          and "Traceback" not in _q_nosig.stderr,
+          (_q_nosig.stderr or _q_nosig.stdout).strip()[-160:])
+
+    # (c) signals but zero decisive outcomes AND an empty ledger: §6 WR + §8 book WR are n/a
+    _q_log(os.path.join(_q_tmp, "forward_test_log.csv"), _q_signals)
+    _q_nodec = _q_report(_q_tmp)
+    check("Q: win_rate_report prints n/a (not ZeroDivisionError) for 0 decisive outcomes on an empty ledger",
+          _q_nodec.returncode == 0 and "0 decisive" in _q_nodec.stdout
+          and "no decisive SL/TP rows yet" in _q_nodec.stdout
+          and "Traceback" not in _q_nodec.stderr,
+          (_q_nodec.stderr or _q_nodec.stdout).strip()[-160:])
+finally:
+    shutil.rmtree(_q_tmp, ignore_errors=True)
 
 # ==============================================================================
 # Summary
@@ -930,5 +1056,5 @@ if FAILURES:
     for f in FAILURES:
         print(f"  - {f}")
     sys.exit(1)
-print("ALL SMOKE TEST SCENARIOS (A-P) PASSED FOR US100Cash M15 (/opt/nasdaq)")
+print("ALL SMOKE TEST SCENARIOS (A-Q) PASSED FOR US100Cash M15 (/opt/nasdaq)")
 sys.exit(0)
