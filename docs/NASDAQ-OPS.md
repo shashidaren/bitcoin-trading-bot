@@ -59,6 +59,12 @@ sudo systemctl enable --now mt5feed-nasdaq mt5quotes-nasdaq mt5exec-nasdaq nasda
 
 Non-root operator? Substitute your login (`trader`) for `root` in step 5 and drop the `/home/root/.mt5` fix-up — the prefix then stays `/home/trader/.mt5` and must match the prefix the MT5 terminal was installed under.
 
+**Renamed repo / existing server clone?** GitHub redirects the old URL, so autosync keeps working — but re-point `origin` so the deployment names the current repo and future branch/PR links resolve:
+```bash
+cd /opt/nasdaq && git remote set-url origin <this-repo-url> && git remote -v
+```
+Then confirm the bot identity is current (`git config user.name` should print `nasdaq-autosync`; `tools/autosync.sh` re-pins it on its next run).
+
 ---
 
 ## 2. Service Map

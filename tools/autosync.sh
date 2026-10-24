@@ -77,8 +77,14 @@ if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ] || [ -f .git/MERGE_HEAD 
     exit 1
 fi
 
+# Commit identity is brand-pinned to this deployment. A clone made before the repo was
+# renamed can still carry the retired bot identity in .git/config, and an "only if unset"
+# default would then preserve it forever - so any other name is corrected here.
+if [ "$(git config user.name)" != "nasdaq-autosync" ]; then
+    log "git user.name '$(git config user.name)' -> 'nasdaq-autosync'"
+    git config user.name "nasdaq-autosync"
+fi
 git config user.email >/dev/null 2>&1 || git config user.email "autosync@$(hostname)"
-git config user.name  >/dev/null 2>&1 || git config user.name  "nasdaq-autosync"
 export GIT_TERMINAL_PROMPT=0
 
 DATA_MSG="no new data"
