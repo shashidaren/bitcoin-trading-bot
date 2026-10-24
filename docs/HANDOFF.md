@@ -3,8 +3,8 @@
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-24 15:37 |
-| data_collection | 4202 |
+| as_of_utc | 2026-10-24 15:59 |
+| data_collection | 4204 |
 | closed_trades | 0 |
 | wins_losses | 0W/0L |
 | win_rate_pct | 0.0 |
