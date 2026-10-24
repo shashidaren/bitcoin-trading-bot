@@ -1,14 +1,23 @@
 # Wine MT5 -> /opt/nasdaq/mt5_last_candle.json + mt5_warmup_candles.json sidecar
 #
-# Install (substitute your server Linux user if not 'trader'):
+# Install (root is the live VPS user - WINEPREFIX stays in /root, not /home/root):
 #   sudo cp /opt/nasdaq/deploy/mt5feed.service /etc/systemd/system/mt5feed-nasdaq.service
-#   sudo sed -i 's/YOUR_LINUX_USER/'"$USER"'/g' /etc/systemd/system/mt5feed-nasdaq.service
+#   sudo sed -i 's|YOUR_LINUX_USER|root|g; s|/home/root/.mt5|/root/.mt5|g' \
+#       /etc/systemd/system/mt5feed-nasdaq.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now mt5feed-nasdaq
 #   journalctl -u mt5feed-nasdaq -f
 #
-# Prerequisite: the XM MT5 terminal must ALREADY be running and logged in under
-# the SAME WINEPREFIX (/home/<user>/.mt5), with US100Cash enabled in Market Watch.
+# Non-root user instead of root? Substitute your own login (e.g. 'trader') and the
+# sed keeps WINEPREFIX=/home/<user>/.mt5 - root's home is /root, never /home/root.
+#
+# Prerequisite: the XM MT5 terminal must ALREADY be running and logged in under the
+# SAME WINEPREFIX (/root/.mt5 for root), with US100Cash enabled in Market Watch.
+#
+# Windows/Wine Python has no IANA timezone database. Install tzdata once into that
+# same interpreter (only tools that localise to America/New_York need it - the
+# sidecars fall back to a stdlib fixed-rule US Eastern tzinfo if it is missing):
+#   WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -m pip install tzdata
 
 [Unit]
 Description=MT5 -> JSON closed M15 candle + warm-up sidecar for Nasdaq (US100Cash)

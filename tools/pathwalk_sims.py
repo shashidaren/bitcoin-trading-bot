@@ -5,7 +5,6 @@ Sequence-aware exit-rule replay for US100Cash M15.
 Usage:
   python3 tools/pathwalk_sims.py [--root DIR] [--spread 0.25] [--horizon 720] [--census]
 """
-"""
 import argparse
 import os
 import sys
@@ -97,7 +96,8 @@ def main():
     # ---------------- B. real trades: BE ratchet grid ------------------------
     print(f"\n== B. REAL TRADES - breakeven-ratchet grid (TP {R.ATR_TP_MULT:.0f}xATR, "
           f"{args.horizon}-min horizon) ==")
-    print("    BTC has NO BE ratchet live; this measures gold's candidate on BTC data.")
+    print("    US100Cash has NO BE ratchet live; this measures a breakeven-ratchet"
+          " candidate on US100Cash M15 data.")
     for be in (None, 0.5, 0.75, 1.0, 1.25):
         rows = []
         for t in covered:
@@ -200,8 +200,9 @@ def main():
     print("    fallback to the actual result; a longer horizon would resolve most of them.")
     print("  * Rows are not comparable by trade COUNT across TP levels: a tighter target")
     print("    finishes sooner, so the same signals resolve differently in a cascade.")
-    print("  * '$ spread' is a flat round-trip haircut at LOT_SIZE 0.01 - measure the real")
-    print("    XM BTCUSD spread before any LIVE decision (docs/HANDOFF.md §7).")
+    print("  * '$ spread' is a flat round-trip haircut at LOT_SIZE 0.10 x CONTRACT_SIZE 1.0")
+    print("    ($0.10 per index point) - measure the real XM US100Cash spread before any")
+    print("    LIVE decision: ~$0.25-$0.29 round trip at ~29,000 index price (docs/HANDOFF.md §7).")
 
 
 if __name__ == "__main__":

@@ -310,6 +310,36 @@ b_open, lbl_open = trade_filter.is_in_blackout(datetime(2026, 10, 20, 13, 32, tz
 b_clear, _ = trade_filter.is_in_blackout(datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc))           # 11:00 EDT
 check("G: 08:30 ET macro & 09:30 ET cash open blackouts block entries; 11:00 ET is clear",
       b_macro and "08:30" in lbl_macro and b_open and "09:30" in lbl_open and not b_clear)
+
+# Wine/Windows Python ships no IANA database -> ZoneInfo("America/New_York") raises
+# ZoneInfoNotFoundError. trade_filter.py must fall back to the stdlib fixed US DST
+# rule (2nd Sunday of March / 1st Sunday of November) and keep identical verdicts.
+class GNoTzdata:
+    def __new__(cls, *_a, **_k):
+        raise trade_filter.ZoneInfoNotFoundError("no tzdata in the Wine python")
+
+
+_saved_zi = trade_filter.ZoneInfo
+trade_filter.ZoneInfo = GNoTzdata
+try:
+    g_fb_tz = trade_filter.load_ny_tz()
+finally:
+    trade_filter.ZoneInfo = _saved_zi
+_saved_ny = trade_filter.NY_TZ
+trade_filter.NY_TZ = g_fb_tz
+try:
+    fb_quiet = (trade_filter.is_market_quiet(datetime(2026, 10, 20, 21, 30, tzinfo=timezone.utc))
+                and trade_filter.is_market_quiet(datetime(2026, 11, 10, 22, 30, tzinfo=timezone.utc))
+                and not trade_filter.is_market_quiet(datetime(2026, 11, 10, 20, 30, tzinfo=timezone.utc)))
+    fb_lbl = trade_filter.blackout_label_for_utc(datetime(2026, 11, 10, 14, 32, tzinfo=timezone.utc))  # 09:32 EST
+finally:
+    trade_filter.NY_TZ = _saved_ny
+check("G: ZoneInfoNotFoundError (Wine python without tzdata) -> stdlib fixed-rule US Eastern fallback",
+      isinstance(g_fb_tz, trade_filter.USEasternFallback)
+      and datetime(2026, 10, 20, 21, 30, tzinfo=timezone.utc).astimezone(g_fb_tz).strftime("%H:%M %Z") == "17:30 EDT"
+      and datetime(2026, 11, 10, 22, 30, tzinfo=timezone.utc).astimezone(g_fb_tz).strftime("%H:%M %Z") == "17:30 EST")
+check("G: fixed-rule fallback keeps CME quiet hours & 09:30 ET blackout identical to zoneinfo",
+      bool(fb_quiet) and fb_lbl is not None and "09:30" in fb_lbl, str(fb_lbl))
 shutil.rmtree(tmp_g, ignore_errors=True)
 
 # ==============================================================================
@@ -557,6 +587,23 @@ check("K: AST confirms mt5_quotes.py calls ZERO trading APIs",
 check("K: mt5_quotes defaults to Z:/opt/nasdaq/xm_data, M15_SECONDS=900, candles_m15.csv",
       Q.DEFAULT_DIR == "Z:/opt/nasdaq/xm_data" and Q.M15_SECONDS == 900
       and Q.CANDLES_FILE == "candles_m15.csv")
+
+class KNoTzdata:
+    def __new__(cls, *_a, **_k):
+        raise Q.ZoneInfoNotFoundError("no tzdata in the Wine python")
+
+
+_k_saved_zi = Q.ZoneInfo
+Q.ZoneInfo = KNoTzdata
+try:
+    k_fb_tz = Q.load_ny_tz()
+finally:
+    Q.ZoneInfo = _k_saved_zi
+check("K: mt5_quotes falls back to fixed-rule US Eastern when the Wine python lacks tzdata",
+      isinstance(k_fb_tz, Q.USEasternFallback)
+      and datetime(2026, 10, 20, 21, 30, tzinfo=timezone.utc).astimezone(k_fb_tz).strftime("%H:%M %Z") == "17:30 EDT"
+      and datetime(2026, 11, 10, 22, 30, tzinfo=timezone.utc).astimezone(k_fb_tz).strftime("%H:%M %Z") == "17:30 EST"
+      and datetime(2026, 11, 10, 22, 30, tzinfo=timezone.utc).astimezone(k_fb_tz).weekday() == 1)
 
 tmp_k = tempfile.mkdtemp(prefix="nasdaq_smoke_k_")
 kclock = KClock(K_T0)
@@ -839,6 +886,40 @@ for sf in svc_files:
     if "/opt/nasdaq" not in stxt or re.search(r"(password|secret)\s*=", non_comment, re.I):
         svc_ok = False
 check("P: all 5 deploy/*.service units exist, target /opt/nasdaq, and contain zero credentials", svc_ok)
+
+wine_units = ("mt5feed.service", "mt5quotes.service", "mt5exec.service")
+wine_txt = {sf: open(os.path.join(ROOT, "deploy", sf), encoding="utf-8").read() for sf in wine_units}
+check("P: mt5*.service install notes pin WINEPREFIX=/root/.mt5 for root (never /home/root/.mt5)",
+      all("/root/.mt5" in t and "/home/root/.mt5|" in t for t in wine_txt.values()))
+check("P: mt5*.service install notes document 'wine C:/Python312/python.exe -m pip install tzdata'",
+      all("m pip install tzdata" in t for t in wine_txt.values()))
+check("P: mt5quotes.service logs the non-demo label 'MT5_QUOTES_LABEL=XM US100Cash'",
+      'Environment="MT5_QUOTES_LABEL=XM US100Cash"' in wine_txt["mt5quotes.service"]
+      and "US100Cash demo" not in wine_txt["mt5quotes.service"])
+
+# Retired-instrument tripwire: no print/comment/doc may name the legacy crypto symbol.
+# The pattern is assembled from fragments so this scanner never matches itself.
+_TICKER = "b" + "tc"          # split so this scanner never matches its own source
+LEGACY_RE = re.compile("|".join(("bit" + "coin", r"\b" + _TICKER + r"\b",
+                                 _TICKER + "usd", "/opt/" + "bit" + "coin")), re.I)
+legacy_hits = []
+for base, dirs, files in os.walk(ROOT):
+    dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", "venv", ".venv")]
+    for fn in files:
+        if not fn.endswith((".py", ".md", ".sh", ".service", ".json", ".txt", ".csv", ".yml", ".yaml")):
+            continue
+        fp = os.path.join(base, fn)
+        try:
+            txt = open(fp, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        if LEGACY_RE.search(txt):
+            legacy_hits.append(os.path.relpath(fp, ROOT))
+check("P: zero retired-instrument strings (legacy crypto ticker/paths) anywhere in the repo",
+      not legacy_hits, f"hits={legacy_hits}")
+check("P: docs/NASDAQ-OPS.md exists and the one-time restructure runbook is gone",
+      os.path.isfile(os.path.join(ROOT, "docs", "NASDAQ-OPS.md"))
+      and not os.path.exists(os.path.join(ROOT, "docs", "NASDAQ-RESTRUCTURE-2026-10-24.md")))
 
 # ==============================================================================
 # Summary

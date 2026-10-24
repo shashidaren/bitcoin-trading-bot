@@ -27,8 +27,15 @@ import math
 import os
 import sys
 import time
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
+
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:                      # pragma: no cover - Python < 3.9
+    ZoneInfo = None
+
+    class ZoneInfoNotFoundError(Exception):
+        pass
 
 try:
     import MetaTrader5 as mt5
@@ -39,7 +46,96 @@ SCHEMA_VERSION = 1
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 M15_SECONDS = 900
 BAR_SECONDS = M15_SECONDS
-NY_TZ = ZoneInfo("America/New_York")
+
+
+class USEasternFallback(tzinfo):
+    """Stdlib fixed-rule US Eastern (EST/EDT) `tzinfo` - needs no `tzdata` package.
+
+    Only used when `ZoneInfo("America/New_York")` raises `ZoneInfoNotFoundError`,
+    i.e. inside the Wine MT5 interpreter (`C:/Python312/python.exe`) where the
+    IANA database is absent because `tzdata` was never pip-installed.
+
+    Rules (post-2007 US federal law):
+      * DST starts: 2nd Sunday of March,    02:00 EST -> 03:00 EDT (= 07:00 UTC)
+      * DST ends:   1st Sunday of November, 02:00 EDT -> 01:00 EST (= 06:00 UTC)
+
+    Permanent fix inside the Wine prefix:
+      wine C:/Python312/python.exe -m pip install tzdata
+    (twin of the class in trade_filter.py - this sidecar stays import-free of the
+    repo on purpose so it can run standalone under Z:\\opt\\nasdaq\\tools.)
+    """
+
+    STD = timedelta(hours=-5)            # EST
+    DST = timedelta(hours=-4)            # EDT
+    _HOUR = timedelta(hours=1)
+
+    @staticmethod
+    def _nth_sunday(year, month, n):
+        first = date(year, month, 1)
+        first_sunday = first + timedelta(days=(6 - first.weekday()) % 7)   # Sun == 6
+        return first_sunday + timedelta(weeks=n - 1)
+
+    @classmethod
+    def _bounds_local(cls, year):
+        """(DST start, DST end) as naive America/New_York wall-clock datetimes."""
+        start = datetime.combine(cls._nth_sunday(year, 3, 2), dtime(2, 0))
+        end = datetime.combine(cls._nth_sunday(year, 11, 1), dtime(2, 0))
+        return start, end
+
+    def _is_dst_local(self, local, fold=0):
+        start, end = self._bounds_local(local.year)
+        if not (start <= local < end):
+            return False
+        # 02:00-03:00 wall time on the spring-forward Sunday does not exist; fold=0
+        # resolves it as EST, matching the IANA database.
+        if start <= local < start + self._HOUR and not fold:
+            return False
+        if end - self._HOUR <= local and fold:
+            return False
+        return True
+
+    def dst(self, dt):
+        if dt is None:
+            return timedelta(0)
+        return self._HOUR if self._is_dst_local(dt.replace(tzinfo=None), getattr(dt, "fold", 0)) else timedelta(0)
+
+    def utcoffset(self, dt):
+        if dt is None:
+            return self.STD
+        return self.DST if self.dst(dt) else self.STD
+
+    def fromutc(self, dt):
+        """UTC -> Eastern (called by `astimezone()` / `fromtimestamp(tz=...)`)."""
+        naive_utc = dt.replace(tzinfo=None)
+        start_local, end_local = self._bounds_local(naive_utc.year)
+        start_utc = start_local - self.STD      # 02:00 EST = 07:00 UTC
+        end_utc = end_local - self.DST          # 02:00 EDT = 06:00 UTC
+        is_dst = start_utc <= naive_utc < end_utc
+        local = naive_utc + (self.DST if is_dst else self.STD)
+        if not is_dst and end_local - self._HOUR <= local < end_local:
+            local = local.replace(fold=1)       # repeated EST hour after the fall-back
+        return local.replace(tzinfo=self)
+
+    def tzname(self, dt):
+        return "EDT" if self.dst(dt) else "EST"
+
+    def __repr__(self):
+        return "USEasternFallback()"
+
+
+def load_ny_tz():
+    """America/New_York via `zoneinfo`, falling back to the fixed US DST rule."""
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo("America/New_York")
+        except ZoneInfoNotFoundError:
+            return USEasternFallback()
+        except Exception:                   # corrupt tzdata / unexpected OSError
+            return USEasternFallback()
+    return USEasternFallback()
+
+
+NY_TZ = load_ny_tz()
 
 QUOTE_FIELDS = ["ts_utc", "bid", "ask", "spread", "spread_min", "spread_max",
                 "n_ok", "n_bad", "tick_age_s", "srv_offset_s", "flags"]
