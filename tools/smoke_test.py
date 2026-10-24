@@ -764,6 +764,9 @@ check("O: autosync.sh targets /opt/nasdaq and uses static mt5quotes-nasdaq STALE
       "/opt/nasdaq" in auto_src
       and "systemctl status mt5quotes-nasdaq" in auto_src
       and "XM quote logger stopped writing - check: systemctl status mt5quotes-nasdaq" in auto_src)
+check("O: autosync.sh pins git user.name to 'nasdaq-autosync' (a pre-rename clone cannot leak the old identity)",
+      'git config user.name "nasdaq-autosync"' in auto_src
+      and "git config user.name  >/dev/null 2>&1 ||" not in auto_src)
 
 # ==============================================================================
 # Scenario P: tools/mt5_executor.py + LIVE bridge + deploy/*.service audit
