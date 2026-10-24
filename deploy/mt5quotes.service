@@ -1,11 +1,22 @@
 # Read-only XM US100Cash quote + M15 shadow-candle + contract-spec logger
 #
-# Install (substitute your Linux user; NEVER put a login or password in this file):
+# Install (root is the live VPS user - WINEPREFIX stays in /root, not /home/root;
+# NEVER put a login or password in this file):
 #   sudo cp /opt/nasdaq/deploy/mt5quotes.service /etc/systemd/system/mt5quotes-nasdaq.service
-#   sudo sed -i "s/YOUR_LINUX_USER/$USER/g" /etc/systemd/system/mt5quotes-nasdaq.service
+#   sudo sed -i "s|YOUR_LINUX_USER|root|g; s|/home/root/.mt5|/root/.mt5|g" \
+#       /etc/systemd/system/mt5quotes-nasdaq.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now mt5quotes-nasdaq
 #   journalctl -u mt5quotes-nasdaq -f
+#
+# Non-root user instead of root? Substitute your own login (e.g. 'trader') and the
+# sed keeps WINEPREFIX=/home/<user>/.mt5 - root's home is /root, never /home/root.
+#
+# Windows/Wine Python has no IANA timezone database, so America/New_York lookups
+# (CME quiet hours, ET labels) raise ZoneInfoNotFoundError until tzdata exists in
+# the Wine interpreter. tools/mt5_quotes.py then falls back to a stdlib fixed-rule
+# US Eastern tzinfo - install tzdata so zoneinfo stays authoritative:
+#   WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -m pip install tzdata
 
 [Unit]
 Description=XM US100Cash quote + M15 candle + contract-spec logger (read-only Wine sidecar)
@@ -24,7 +35,7 @@ Environment=MT5_QUOTES_INTERVAL=30
 Environment=MT5_QUOTES_POLL=5
 Environment=MT5_QUOTES_BACKFILL_BARS=12000
 Environment=MT5_QUOTES_SKIP_QUIET=1
-Environment="MT5_QUOTES_LABEL=XM US100Cash demo"
+Environment="MT5_QUOTES_LABEL=XM US100Cash"
 ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:/Python312/python.exe Z:/opt/nasdaq/tools/mt5_quotes.py
 Restart=always
 RestartSec=15

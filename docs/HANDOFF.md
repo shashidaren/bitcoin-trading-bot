@@ -3,8 +3,8 @@
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-24 00:00 |
-| data_collection | 4200 |
+| as_of_utc | 2026-10-24 15:37 |
+| data_collection | 4202 |
 | closed_trades | 0 |
 | wins_losses | 0W/0L |
 | win_rate_pct | 0.0 |
@@ -75,15 +75,15 @@ This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on 
 |---|---|---|---|
 | `nasdaq-engine` | `deploy/nasdaq-engine.service` | `/opt/nasdaq/venv/bin/python` | Runs `engine.py` |
 | `nasdaq-dashboard` | `deploy/nasdaq-dashboard.service` | `/opt/nasdaq/venv/bin/python` | Runs `dashboard.py` on `0.0.0.0:6001` |
-| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine Python (`~/.mt5`) | Runs `tools/mt5_feed.py` (`mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json`) |
-| `mt5quotes-nasdaq` | `deploy/mt5quotes.service` | Wine Python (`~/.mt5`) | Runs read-only `tools/mt5_quotes.py` (`xm_data/` + 12,000-bar `candles_m15.csv` backfill) |
-| `mt5exec-nasdaq` | `deploy/mt5exec.service` | Wine Python (`~/.mt5`) | Runs `tools/mt5_executor.py` (`MT5_EXEC_ENABLED=0` dormant until armed) |
+| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine Python (`/root/.mt5`) | Runs `tools/mt5_feed.py` (`mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json`) |
+| `mt5quotes-nasdaq` | `deploy/mt5quotes.service` | Wine Python (`/root/.mt5`) | Runs read-only `tools/mt5_quotes.py` (`xm_data/` + 12,000-bar `candles_m15.csv` backfill) |
+| `mt5exec-nasdaq` | `deploy/mt5exec.service` | Wine Python (`/root/.mt5`) | Runs `tools/mt5_executor.py` (`MT5_EXEC_ENABLED=0` dormant until armed) |
 
 ---
 
 ## 5. Immediate Next Operational Milestones
 
-1. **Cut over VPS to `/opt/nasdaq`** using `docs/NASDAQ-RESTRUCTURE-2026-10-24.md`.
+1. **Keep the `/opt/nasdaq` stack healthy** (`docs/NASDAQ-OPS.md`): `mt5feed-nasdaq`, `mt5quotes-nasdaq`, `mt5exec-nasdaq` (Wine, `WINEPREFIX=/root/.mt5`) plus `nasdaq-engine` / `nasdaq-dashboard`; run `tools/check_data.py` + `tools/xm_quote_report.py --quiet` after any restart.
 2. **Verify `xm_data/symbol_spec.json` and 12,000-bar backfill:** Once `mt5quotes-nasdaq` runs its first cycle against the logged-in XM terminal, `xm_data/candles_m15.csv` will immediately hold ~6 months of XM `US100Cash` M15 history. Run `tools/backtest.py` and `tools/xm_quote_report.py` right away!
 3. **Complete Stage B Demo Soak (`docs/START-LEVER1.md`):** Keep `MT5_EXEC_ALLOW_REAL=0`, enable `MT5_EXEC_ENABLED=1` and `TRADING_MODE=LIVE` on an XM **demo** account, and verify 5–10 live round-trips match `trades.csv` and `status.json`.
 
@@ -124,7 +124,7 @@ Before switching `MT5_EXEC_ALLOW_REAL=1` on a real-money XM account (`docs/START
 
 ## 8. Key Reference Docs
 
-- `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` — `US100Cash` M15 architecture & VPS cutover guide
+- `docs/NASDAQ-OPS.md` — `/opt/nasdaq` install, systemd service map, Wine `tzdata` setup & triage runbook
 - `docs/START-LEVER1.md` — Wine `mt5_executor.py` Stage A/B/C live execution protocol
 - `docs/XM-LOGGER.md` — Read-only `mt5_quotes.py` & `xm_quote_report.py` reference
 - `docs/AUTOSYNC.md` — Unattended 15-min data sync & smoke-gated auto-deploy

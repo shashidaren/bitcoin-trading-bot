@@ -2,7 +2,7 @@
 
 Automated intraday structural floor/ceiling rejection trading system for XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles, deployed on Linux (`/opt/nasdaq`) alongside a Wine MetaTrader 5 sidecar stack.
 
-> Start every session at `docs/HANDOFF.md`. For server setup and cutover instructions, see `docs/NASDAQ-RESTRUCTURE-2026-10-24.md`.
+> Start every session at `docs/HANDOFF.md`. For server install, service layout, and troubleshooting, see `docs/NASDAQ-OPS.md`.
 
 ---
 
@@ -52,6 +52,6 @@ python3 tools/xm_quote_report.py
 python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 ```
 
-## Server Cutover (`/opt/nasdaq`)
+## Server Operations (`/opt/nasdaq`)
 
-See `docs/NASDAQ-RESTRUCTURE-2026-10-24.md` for step-by-step commands to deploy `/opt/nasdaq`, install the `deploy/*.service` systemd units, verify `mt5feed-nasdaq` + `mt5quotes-nasdaq`, and run Stage B demo validation (`docs/START-LEVER1.md`) before arming `LIVE` mode.
+See `docs/NASDAQ-OPS.md` for step-by-step commands to install `/opt/nasdaq`, install the `deploy/*.service` systemd units (root uses `WINEPREFIX=/root/.mt5`), install `tzdata` into the Wine interpreter, verify `mt5feed-nasdaq` + `mt5quotes-nasdaq`, and troubleshoot stale feeds — then run Stage B demo validation (`docs/START-LEVER1.md`) before arming `LIVE` mode.
