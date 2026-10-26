@@ -73,7 +73,7 @@ Then confirm the bot identity is current (`git config user.name` should print `n
 |---|---|---|---|---|
 | `nasdaq-engine` | `deploy/nasdaq-engine.service` | `/opt/nasdaq/venv/bin/python` | `engine.py` — closed `M15` evaluation + `FORWARD_TEST`/`LIVE` | `journalctl -u nasdaq-engine -f` |
 | `nasdaq-dashboard` | `deploy/nasdaq-dashboard.service` | `/opt/nasdaq/venv/bin/python` | `dashboard.py` on `0.0.0.0:6001` | `curl -s localhost:6001/healthz` |
-| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine (`/root/.mt5`) | `tools/mt5_feed.py` → `mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json` | file mtime < 20 min |
+| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine (`/root/.mt5`) | `tools/mt5_feed.py` → `mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json` + heartbeat `mt5_feed_health.json` | `python3 tools/feed_doctor.py` → `OK` |
 | `mt5quotes-nasdaq` | `deploy/mt5quotes.service` | Wine (`/root/.mt5`) | read-only `tools/mt5_quotes.py` → `xm_data/` + 12,000-bar `candles_m15.csv` | `xm_quote_report.py --quiet` |
 | `mt5exec-nasdaq` | `deploy/mt5exec.service` | Wine (`/root/.mt5`) | `tools/mt5_executor.py` bridge (`MT5_EXEC_ENABLED=0` dormant) | `mt5_bridge/result.json` |
 
@@ -85,6 +85,7 @@ Then confirm the bot identity is current (`git config user.name` should print `n
 
 ```bash
 cd /opt/nasdaq
+python3 tools/feed_doctor.py           # WHY is the M15 feed stale? (reason + heartbeat + witness)
 python3 tools/check_data.py            # CSV integrity + freshness (market-hours aware)
 python3 tools/handoff_check.py         # docs/HANDOFF.md snapshot vs live data
 python3 tools/smoke_test.py            # offline regression suite (engine/filter/sidecars/units)
@@ -100,7 +101,9 @@ python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | `mt5quotes-nasdaq` restart loop, `exit 2` | 15+ min without quotes during open market | `systemctl status mt5quotes-nasdaq`; confirm MT5 terminal logged in under `/root/.mt5`; check `xm_data/quotes-*.csv` flags |
-| Feed stale but market open | Terminal not running / wrong prefix / `US100Cash` not in Market Watch | `systemctl show mt5feed-nasdaq -p Environment` → expect `WINEPREFIX=/root/.mt5` |
+| Feed stale but market open | Terminal not running / wrong prefix / `US100Cash` not in Market Watch | `python3 tools/feed_doctor.py`; then `systemctl show mt5feed-nasdaq -p Environment` → expect `WINEPREFIX=/root/.mt5` |
+| `FEED_SYMBOL_MISMATCH` in `journal.csv` | another MT5 stack on the VPS writes the same `MT5_FEED_FILE` | give every stack its own feed/warm-up/order paths — `docs/STALE-FEED-TRIAGE.md` |
+| `mt5_feed_health.json` says `TICK_FROZEN` / `OFFSET_UNKNOWN` | terminal has no live ticks (competing login with the same XM account, broker disconnect) | `docs/STALE-FEED-TRIAGE.md` §3, then `systemctl restart mt5feed-nasdaq` |
 | `ZoneInfoNotFoundError: America/New_York` | Wine python without `tzdata` | `WINEPREFIX=/root/.mt5 wine C:/Python312/python.exe -m pip install tzdata` (fixed-rule fallback keeps the bot trading meanwhile — see `docs/XM-LOGGER.md`) |
 | `LOT_SIZE 0.10 outside broker [...]` | Symbol spec not loaded | enable `US100Cash` in Market Watch, restart `mt5feed-nasdaq` |
 | Autosync not deploying code | `/opt/nasdaq` working tree dirty | never edit live code on the server; commit from a dev checkout |

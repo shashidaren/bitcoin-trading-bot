@@ -19,6 +19,8 @@ WorkingDirectory=/opt/nasdaq
 Environment=NASDAQ_DATA_DIR=/opt/nasdaq
 Environment=DATA_SOURCE=MT5
 Environment=SYMBOL_MT5=US100Cash
+Environment=MT5_FEED_FILE=/opt/nasdaq/mt5_last_candle.json
+Environment=MT5_FEED_HEALTH_FILE=/opt/nasdaq/mt5_feed_health.json
 ExecStart=/opt/nasdaq/venv/bin/python /opt/nasdaq/engine.py
 Restart=always
 RestartSec=10
