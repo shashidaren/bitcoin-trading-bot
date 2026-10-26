@@ -16,6 +16,7 @@ Automated intraday structural floor/ceiling rejection trading system for XM's **
 | **MT5 Quote & Shadow Logger** | `tools/mt5_quotes.py` | Wine Python (`mt5quotes-nasdaq`) | Strictly read-only logger recording live bid/ask spreads, contract specs, and 12,000 backfilled `M15` candles (`xm_data/candles_m15.csv`) |
 | **MT5 Order Executor Sidecar** | `tools/mt5_executor.py` | Wine Python (`mt5exec-nasdaq`) | Dormant (`MT5_EXEC_ENABLED=0`) and demo-locked (`MT5_EXEC_ALLOW_REAL=0`) by default; bridges Linux `LIVE` intents to MT5 via `/opt/nasdaq/mt5_bridge/` |
 | **Web Dashboard** | `dashboard.py` + `pressure.py` | Linux Python (`:6001`) | Read-only Flask UI showing live `US100Cash` `M15` funnel, net-of-spread P&L (`$0.25`/trade at `0.10` lot), and 60-bar (15h) tape pressure |
+| **Feed Diagnosis** | `feed_health.py` + `tools/feed_doctor.py` | Linux Python | Classifies every "no fresh M15 bar" cause (missing file / unreadable / schema / foreign symbol / frozen candle / clock skew), reads the sidecar heartbeat (`mt5_feed_health.json`), and proves whether MT5 itself is alive via the quote-logger witness |
 | **Autosync & Safe Deploy** | `tools/autosync.sh` | Cron (`root`, every 15m) | Commits live data, pulls upstream merges gated by `tools/smoke_test.py`, runs `check_data.py` + `handoff_check.py` + `xm_quote_report.py` |
 
 ---
@@ -43,11 +44,14 @@ python3 tools/smoke_test.py
 # 2. LIVE execution safety probe (direct MetaTrader5 + Linux Wine mt5_bridge)
 python3 tools/live_path_probe.py
 
-# 3. Data integrity & HANDOFF snapshot freshness
+# 3. Feed triage (reason + sidecar heartbeat + independent quote-logger witness)
+python3 tools/feed_doctor.py
+
+# 4. Data integrity & HANDOFF snapshot freshness
 python3 tools/check_data.py
 python3 tools/handoff_check.py
 
-# 4. XM US100Cash quote/spread/cost/parity report & 12,000-bar M15 historical backtest
+# 5. XM US100Cash quote/spread/cost/parity report & 12,000-bar M15 historical backtest
 python3 tools/xm_quote_report.py
 python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 ```

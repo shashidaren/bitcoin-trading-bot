@@ -75,7 +75,7 @@ This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on 
 |---|---|---|---|
 | `nasdaq-engine` | `deploy/nasdaq-engine.service` | `/opt/nasdaq/venv/bin/python` | Runs `engine.py` |
 | `nasdaq-dashboard` | `deploy/nasdaq-dashboard.service` | `/opt/nasdaq/venv/bin/python` | Runs `dashboard.py` on `0.0.0.0:6001` |
-| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine Python (`/root/.mt5`) | Runs `tools/mt5_feed.py` (`mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json`) |
+| `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine Python (`/root/.mt5`) | Runs `tools/mt5_feed.py` (`mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json` + `mt5_feed_health.json` heartbeat) |
 | `mt5quotes-nasdaq` | `deploy/mt5quotes.service` | Wine Python (`/root/.mt5`) | Runs read-only `tools/mt5_quotes.py` (`xm_data/` + 12,000-bar `candles_m15.csv` backfill) |
 | `mt5exec-nasdaq` | `deploy/mt5exec.service` | Wine Python (`/root/.mt5`) | Runs `tools/mt5_executor.py` (`MT5_EXEC_ENABLED=0` dormant until armed) |
 
@@ -93,6 +93,7 @@ This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on 
 
 ```bash
 # Always run integrity + freshness + regression checks first:
+python3 tools/feed_doctor.py          # feed reason/heartbeat/witness (exit 0 OK, 1 stale, 2 broken)
 python3 tools/check_data.py
 python3 tools/handoff_check.py
 python3 tools/smoke_test.py
@@ -125,6 +126,7 @@ Before switching `MT5_EXEC_ALLOW_REAL=1` on a real-money XM account (`docs/START
 ## 8. Key Reference Docs
 
 - `docs/NASDAQ-OPS.md` — `/opt/nasdaq` install, systemd service map, Wine `tzdata` setup & triage runbook
+- `docs/STALE-FEED-TRIAGE.md` — STALE_FEED/FEED_* reason taxonomy, sidecar heartbeat, shared-VPS/shared-login checklist
 - `docs/START-LEVER1.md` — Wine `mt5_executor.py` Stage A/B/C live execution protocol
 - `docs/XM-LOGGER.md` — Read-only `mt5_quotes.py` & `xm_quote_report.py` reference
 - `docs/AUTOSYNC.md` — Unattended 15-min data sync & smoke-gated auto-deploy

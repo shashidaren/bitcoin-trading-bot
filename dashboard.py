@@ -2,8 +2,10 @@
 import csv
 import json
 import os
+import time
 from flask import Flask, render_template_string
 
+import feed_health
 import pressure as tape_pressure
 
 app = Flask(__name__)
@@ -13,6 +15,50 @@ LOG_FILE_PATH = os.getenv("NASDAQ_LOG_FILE", os.path.join(DATA_DIR, "forward_tes
 STATUS_FILE_PATH = os.getenv("NASDAQ_STATUS_FILE", os.path.join(DATA_DIR, "status.json"))
 TRADES_FILE_PATH = os.getenv("NASDAQ_TRADES_FILE", os.path.join(DATA_DIR, "trades.csv"))
 JOURNAL_FILE_PATH = os.getenv("NASDAQ_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
+MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", os.path.join(DATA_DIR, "mt5_last_candle.json"))
+MT5_FEED_HEALTH_FILE = os.getenv("MT5_FEED_HEALTH_FILE", os.path.join(DATA_DIR, "mt5_feed_health.json"))
+
+
+def feed_banner(status, health_path=None, feed_path=None, now_epoch=None):
+    """Read-only feed verdict for the dashboard header.
+
+    Shows WHY there is no fresh M15 bar (missing file / foreign symbol / frozen
+    candle / silent sidecar) instead of only that the funnel is idle.
+    """
+    health_path = health_path or MT5_FEED_HEALTH_FILE
+    feed_path = feed_path or MT5_FEED_FILE
+    now = time.time() if now_epoch is None else float(now_epoch)
+    block = (status or {}).get("feed") or {}
+    health = feed_health.diagnose_sidecar_health(health_path, now)
+    diag = feed_health.diagnose_feed_file(feed_path, expected_symbol=(status or {}).get("symbol"),
+                                          now_epoch=now)
+    reason = diag.get("reason")
+    ok = bool(diag.get("ok")) or block.get("reason") == feed_health.REASON_OK
+
+    def _mins(seconds):
+        return "n/a" if seconds is None else (f"{seconds / 60:.0f} min" if seconds >= 90
+                                              else f"{seconds:.0f}s")
+
+    lines = []
+    if diag.get("exists"):
+        lines.append(f"last closed M15 bar: {diag.get('candle_open_utc')} UTC open "
+                     f"({_mins(diag.get('candle_age_s'))} old), file written "
+                     f"{_mins(diag.get('file_age_s'))} ago")
+    else:
+        lines.append(f"{os.path.basename(feed_path)} missing - the mt5feed sidecar is not publishing")
+    sidecar = feed_health.summarize_sidecar(health)
+    if sidecar:
+        lines.append(sidecar)
+    else:
+        lines.append("no mt5feed heartbeat yet (mt5_feed_health.json)")
+
+    return {
+        "ok": ok,
+        "reason": reason,
+        "detail": diag.get("detail") or block.get("detail"),
+        "frozen_since_utc": diag.get("frozen_since_utc") or block.get("frozen_since_utc"),
+        "lines": lines,
+    }
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -68,6 +114,17 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </header>
+
+        {% if feed and not feed.ok %}
+        <div role="status" class="bg-rose-950/60 border border-rose-700/60 text-rose-100 rounded-lg px-4 py-3 mb-5 text-sm">
+            <p class="font-semibold">M15 feed problem: {{ feed.reason }}</p>
+            <p class="text-rose-200/90">{{ feed.detail }}</p>
+            <ul class="mt-1 text-xs text-rose-300/80 list-disc list-inside">
+                {% for line in feed.lines %}<li>{{ line }}</li>{% endfor %}
+            </ul>
+            <p class="mt-1 text-xs text-rose-300/70">Triage: <code>python3 tools/feed_doctor.py</code></p>
+        </div>
+        {% endif %}
 
         {% if trade_stats_warning %}
         <div role="status" class="bg-amber-950/60 border border-amber-700/60 text-amber-200 rounded-lg px-4 py-3 mb-5 text-sm">
@@ -505,6 +562,7 @@ def index():
         pressure=pressure_read,
         location=location_read,
         trade_stats_warning=trade_stats_warning,
+        feed=feed_banner(status),
         journal=journal,
         journal_error=journal_error,
     )

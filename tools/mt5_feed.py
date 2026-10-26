@@ -4,11 +4,20 @@
 The Linux engine cannot import MetaTrader5 (no Linux wheels on PyPI), so this
 daemon runs under Wine Python in the SAME prefix as the XM MT5 terminal and
 publishes:
+
   1) Z:/opt/nasdaq/mt5_warmup_candles.json  (250 closed M15 bars on startup and
      refreshed periodically so engine.py warms EMA200/EMA50/RSI/ATR immediately
      on Day 0 instead of waiting 50 trading hours!)
   2) Z:/opt/nasdaq/mt5_last_candle.json     (latest closed M15 candle every 5s,
-     with broker-server time converted to UTC via a fresh tick offset)
+     with broker-server time converted to UTC via a fresh tick offset. The
+     payload is tagged with `symbol`/`timeframe`/`account` so a second MT5 stack
+     on the same VPS cannot silently feed this engine a foreign instrument.)
+  3) Z:/opt/nasdaq/mt5_feed_health.json     (heartbeat every poll: terminal
+     connected?, tick age, broker UTC offset, last error, reconnect count. This
+     is what distinguishes "the unit is active" from "the feed is healthy".)
+  4) Z:/opt/nasdaq/mt5_feed_offset.json     (the last learned broker/UTC offset,
+     so a restart can keep publishing before a fresh tick arrives instead of
+     going silent until the market moves.)
 
 Run (manual test):
   export WINEPREFIX=~/.mt5 && xvfb-run --auto-servernum \\
@@ -18,7 +27,7 @@ Or as a service (see deploy/mt5feed.service):
   sudo systemctl enable --now mt5feed-nasdaq
 
 Imports cleanly on Linux without MetaTrader5 so tools/smoke_test.py can import
-pure helpers (estimate_server_offset, build_warmup_payload) directly.
+pure helpers (estimate_server_offset, build_warmup_payload, ...) directly.
 """
 import json
 import os
@@ -34,10 +43,26 @@ except ImportError:
 SYMBOL = os.environ.get("MT5_FEED_SYMBOL", "US100Cash")
 OUT = os.environ.get("MT5_FEED_FILE", "Z:/opt/nasdaq/mt5_last_candle.json")
 WARMUP_OUT = os.environ.get("MT5_WARMUP_FILE", "Z:/opt/nasdaq/mt5_warmup_candles.json")
+HEALTH_OUT = os.environ.get("MT5_FEED_HEALTH_FILE", "Z:/opt/nasdaq/mt5_feed_health.json")
+OFFSET_FILE = os.environ.get("MT5_FEED_OFFSET_FILE", "Z:/opt/nasdaq/mt5_feed_offset.json")
 WARMUP_BARS = int(os.environ.get("MT5_WARMUP_BARS", "250"))
 WARMUP_REFRESH_S = 6 * 3600
 POLL = float(os.environ.get("MT5_FEED_POLL", "5"))
 TIMEFRAME_NAME = os.environ.get("MT5_FEED_TIMEFRAME", "M15").strip().upper()
+# A tick older than this means the terminal is not receiving market data (frozen
+# session, kicked login, dead Wine terminal). The engine sees a frozen candle.
+TICK_FROZEN_S = float(os.environ.get("MT5_FEED_FROZEN_S", "300"))
+RECONNECT_EVERY_S = float(os.environ.get("MT5_FEED_RECONNECT_S", "120"))
+
+# Heartbeat statuses (mirrored in feed_health.summarize_sidecar / docs)
+ST_OK = "OK"
+ST_INIT_FAILED = "INIT_FAILED"
+ST_SYMBOL_FAILED = "SYMBOL_SELECT_FAILED"
+ST_TERMINAL_DOWN = "TERMINAL_DISCONNECTED"
+ST_NO_TICK = "NO_TICK"
+ST_TICK_FROZEN = "TICK_FROZEN"
+ST_OFFSET_UNKNOWN = "OFFSET_UNKNOWN"
+ST_NO_RATES = "NO_RATES"
 
 
 def _resolve_timeframe(mt5_mod, tf_name: str):
@@ -54,6 +79,13 @@ def _resolve_timeframe(mt5_mod, tf_name: str):
 
 def utc_now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def utc_str(epoch) -> str:
+    try:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def atomic_write_json(path: str, payload: dict) -> None:
@@ -76,7 +108,43 @@ def estimate_server_offset(server_ts: int, now_epoch: float = None):
     return candidate
 
 
-def build_warmup_payload(rates, server_offset: int, symbol: str = SYMBOL, timeframe: str = TIMEFRAME_NAME) -> dict:
+def tick_age_seconds(tick_ts_srv, server_offset, now_epoch: float = None):
+    """Age of the terminal's newest tick in seconds (None if unknown)."""
+    if not tick_ts_srv or server_offset is None:
+        return None
+    now = time.time() if now_epoch is None else float(now_epoch)
+    return max(0.0, now - (int(tick_ts_srv) - int(server_offset)))
+
+
+def load_saved_offset(path: str = None):
+    """Broker/UTC offset persisted by a previous run (survives a restart)."""
+    path = OFFSET_FILE if path is None else path
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        offset = data.get("server_offset_s")
+        if offset is None:
+            return None
+        offset = int(offset)
+        if abs(offset) > 14 * 3600:
+            return None
+        return offset
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def persist_server_offset(server_offset: int, symbol: str = SYMBOL, account=None, path: str = None) -> None:
+    path = OFFSET_FILE if path is None else path
+    atomic_write_json(path, {
+        "symbol": symbol,
+        "account": account,
+        "server_offset_s": int(server_offset),
+        "updated_at": utc_now_str(),
+    })
+
+
+def build_warmup_payload(rates, server_offset: int, symbol: str = SYMBOL,
+                         timeframe: str = TIMEFRAME_NAME, account=None) -> dict:
     """Convert historical MT5 rate rows into UTC warm-up candles for engine.py."""
     candles = []
     for r in rates or ():
@@ -94,45 +162,145 @@ def build_warmup_payload(rates, server_offset: int, symbol: str = SYMBOL, timefr
     return {
         "symbol": symbol,
         "timeframe": timeframe,
+        "account": account,
         "server_offset_s": int(server_offset),
         "updated_at": utc_now_str(),
         "candles": candles,
     }
 
 
+def build_last_candle_payload(rate, server_offset: int, symbol: str = SYMBOL,
+                              timeframe: str = TIMEFRAME_NAME, account=None) -> dict:
+    """Latest CLOSED M15 bar as the engine expects it, tagged with its instrument."""
+    srv_ts = int(rate["time"])
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "account": account,
+        "ts": srv_ts - int(server_offset),
+        "server_ts": srv_ts,
+        "server_offset_s": int(server_offset),
+        "open": float(rate["open"]),
+        "high": float(rate["high"]),
+        "low": float(rate["low"]),
+        "close": float(rate["close"]),
+        "tick_volume": int(rate["tick_volume"]),
+        "updated_at": utc_now_str(),
+    }
+
+
+def build_health_payload(status: str, symbol: str = SYMBOL, timeframe: str = TIMEFRAME_NAME,
+                         account=None, connected=None, tick_age_s=None, server_offset_s=None,
+                         last_candle_payload=None, last_error=None, reconnects=0,
+                         started_epoch=None, extra=None) -> dict:
+    """Heartbeat the engine/tools/feed_doctor.py read to explain a silent feed."""
+    candle_ts = None
+    if last_candle_payload:
+        candle_ts = last_candle_payload.get("ts")
+    payload = {
+        "schema": 1,
+        "status": status,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "account": account,
+        "terminal_connected": connected,
+        "tick_age_s": None if tick_age_s is None else round(float(tick_age_s), 1),
+        "server_offset_s": server_offset_s,
+        "last_candle_open_utc": utc_str(candle_ts),
+        "last_candle_written_utc": (last_candle_payload or {}).get("updated_at"),
+        "last_error": last_error,
+        "reconnects": int(reconnects),
+        "updated_at": utc_now_str(),
+        "pid": os.getpid(),
+        "uptime_s": None if started_epoch is None else round(time.time() - started_epoch, 1),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def write_health(status: str, **kwargs) -> None:
+    try:
+        atomic_write_json(HEALTH_OUT, build_health_payload(status, **kwargs))
+    except Exception as e:                      # never let the heartbeat kill the feed
+        print(f"mt5_feed: health write failed: {e}", flush=True)
+
+
+def _account_label(account) -> str:
+    """Login only - never a password/server string. Used to spot login collisions."""
+    if account is None:
+        return None
+    login = getattr(account, "login", None)
+    return str(login) if login is not None else None
+
+
+def _exit_with(status: str, message: str, account=None, started_epoch=None) -> None:
+    """Record a hard failure in the heartbeat before exiting (systemd restarts)."""
+    print(f"mt5_feed: {message}", flush=True)
+    write_health(status, account=account, last_error=message, started_epoch=started_epoch)
+    sys.exit(1)
+
+
 def main(mt5_mod=None) -> int:
     m = mt5 if mt5_mod is None else mt5_mod
+    started = time.time()
     if m is None:
-        print("mt5_feed: MetaTrader5 package missing - install it in the WINE python:")
-        print("  wine C:/Python312/python.exe -m pip install MetaTrader5")
+        print("mt5_feed: MetaTrader5 package missing - install it in the WINE python:", flush=True)
+        print("  wine C:/Python312/python.exe -m pip install MetaTrader5", flush=True)
         sys.exit(1)
 
     timeframe = _resolve_timeframe(m, TIMEFRAME_NAME)
     if not m.initialize():
-        print(f"mt5_feed: MT5 initialize failed: {m.last_error()} "
-              f"(is the terminal running and logged in in this prefix?)", flush=True)
-        sys.exit(1)
+        _exit_with(ST_INIT_FAILED,
+                   f"MT5 initialize failed: {m.last_error()} "
+                   "(is the terminal running and logged in in this prefix?)",
+                   started_epoch=started)
     if not m.symbol_select(SYMBOL, True):
-        print(f"mt5_feed: symbol_select({SYMBOL}) failed: {m.last_error()} "
-              f"(check exact symbol name in XM Market Watch, e.g. US100Cash)", flush=True)
-        sys.exit(1)
-    account = m.account_info()
-    acct = f" | account {account.login}" if account else ""
+        _exit_with(ST_SYMBOL_FAILED,
+                   f"symbol_select({SYMBOL}) failed: {m.last_error()} "
+                   "(check exact symbol name in XM Market Watch, e.g. US100Cash)",
+                   started_epoch=started)
+
+    try:
+        account = _account_label(m.account_info())
+    except Exception:
+        account = None
+    acct = f" | account {account}" if account else ""
     print(f"mt5_feed: publishing closed {TIMEFRAME_NAME} {SYMBOL} candles -> {OUT}{acct}", flush=True)
-    server_offset = None
+
+    # Keep publishing across restarts even before a fresh tick arrives.
+    server_offset = load_saved_offset()
+    if server_offset is not None:
+        print(f"mt5_feed: resumed broker UTC offset {server_offset:+d}s from {OFFSET_FILE}", flush=True)
+
     prev_tick_ts = None
     last_warmup_write = 0.0
+    last_candle_payload = None
+    last_error = None
+    reconnects = 0
+    last_reconnect_mono = 0.0
+    status = ST_OK if server_offset is not None else ST_OFFSET_UNKNOWN
 
     while True:
         try:
+            try:
+                tinfo = m.terminal_info()
+                connected = bool(getattr(tinfo, "connected", False)) if tinfo is not None else None
+            except Exception:
+                connected = None
+
             tick = m.symbol_info_tick(SYMBOL)
             tick_ts = int(getattr(tick, "time", 0) or 0) if tick else 0
             if tick_ts and (prev_tick_ts is None or tick_ts != prev_tick_ts):
                 learned = estimate_server_offset(tick_ts)
-                if learned is not None:
+                if learned is not None and learned != server_offset:
+                    if server_offset is not None:
+                        print(f"mt5_feed: broker UTC offset {server_offset:+d}s -> {learned:+d}s", flush=True)
                     server_offset = learned
+                    persist_server_offset(server_offset, SYMBOL, account)
             if tick_ts:
                 prev_tick_ts = tick_ts
+            age = tick_age_seconds(tick_ts, server_offset)
 
             now_mono = time.monotonic()
             if server_offset is not None and WARMUP_BARS > 0 and (
@@ -140,37 +308,82 @@ def main(mt5_mod=None) -> int:
             ):
                 hist = m.copy_rates_from_pos(SYMBOL, timeframe, 1, WARMUP_BARS)
                 if hist is not None and len(hist) > 0:
-                    warm_payload = build_warmup_payload(hist, server_offset, SYMBOL, TIMEFRAME_NAME)
+                    warm_payload = build_warmup_payload(hist, server_offset, SYMBOL,
+                                                        TIMEFRAME_NAME, account)
                     atomic_write_json(WARMUP_OUT, warm_payload)
                     last_warmup_write = now_mono
                     print(f"mt5_feed: wrote {len(warm_payload['candles'])} {TIMEFRAME_NAME} warm-up bars -> {WARMUP_OUT}",
                           flush=True)
 
-            rates = m.copy_rates_from_pos(SYMBOL, timeframe, 1, 1)
-            if rates is not None and len(rates) > 0 and server_offset is not None:
-                r = rates[0]
-                server_ts = int(r["time"])
-                payload = {
-                    "ts": server_ts - server_offset,
-                    "server_ts": server_ts,
-                    "server_offset_s": server_offset,
-                    "open": float(r["open"]),
-                    "high": float(r["high"]),
-                    "low": float(r["low"]),
-                    "close": float(r["close"]),
-                    "tick_volume": int(r["tick_volume"]),
-                    "updated_at": utc_now_str(),
-                }
-                atomic_write_json(OUT, payload)
-            elif server_offset is None:
-                print(f"mt5_feed: waiting for a fresh {SYMBOL} tick to learn broker UTC offset...", flush=True)
+            if server_offset is None:
+                status = ST_OFFSET_UNKNOWN
+                last_error = "waiting for a fresh tick to learn the broker UTC offset"
+                print(f"mt5_feed: {last_error} (no feed file written until then)", flush=True)
             else:
-                print(f"mt5_feed: no {TIMEFRAME_NAME} data for {SYMBOL}: {m.last_error()}", flush=True)
+                rates = m.copy_rates_from_pos(SYMBOL, timeframe, 1, 1)
+                if rates is not None and len(rates) > 0:
+                    last_candle_payload = build_last_candle_payload(rates[0], server_offset, SYMBOL,
+                                                                    TIMEFRAME_NAME, account)
+                    atomic_write_json(OUT, last_candle_payload)
+                    if age is not None and age > TICK_FROZEN_S:
+                        status = ST_TICK_FROZEN
+                        last_error = (f"terminal tick is {age / 60:.0f} min old - no live data "
+                                      "(session kicked? second terminal on the same login?)")
+                        print(f"mt5_feed: {last_error}", flush=True)
+                    elif connected is False:
+                        status = ST_TERMINAL_DOWN
+                        last_error = "terminal_info().connected is False"
+                    else:
+                        status = ST_OK
+                        last_error = None
+                else:
+                    status = ST_NO_RATES
+                    last_error = f"copy_rates_from_pos failed: {m.last_error()}"
+                    print(f"mt5_feed: no {TIMEFRAME_NAME} data for {SYMBOL}: {last_error}", flush=True)
+
+                # Frozen tick -> one bounded reconnect attempt (never a tight loop).
+                if status == ST_TICK_FROZEN and (now_mono - last_reconnect_mono) >= RECONNECT_EVERY_S:
+                    last_reconnect_mono = now_mono
+                    reconnects += 1
+                    print(f"mt5_feed: reconnect attempt #{reconnects} (shutdown + initialize)", flush=True)
+                    try:
+                        m.shutdown()
+                    except Exception:
+                        pass
+                    try:
+                        if m.initialize():
+                            m.symbol_select(SYMBOL, True)
+                        else:
+                            last_error = f"re-initialize failed: {m.last_error()}"
+                    except Exception as e:
+                        last_error = f"re-initialize error: {e}"
+
+            write_health(
+                status,
+                symbol=SYMBOL,
+                timeframe=TIMEFRAME_NAME,
+                account=account,
+                connected=connected,
+                tick_age_s=age,
+                server_offset_s=server_offset,
+                last_candle_payload=last_candle_payload,
+                last_error=last_error,
+                reconnects=reconnects,
+                started_epoch=started,
+                extra={"feed_file": OUT, "warmup_file": WARMUP_OUT},
+            )
             time.sleep(POLL)
         except KeyboardInterrupt:
             break
         except Exception as e:
             print(f"mt5_feed: error: {e} (retrying)", flush=True)
+            try:
+                write_health(ST_NO_RATES, symbol=SYMBOL, timeframe=TIMEFRAME_NAME, account=account,
+                             server_offset_s=server_offset, last_candle_payload=last_candle_payload,
+                             last_error=f"{type(e).__name__}: {e}", reconnects=reconnects,
+                             started_epoch=started)
+            except Exception:
+                pass
             time.sleep(POLL)
     m.shutdown()
     print("mt5_feed: stopped", flush=True)

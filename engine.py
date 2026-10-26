@@ -27,6 +27,7 @@ try:
 except ImportError:
     def load_dotenv(*_a, **_kw):
         return False
+import feed_health
 from trade_filter import (
     MAX_DAILY_LOSSES,
     get_daily_sl_count,
@@ -114,6 +115,8 @@ STATUS_FILE_PATH = os.getenv("NASDAQ_STATUS_FILE", os.path.join(DATA_DIR, "statu
 MT5_FEED_FILE = os.getenv("MT5_FEED_FILE", os.path.join(DATA_DIR, "mt5_last_candle.json"))
 MT5_WARMUP_FILE = os.getenv("MT5_WARMUP_FILE", os.path.join(DATA_DIR, "mt5_warmup_candles.json"))
 MT5_ORDER_DIR = os.getenv("MT5_ORDER_DIR", os.path.join(DATA_DIR, "mt5_bridge"))
+# Heartbeat written by tools/mt5_feed.py every poll (status, tick age, broker offset).
+MT5_FEED_HEALTH_FILE = os.getenv("MT5_FEED_HEALTH_FILE", os.path.join(DATA_DIR, "mt5_feed_health.json"))
 JOURNAL_FILE_PATH = os.getenv("NASDAQ_JOURNAL_FILE", os.path.join(DATA_DIR, "journal.csv"))
 
 SYMBOL_FILLING_FOK = 1
@@ -316,6 +319,10 @@ class NasdaqEngine:
 
         self._last_price_mono = None
         self._last_stale_alert_mono = None
+        self._feed_diag = None          # feed_health.diagnose_feed_file() result of the last poll
+        self._feed_health = None        # feed_health.diagnose_sidecar_health() result
+        self._last_feed_log_mono = None  # throttle for the "no feed" stdout line
+        self._start_mono = time.monotonic()
 
         # Buy Funnel Counters
         self.hit_tested_floor = 0
@@ -355,10 +362,7 @@ class NasdaqEngine:
             self._reconcile_live_on_startup()
             self.save_status()
         elif DATA_SOURCE == "MT5":
-            if os.path.isfile(MT5_FEED_FILE):
-                print(f"MT5 feed file found: {MT5_FEED_FILE}")
-            else:
-                print(f"NOTE: {MT5_FEED_FILE} not found yet - is the mt5feed-nasdaq sidecar running?")
+            self._report_feed_at_boot()
             self.load_history_from_csv()
             self.load_warmup_from_mt5()
             self.save_status()
@@ -736,6 +740,7 @@ class NasdaqEngine:
             "daily_losses": daily_losses,
             "max_daily_losses": MAX_DAILY_LOSSES,
             "last_update": utc_now_str(),
+            "feed": self.feed_status(),
             "rsi": round(self.rsi, 1) if self.rsi else None,
             "ema_fast": round(self.ema_fast, 2) if self.ema_fast else None,
             "ema_slow": round(self.ema_slow, 2) if self.ema_slow else None,
@@ -799,39 +804,85 @@ class NasdaqEngine:
         stale_seconds: float,
         source: str = "price ticks",
         recovery: str = "check the feed",
+        event: str = "STALE_FEED",
+        detail: str = None,
     ) -> bool:
         if self._last_stale_alert_mono is not None and \
                 time.monotonic() - self._last_stale_alert_mono < STALE_ALERT_COOLDOWN_SECONDS:
             return False
         self._last_stale_alert_mono = time.monotonic()
-        self.journal(
-            "STALE_FEED",
-            f"no {source} for {stale_seconds / 60:.0f} min - {recovery}",
-        )
+        if detail is None:
+            detail = f"no {source} for {stale_seconds / 60:.0f} min - {recovery}"
+        self.journal(event, detail)
         return True
 
+    def feed_status(self) -> dict:
+        """Compact feed diagnosis for status.json (reason, freeze instant, sidecar)."""
+        diag = self._feed_diag
+        if not diag:
+            return {"ok": None, "reason": "NOT_CHECKED", "path": MT5_FEED_FILE,
+                    "checked_utc": utc_now_str()}
+        health = self._feed_health or {}
+        return {
+            "ok": bool(diag.get("ok")),
+            "reason": diag.get("reason"),
+            "detail": diag.get("detail"),
+            "path": diag.get("path"),
+            "symbol": diag.get("symbol"),
+            "candle_open_utc": diag.get("candle_open_utc"),
+            "candle_age_s": round(diag["candle_age_s"], 1) if diag.get("candle_age_s") is not None else None,
+            "frozen_since_utc": diag.get("frozen_since_utc"),
+            "file_age_s": round(diag["file_age_s"], 1) if diag.get("file_age_s") is not None else None,
+            "sidecar": {
+                "status": health.get("status"),
+                "heartbeat_age_s": round(health["age_s"], 1) if health.get("age_s") is not None else None,
+                "fresh": health.get("fresh"),
+                "tick_age_s": health.get("tick_age_s"),
+                "server_offset_s": health.get("server_offset_s"),
+                "last_error": health.get("last_error"),
+            } if health.get("present") else None,
+            "checked_utc": utc_now_str(),
+        }
+
     def mt5_feed_is_stale(self, rates, now_mono=None, now_epoch=None) -> bool:
-        """Alert and return True when the MT5 M15 feed has stalled during open market hours."""
-        candle_ts = latest_closed_candle_ts(rates)
-        if candle_ts is not None:
-            stale_seconds = mt5_closed_candle_age_seconds(candle_ts, now_epoch)
-        else:
-            stale_seconds = self.feed_stale_seconds(now_mono)
-        if stale_seconds <= STALE_FEED_SECONDS:
+        """Alert and return True when the MT5 M15 feed is unusable during open market hours.
+
+        "Stale" now means one of: the sidecar's feed file is missing/unreadable, it
+        carries a foreign symbol, its bar is in the future, or the bar is older than
+        STALE_FEED_SECONDS. The reported age is always the *feed's* age (bar close or
+        file mtime), never this process's uptime, so an engine restart can no longer
+        turn a 890-minute outage into a fresh-looking "20 min" alert.
+        """
+        diag = self._feed_diag or feed_health.diagnose_feed_file(
+            MT5_FEED_FILE,
+            expected_symbol=SYMBOL_MT5,
+            now_epoch=now_epoch,
+            candle_seconds=CANDLE_SECONDS,
+            max_age_s=STALE_FEED_SECONDS,
+        )
+        if diag.get("ok"):
             return False
 
         now_dt = datetime.fromtimestamp(now_epoch, tz=timezone.utc) if now_epoch is not None else None
         if is_market_quiet(now_dt):
             return True
 
+        self._feed_health = feed_health.diagnose_sidecar_health(MT5_FEED_HEALTH_FILE, now_epoch)
+        event, detail = feed_health.format_feed_problem(
+            diag,
+            self._feed_health,
+            engine_uptime_s=self._engine_uptime_seconds(),
+        )
         if self.maybe_alert_stale_feed(
-            stale_seconds,
-            source="new closed M15 candles",
-            recovery="check the mt5feed sidecar",
+            diag.get("candle_age_s") or 0.0,
+            event=event,
+            detail=detail,
         ):
-            print(f"\nStale MT5 feed: no new closed M15 candles for {stale_seconds:.0f}s - "
-                  "check the mt5feed sidecar", flush=True)
+            print(f"\nFeed problem ({event}): {detail}", flush=True)
         return True
+
+    def _engine_uptime_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self._start_mono)
 
     def log_candle(self, timestamp, o, h, l, c, ratio, tick_count, vol_ma, dynamic_floor, ema_f, ema_s, tested, rejected, held, vol_conf, trend_conf, rsi_val, atr_val):
         file_exists = os.path.isfile(LOG_FILE_PATH)
@@ -1619,21 +1670,32 @@ class NasdaqEngine:
                 print(f"\nError: {e}")
                 time.sleep(10)
 
-    def read_mt5_feed(self):
-        """Read the latest closed M15 candle published by tools/mt5_feed.py."""
-        try:
-            with open(MT5_FEED_FILE) as f:
-                d = json.load(f)
-            return [{
-                "time": int(d["ts"]),
-                "open": float(d["open"]),
-                "high": float(d["high"]),
-                "low": float(d["low"]),
-                "close": float(d["close"]),
-                "tick_volume": int(d["tick_volume"]),
-            }]
-        except Exception:
+    def read_mt5_feed(self, now_epoch=None):
+        """Read + validate the latest closed M15 candle published by tools/mt5_feed.py.
+
+        Records a full diagnosis on the instance (`self._feed_diag`) so the stale
+        guard can report *why* a bar is missing instead of only that none arrived.
+        Returns None when the file is missing, unreadable, has a foreign schema or
+        carries a different symbol - a foreign bar must never reach the engine.
+        """
+        self._feed_diag = feed_health.diagnose_feed_file(
+            MT5_FEED_FILE,
+            expected_symbol=SYMBOL_MT5,
+            now_epoch=now_epoch,
+            candle_seconds=CANDLE_SECONDS,
+            max_age_s=STALE_FEED_SECONDS,
+        )
+        if not self._feed_diag.get("usable"):
             return None
+        return self._feed_diag.get("rates")
+
+    def _feed_log(self, message: str, every_s: float = 60.0):
+        """Print a feed problem at most once per `every_s` (journal has its own cooldown)."""
+        now_mono = time.monotonic()
+        if self._last_feed_log_mono is not None and now_mono - self._last_feed_log_mono < every_s:
+            return
+        self._last_feed_log_mono = now_mono
+        print(message, flush=True)
 
     def mt5_next_candle(self, rates, last_processed_close_ts):
         """Return (open_ts, o, h, l, c, tick_volume) for a new closed M15 bar."""
@@ -1650,6 +1712,7 @@ class NasdaqEngine:
         print(f"Nasdaq Engine {mode_label} starting for {SYMBOL_MT5}...")
         last_processed_close_ts = max(last_logged_candle_close_ts(LOG_FILE_PATH), self._warmup_close_ts)
         self._last_price_mono = time.monotonic()
+        self._report_feed_at_boot()
         try:
             while True:
                 if live_bridge:
@@ -1659,9 +1722,17 @@ class NasdaqEngine:
 
                 if rates is None or len(rates) == 0:
                     if not is_market_quiet():
-                        print(f"MT5: no feed in {MT5_FEED_FILE} - retrying in 5s "
-                              "(is the mt5feed sidecar running? terminal logged in?)", flush=True)
-                elif not stale:
+                        diag = self._feed_diag or {}
+                        self._feed_log(
+                            f"MT5: feed unusable [{diag.get('reason')}] {diag.get('detail') or ''} "
+                            f"(file: {MT5_FEED_FILE}) - retrying in 5s; "
+                            "diagnose with: python3 tools/feed_doctor.py",
+                        )
+                elif stale:
+                    diag = self._feed_diag or {}
+                    self._feed_log(f"MT5: feed stale [{diag.get('reason')}] {diag.get('detail') or ''} "
+                                   "- not evaluating; diagnose with: python3 tools/feed_doctor.py")
+                else:
                     candle = self.mt5_next_candle(rates, last_processed_close_ts)
                     if candle is not None:
                         ts, o, h, l, c, vol = candle
@@ -1679,6 +1750,24 @@ class NasdaqEngine:
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nShutting down...")
+
+    def _report_feed_at_boot(self):
+        """Print one honest feed summary at startup - never just "file found"."""
+        diag = feed_health.diagnose_feed_file(
+            MT5_FEED_FILE,
+            expected_symbol=SYMBOL_MT5,
+            candle_seconds=CANDLE_SECONDS,
+            max_age_s=STALE_FEED_SECONDS,
+        )
+        self._feed_diag = diag
+        self._feed_health = feed_health.diagnose_sidecar_health(MT5_FEED_HEALTH_FILE)
+        if not diag.get("exists"):
+            print(f"NOTE: {MT5_FEED_FILE} not found yet - is the mt5feed-nasdaq sidecar running?",
+                  flush=True)
+            return
+        sidecar = feed_health.summarize_sidecar(self._feed_health)
+        print(f"MT5 feed: {MT5_FEED_FILE} [{diag.get('reason')}] {diag.get('detail')}"
+              + (f" | {sidecar}" if sidecar else ""), flush=True)
 
     def run_mt5_test(self):
         self._run_sidecar_candle_loop(live_bridge=False)
