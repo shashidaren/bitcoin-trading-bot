@@ -14,6 +14,12 @@
 # Prerequisite: the XM MT5 terminal must ALREADY be running and logged in under the
 # SAME WINEPREFIX (/root/.mt5 for root), with US100Cash enabled in Market Watch.
 #
+# SHARED VPS: this unit is the ONLY writer of mt5_last_candle.json / mt5_feed_health.json.
+# A second MT5 stack (another instrument) on the same box MUST publish to its own paths,
+# e.g. /opt/<stack>/mt5_last_candle.json. If two writers share a path, the Nasdaq engine
+# rejects the bar as SYMBOL_MISMATCH (payloads are tagged with `symbol`) - see
+# docs/STALE-FEED-TRIAGE.md.
+#
 # Windows/Wine Python has no IANA timezone database. Install tzdata once into that
 # same interpreter (only tools that localise to America/New_York need it - the
 # sidecars fall back to a stdlib fixed-rule US Eastern tzinfo if it is missing):
@@ -35,6 +41,10 @@ Environment=MT5_FEED_TIMEFRAME=M15
 Environment=MT5_FEED_FILE=Z:/opt/nasdaq/mt5_last_candle.json
 Environment=MT5_WARMUP_FILE=Z:/opt/nasdaq/mt5_warmup_candles.json
 Environment=MT5_WARMUP_BARS=250
+Environment=MT5_FEED_HEALTH_FILE=Z:/opt/nasdaq/mt5_feed_health.json
+Environment=MT5_FEED_OFFSET_FILE=Z:/opt/nasdaq/mt5_feed_offset.json
+Environment=MT5_FEED_FROZEN_S=300
+Environment=MT5_FEED_RECONNECT_S=120
 ExecStart=/usr/bin/xvfb-run --auto-servernum /usr/bin/wine C:/Python312/python.exe Z:/opt/nasdaq/tools/mt5_feed.py
 Restart=always
 RestartSec=10

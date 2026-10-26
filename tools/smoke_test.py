@@ -29,6 +29,9 @@ Scenarios:
                                                     credential-free deploy/*.service units
   Q) Day-0 ledger guards (tools/win_rate_report.py) -> §6 SIGNAL CENSUS and §8 cost grid never divide by
                                                     zero on empty / signal-free logs (0 takeable early-out)
+  R) Feed diagnosis (feed_health.py + tools/feed_doctor.py) -> reason taxonomy (missing/unreadable/schema/
+                                                    foreign-symbol/future/frozen), freeze-instant alerts that
+                                                    survive an engine restart, counter-reset forensics
 
 Usage: python3 tools/smoke_test.py
 """
@@ -759,6 +762,12 @@ check("O: dashboard.py serves US100Cash M15 on /opt/nasdaq (port 6001) and defin
       "US100Cash" in dash_src and "TAB_STORAGE_KEY" in dash_src
       and "/opt/nasdaq" in dash_src and "port=6001" in dash_src)
 
+check("O: dashboard.py reads the feed verdict + sidecar heartbeat and renders a reason banner",
+      "feed_health" in dash_src and "def feed_banner(" in dash_src
+      and "MT5_FEED_HEALTH_FILE" in dash_src
+      and '{% if feed and not feed.ok %}' in dash_src
+      and "tools/feed_doctor.py" in dash_src)
+
 auto_src = open(os.path.join(HERE, "autosync.sh"), encoding="utf-8").read()
 check("O: autosync.sh targets /opt/nasdaq and uses static mt5quotes-nasdaq STALE alert for alert_once dedupe",
       "/opt/nasdaq" in auto_src
@@ -898,6 +907,19 @@ check("P: mt5*.service install notes pin WINEPREFIX=/root/.mt5 for root (never /
       all("/root/.mt5" in t and "/home/root/.mt5|" in t for t in wine_txt.values()))
 check("P: mt5*.service install notes document 'wine C:/Python312/python.exe -m pip install tzdata'",
       all("m pip install tzdata" in t for t in wine_txt.values()))
+check("P: mt5feed.service publishes a heartbeat/offset file and documents per-stack path namespacing",
+      all(k in wine_txt["mt5feed.service"] for k in
+          ("MT5_FEED_HEALTH_FILE", "MT5_FEED_OFFSET_FILE", "MT5_FEED_FROZEN_S",
+           "MT5_FEED_RECONNECT_S", "SHARED VPS", "SYMBOL_MISMATCH")))
+check("P: nasdaq-engine.service points at the same feed + heartbeat paths",
+      "Environment=MT5_FEED_FILE=/opt/nasdaq/mt5_last_candle.json" in
+      open(os.path.join(ROOT, "deploy", "nasdaq-engine.service"), encoding="utf-8").read()
+      and "Environment=MT5_FEED_HEALTH_FILE=/opt/nasdaq/mt5_feed_health.json" in
+      open(os.path.join(ROOT, "deploy", "nasdaq-engine.service"), encoding="utf-8").read())
+check("P: docs/STALE-FEED-TRIAGE.md exists and covers the shared-login failure mode",
+      os.path.isfile(os.path.join(ROOT, "docs", "STALE-FEED-TRIAGE.md"))
+      and "TICK_FROZEN" in open(os.path.join(ROOT, "docs", "STALE-FEED-TRIAGE.md"),
+                               encoding="utf-8").read())
 check("P: mt5quotes.service logs the non-demo label 'MT5_QUOTES_LABEL=XM US100Cash'",
       'Environment="MT5_QUOTES_LABEL=XM US100Cash"' in wine_txt["mt5quotes.service"]
       and "US100Cash demo" not in wine_txt["mt5quotes.service"])
@@ -1051,6 +1073,225 @@ finally:
     shutil.rmtree(_q_tmp, ignore_errors=True)
 
 # ==============================================================================
+# Scenario R: feed diagnosis (feed_health.py) - "why" not just "stale"
+# ==============================================================================
+print("\nScenario R: feed diagnosis (feed_health.py) + tools/feed_doctor.py triage")
+import feed_health as FH   # noqa: E402
+
+tmp_r = tempfile.mkdtemp(prefix="nasdaq_smoke_r_")
+configure_tmp(tmp_r)
+_now_r = 1793040000.0   # fixed epoch: 2026-10-26 18:40:00 UTC
+_candle_r = int(_now_r) - FH.CANDLE_SECONDS - 60   # last bar closed 60s ago
+
+
+def _r_feed(payload=None, raw=None, path=None):
+    path = path or engine.MT5_FEED_FILE
+    if raw is not None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+    elif payload is not None:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+    return path
+
+
+def _r_good_payload(ts=None, symbol="US100Cash"):
+    return {"symbol": symbol, "timeframe": "M15", "account": "12345678",
+            "ts": _candle_r if ts is None else ts, "open": 29300.0, "high": 29330.0,
+            "low": 29290.0, "close": 29320.0, "tick_volume": 450, "server_offset_s": 7200,
+            "updated_at": "2026-10-26 15:15:00"}
+
+
+# 1. Reason taxonomy: every "no bar" cause gets its own diagnosis
+d = FH.diagnose_feed_file(os.path.join(tmp_r, "nope.json"), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: missing feed file -> FILE_MISSING / not usable", d["reason"] == FH.REASON_MISSING and not d["usable"],
+      d["reason"])
+d = FH.diagnose_feed_file(_r_feed(raw="{not json"), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: truncated/foreign JSON -> FILE_UNREADABLE (not a silent None)",
+      d["reason"] == FH.REASON_UNREADABLE, d["detail"][:60])
+d = FH.diagnose_feed_file(_r_feed({"hello": "world"}), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: wrong keys -> SCHEMA_INVALID", d["reason"] == FH.REASON_SCHEMA, d["detail"][:70])
+d = FH.diagnose_feed_file(_r_feed(_r_good_payload(symbol="EURUSD")), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: foreign instrument in the same feed path -> SYMBOL_MISMATCH / not usable",
+      d["reason"] == FH.REASON_SYMBOL and not d["usable"], d["detail"][:80])
+
+d = FH.diagnose_feed_file(_r_feed(_r_good_payload(ts=int(_now_r) + 7200)), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: bar dated in the future -> CANDLE_IN_FUTURE / not usable",
+      d["reason"] == FH.REASON_FUTURE and not d["usable"], d["detail"][:70])
+
+d = FH.diagnose_feed_file(_r_feed(_r_good_payload(ts=int(_now_r) - 5400)), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: frozen bar -> CANDLE_OLD with the true freeze instant and age",
+      d["reason"] == FH.REASON_OLD and d["usable"] and d["candle_age_s"] > 3600
+      and d["frozen_since_utc"].startswith("2026-10-26 1"), f"{d['reason']} {d['frozen_since_utc']}")
+
+d = FH.diagnose_feed_file(_r_feed(_r_good_payload()), expected_symbol="US100Cash", now_epoch=_now_r)
+check("R: fresh, tagged, matching bar -> OK and usable", d["reason"] == FH.REASON_OK and d["ok"] and d["usable"],
+      d["detail"])
+
+# 2. The 890 -> 20 min trap: an engine restart must not reset the reported age
+with redirect_stdout(io.StringIO()):
+    eng_r = engine.NasdaqEngine()
+engine.is_market_quiet = lambda *_a, **_k: False        # force "market open" for determinism
+_r_feed(_r_good_payload(ts=int(_now_r) - 5400))
+_r_now_backup = FH._now
+FH._now = lambda epoch=None: _now_r
+try:
+    rates_r = eng_r.read_mt5_feed(now_epoch=_now_r)
+    check("R: read_mt5_feed recovers a usable-but-stale bar for age reporting", rates_r is not None)
+    stale_r = eng_r.mt5_feed_is_stale(rates_r, now_epoch=_now_r)
+finally:
+    FH._now = _r_now_backup
+detail_r = ""
+with open(engine.JOURNAL_FILE_PATH, newline="") as fh:
+    for row in csv.DictReader(fh):
+        detail_r = row["Detail"]
+check("R: stale alert fires for an old bar even though the engine just started (no uptime reset)",
+      stale_r is True)
+check("R: alert detail names the freeze instant + 'frozen', not a bogus 0/20-min uptime",
+      "frozen" in detail_r and "closed 2026-10-26" in detail_r and " min ago" in detail_r,
+      detail_r[:120])
+check("R: alert detail points at tools/feed_doctor.py", "tools/feed_doctor.py" in detail_r, detail_r[-60:])
+
+# Same feed, one hour later, counter must NOT be able to drop: repeat alert keeps the same freeze instant
+eng_r._last_stale_alert_mono = None
+_first = detail_r
+_backup = FH._now
+FH._now = lambda epoch=None: _now_r + 3600
+try:
+    eng_r.read_mt5_feed(now_epoch=_now_r + 3600)
+    eng_r.mt5_feed_is_stale(rates_r, now_epoch=_now_r + 3600)
+finally:
+    FH._now = _backup
+with open(engine.JOURNAL_FILE_PATH, newline="") as fh:
+    rows_r = [r for r in csv.DictReader(fh)]
+check("R: repeat alert reports the same freeze instant (no reset-style '20 min' regression)",
+      len(rows_r) == 2 and "frozen" in rows_r[-1]["Detail"], rows_r[-1]["Detail"][:90])
+check("R: cooldown still rate-limits a third alert inside 30 min",
+      eng_r.maybe_alert_stale_feed(600, event="STALE_FEED", detail="dup") is False)
+
+# 3. Journal forensics: the reported 890 -> 20 min drop is a counter reset, not a recovery
+ev_hist = [
+    {"timestamp": "2026-10-26 15:39:34", "event": "STALE_FEED", "minutes": 890},
+    {"timestamp": "2026-10-26 16:00:39", "event": "STALE_FEED", "minutes": 20},
+    {"timestamp": "2026-10-26 16:30:39", "event": "STALE_FEED", "minutes": 50},
+]
+resets = FH.detect_counter_resets(ev_hist)
+check("R: detect_counter_resets flags 890 -> 20 min as an engine-restart counter reset",
+      len(resets) == 1 and resets[0]["from_minutes"] == 890 and resets[0]["to_minutes"] == 20)
+check("R: detect_counter_resets ignores a monotonic 20 -> 50 min series",
+      FH.detect_counter_resets(ev_hist[1:]) == [])
+check("R: journal parser reads 'no new closed M15 candles for 50 min' -> 50",
+      FH._minutes_from_detail("no new closed M15 candles for 50 min - check the mt5feed sidecar") == 50)
+
+# 4. Event names per failure mode (the dashboard timeline becomes readable)
+check("R: distinct journal events per failure mode",
+      FH.format_feed_problem({"reason": FH.REASON_MISSING, "path": "/opt/nasdaq/mt5_last_candle.json"})[0]
+      == "FEED_FILE_MISSING"
+      and FH.format_feed_problem({"reason": FH.REASON_SYMBOL, "detail": "x"})[0] == "FEED_SYMBOL_MISMATCH"
+      and FH.format_feed_problem({"reason": FH.REASON_OLD, "candle_age_s": 3600})[0] == "STALE_FEED")
+
+# 5. Sidecar heartbeat: an "active" unit with a dead terminal is visible, not silent
+_hp = os.path.join(tmp_r, "mt5_feed_health.json")
+engine.MT5_FEED_HEALTH_FILE = _hp
+with open(_hp, "w", encoding="utf-8") as fh:
+    json.dump({"status": "TICK_FROZEN", "symbol": "US100Cash", "account": "12345678",
+               "terminal_connected": False, "tick_age_s": 5400.0, "server_offset_s": None,
+               "last_error": "terminal tick is 90 min old", "reconnects": 2,
+               "updated_at": "2026-10-26 15:15:00"}, fh)
+health_r = FH.diagnose_sidecar_health(_hp, now_epoch=_now_r)
+_sum = FH.summarize_sidecar(health_r)
+check("R: heartbeat detected as present but NOT fresh (120s rule)",
+      health_r["present"] and health_r["fresh"] is False, f"age={health_r['age_s']}")
+check("R: sidecar summary exposes frozen tick + unknown broker offset",
+      "TICK_FROZEN" in _sum and "offset unknown" in _sum, _sum)
+
+# 6. mt5_feed payload/heartbeat contracts (Wine sidecar side)
+lcp = feed_mod.build_last_candle_payload(
+    {"time": 1793039700, "open": 29300.0, "high": 29330.0, "low": 29290.0,
+     "close": 29320.0, "tick_volume": 450}, 7200, "US100Cash", "M15", "12345678")
+check("R: mt5_feed tags its bar with symbol/timeframe/account (foreign-bar detection)",
+      lcp["symbol"] == "US100Cash" and lcp["timeframe"] == "M15" and lcp["account"] == "12345678"
+      and lcp["ts"] == 1793039700 - 7200)
+check("R: mt5_feed bar round-trips through the engine diagnosis as OK",
+      FH.diagnose_feed_file(_r_feed(lcp), expected_symbol="US100Cash",
+                            now_epoch=lcp["ts"] + 900 + 30)["reason"] == FH.REASON_OK)
+_off = os.path.join(tmp_r, "mt5_feed_offset.json")
+feed_mod.persist_server_offset(7200, "US100Cash", "12345678", path=_off)
+check("R: learned broker offset persists so a restart can publish before a fresh tick",
+      feed_mod.load_saved_offset(_off) == 7200 and feed_mod.load_saved_offset(os.path.join(tmp_r, "x.json")) is None)
+check("R: frozen-tick age math (now - (server tick time - offset))",
+      abs(feed_mod.tick_age_seconds(1793040000, 7200, 1793040600) - 7800) < 1
+      and feed_mod.tick_age_seconds(0, 7200, 1793040600) is None)
+_hp2 = feed_mod.build_health_payload("OK", symbol="US100Cash", account="12345678", connected=True,
+                                     tick_age_s=1.4, server_offset_s=7200, last_candle_payload=lcp,
+                                     started_epoch=_now_r - 120)
+check("R: heartbeat payload carries status/account/tick age/offset/last bar",
+      _hp2["status"] == "OK" and _hp2["account"] == "12345678" and _hp2["tick_age_s"] == 1.4
+      and _hp2["server_offset_s"] == 7200 and _hp2["last_candle_open_utc"])
+
+# 7. engine status.json exposes the feed verdict to the dashboard
+with redirect_stdout(io.StringIO()):
+    eng_r.save_status()
+with open(engine.STATUS_FILE_PATH) as fh:
+    _st = json.load(fh)
+check("R: status.json carries feed.reason/frozen_since_utc for the dashboard",
+      _st.get("feed", {}).get("reason") in (FH.REASON_OLD, FH.REASON_OK)
+      and "frozen_since_utc" in _st["feed"], json.dumps(_st.get("feed", {}))[:80])
+
+# 8. tools/feed_doctor.py triage on a broken stack vs a healthy one
+inc = os.path.join(tmp_r, "incident")
+os.makedirs(os.path.join(inc, "xm_data"), exist_ok=True)
+with open(os.path.join(inc, "journal.csv"), "w", newline="") as fh:
+    fh.write("Timestamp,Event,Detail\n")
+    fh.write("2026-10-26 15:39:34,STALE_FEED,no new closed M15 candles for 890 min - check the mt5feed sidecar\n")
+    fh.write("2026-10-26 16:00:39,STALE_FEED,no new closed M15 candles for 20 min - check the mt5feed sidecar\n")
+_q_now = datetime.now(timezone.utc)
+with open(os.path.join(inc, "xm_data", f"quotes-{_q_now:%Y-%m-%d}.csv"), "w", newline="") as fh:
+    fh.write("ts_utc,bid,ask,spread,spread_min,spread_max,n_ok,n_bad,tick_age_s,srv_offset_s,flags\n")
+    fh.write(f"{_q_now:%Y-%m-%d %H:%M:%S},29300.0,29302.9,2.9,2.9,2.9,6,0,1.0,7200,\n")
+_doc_broken = subprocess.run([sys.executable, os.path.join(HERE, "feed_doctor.py"),
+                              "--data-dir", inc, "--journal", os.path.join(inc, "journal.csv"),
+                              "--assume-open"], cwd=ROOT, capture_output=True, text=True, timeout=60)
+check("R: feed_doctor exits 2 (BROKEN) on a missing feed file",
+      _doc_broken.returncode == 2 and "FILE_MISSING" in _doc_broken.stdout,
+      (_doc_broken.stderr or _doc_broken.stdout).strip()[-120:])
+check("R: feed_doctor proves MT5 is fine when the quote logger is still recording",
+      "MT5 itself is fine" in _doc_broken.stdout)
+check("R: feed_doctor flags the 890 -> 20 min counter reset in the journal",
+      "counter reset" in _doc_broken.stdout)
+check("R: feed_doctor never raises a traceback", "Traceback" not in _doc_broken.stderr)
+
+_healthy = os.path.join(tmp_r, "healthy")
+os.makedirs(os.path.join(_healthy, "xm_data"), exist_ok=True)
+_n2 = time.time()
+with open(os.path.join(_healthy, "mt5_last_candle.json"), "w") as fh:
+    json.dump(feed_mod.build_last_candle_payload(
+        {"time": int(_n2) - 900 + 7200, "open": 29300.0, "high": 29330.0, "low": 29290.0,
+         "close": 29320.0, "tick_volume": 450}, 7200, "US100Cash", "M15", "12345678"), fh)
+with open(os.path.join(_healthy, "mt5_feed_health.json"), "w") as fh:
+    json.dump(feed_mod.build_health_payload("OK", symbol="US100Cash", account="12345678",
+                                            connected=True, tick_age_s=1.0, server_offset_s=7200,
+                                            started_epoch=_n2 - 60), fh)
+_doc_ok = subprocess.run([sys.executable, os.path.join(HERE, "feed_doctor.py"),
+                          "--data-dir", _healthy, "--assume-open"],
+                         cwd=ROOT, capture_output=True, text=True, timeout=60)
+check("R: feed_doctor exits 0 (OK) on a fresh, tagged, matching feed",
+      _doc_ok.returncode == 0 and "OK" in _doc_ok.stdout,
+      (_doc_ok.stderr or _doc_ok.stdout).strip()[-160:])
+_doc_json = subprocess.run([sys.executable, os.path.join(HERE, "feed_doctor.py"),
+                            "--data-dir", _healthy, "--assume-open", "--json"],
+                           cwd=ROOT, capture_output=True, text=True, timeout=60)
+try:
+    _jr = json.loads(_doc_json.stdout)
+    _json_ok = _jr["verdict"][0] == "OK" and _jr["sidecar"]["status"] == "OK"
+except Exception as exc:
+    _json_ok = False
+check("R: feed_doctor --json is machine-readable for autosync/alerting", _json_ok,
+      _doc_json.stdout[:80])
+
+shutil.rmtree(tmp_r, ignore_errors=True)
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 print("\n" + "=" * 66)
@@ -1059,5 +1300,5 @@ if FAILURES:
     for f in FAILURES:
         print(f"  - {f}")
     sys.exit(1)
-print("ALL SMOKE TEST SCENARIOS (A-Q) PASSED FOR US100Cash M15 (/opt/nasdaq)")
+print("ALL SMOKE TEST SCENARIOS (A-R) PASSED FOR US100Cash M15 (/opt/nasdaq)")
 sys.exit(0)
