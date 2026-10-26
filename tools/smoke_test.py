@@ -377,7 +377,19 @@ warm_rates = [
      "low": 20190.0 + i, "close": 20208.0 + i, "tick_volume": 450}
     for i in range(250)
 ]
-w_payload = feed_mod.build_warmup_payload(warm_rates, 10800, symbol="US100Cash", timeframe="M15")
+
+
+class AmbiguousTruthRates(list):
+    """Match NumPy arrays returned by MT5: iterable, but not truth-testable."""
+
+    def __bool__(self):
+        raise ValueError("The truth value of an array with more than one element is ambiguous")
+
+
+w_payload = feed_mod.build_warmup_payload(AmbiguousTruthRates(warm_rates), 10800,
+                                          symbol="US100Cash", timeframe="M15")
+check("H: MT5 NumPy-style rate arrays do not trigger ambiguous truth-value errors",
+      len(w_payload["candles"]) == 250)
 with open(engine.MT5_WARMUP_FILE, "w") as f:
     json.dump(w_payload, f)
 
