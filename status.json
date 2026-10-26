@@ -12,17 +12,17 @@
   "active_position_id": null,
   "daily_losses": 0,
   "max_daily_losses": 3,
-  "last_update": "2026-10-26 22:30:01",
+  "last_update": "2026-10-26 22:45:06",
   "feed": {
     "ok": true,
     "reason": "OK",
-    "detail": "last closed bar 2026-10-26 22:15:00 UTC, 0 min old",
+    "detail": "last closed bar 2026-10-26 22:30:00 UTC, 0 min old",
     "path": "/opt/nasdaq/mt5_last_candle.json",
     "symbol": "US100Cash",
-    "candle_open_utc": "2026-10-26 22:15:00",
-    "candle_age_s": 1.7,
-    "frozen_since_utc": "2026-10-26 22:30:00",
-    "file_age_s": 0.8,
+    "candle_open_utc": "2026-10-26 22:30:00",
+    "candle_age_s": 6.8,
+    "frozen_since_utc": "2026-10-26 22:45:00",
+    "file_age_s": 4.6,
     "sidecar": {
       "status": "OK",
       "heartbeat_age_s": 2.3,
@@ -31,12 +31,12 @@
       "server_offset_s": 7200,
       "last_error": null
     },
-    "checked_utc": "2026-10-26 22:30:01"
+    "checked_utc": "2026-10-26 22:45:06"
   },
-  "rsi": 55.2,
+  "rsi": 46.5,
   "ema_fast": null,
   "ema_slow": null,
-  "atr": 44.62,
+  "atr": 39.04,
   "entry_price": null,
   "stop_loss": null,
   "take_profit": null,
@@ -48,7 +48,7 @@
   "entry_ema_fast": null,
   "entry_ema_slow": null,
   "funnel": {
-    "candles_evaluated": 16,
+    "candles_evaluated": 17,
     "tested_floor": 0,
     "valid_rejection": 0,
     "held_support": 0,
