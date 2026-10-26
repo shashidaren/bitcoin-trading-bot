@@ -147,7 +147,13 @@ def build_warmup_payload(rates, server_offset: int, symbol: str = SYMBOL,
                          timeframe: str = TIMEFRAME_NAME, account=None) -> dict:
     """Convert historical MT5 rate rows into UTC warm-up candles for engine.py."""
     candles = []
-    for r in rates or ():
+    # MetaTrader5 returns a NumPy structured array here.  Do not use
+    # ``rates or ()``: coercing a multi-row ndarray to bool raises
+    # "The truth value of an array with more than one element is ambiguous"
+    # and traps every poll in the error path before candle publishing.
+    if rates is None:
+        rates = ()
+    for r in rates:
         srv_ts = int(r["time"])
         candles.append({
             "ts": srv_ts - int(server_offset),
