@@ -47,3 +47,4 @@ Timestamp,Open,High,Low,Close,Wick_Ratio,Volume,Vol_MA,Vol_Confirmed,Dynamic_Flo
 2026-10-27 06:00:00,29173.55,29226.93,29173.55,29223.30,0.0%,3690,3804.2,True,29155.93,Calculating,Calculating,False,True,False,True,22.8,40.67
 2026-10-27 06:15:00,29223.05,29243.93,29194.93,29197.43,5.1%,3632,3793.8,True,29155.93,Calculating,Calculating,False,False,False,True,35.0,42.50
 2026-10-27 06:30:00,29197.05,29197.18,29160.80,29174.05,36.4%,3666,3764.9,True,29155.93,Calculating,Calculating,False,True,True,True,35.3,42.21
+2026-10-27 06:45:00,29173.68,29199.80,29159.05,29177.30,35.9%,3485,3730.8,True,29155.93,Calculating,Calculating,False,True,True,True,35.7,40.88
