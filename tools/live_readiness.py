@@ -4,9 +4,8 @@ live_readiness - "is the US100Cash M15 book ready for real money?", in numbers.
 
 The other tools answer "what did the book do?". This one answers the question
 the handoff keeps deferring: does the forward-test evidence justify risking
-money, and how much of that evidence is noise?  It is the reproducible source
-of every number in docs/REVIEW-2026-10-01.md (same loaders and era constants as
-the rest of the suite - tools/replay_lib.py).
+money, and how much of that evidence is noise? The CLI and dashboard share the
+same gate calculations and era constants from tools/replay_lib.py.
 
 Sections
   1. EDGE        t-stat, bootstrap P(net/trade > 0) iid and by calendar day,
@@ -19,8 +18,8 @@ Sections
                  0.10-lot US100Cash account ($0.10 per index point) would see if
                  the edge is real vs if it is zero, incl. how often a candidate
                  kill-switch floor would be touched
-  6. LATENCY     M5 re-walk with the fill 1/2.5/5 minutes after the signal bar
-                 (the simulator fills at the signal-bar close; a live order cannot)
+  6. LATENCY     coarse M15 re-walk with hypothetical delayed fill prices
+                 (not measured broker execution latency)
   7. OPERATIONS  price-log coverage and gaps (a dead feed is a live-money risk)
   8. GATES       proposed go/no-go evidence gates + the non-data checklist
 
@@ -49,19 +48,21 @@ Pure stdlib.
 """
 import argparse
 import bisect
+import csv
 import math
 import os
 import random
 import statistics as st
 import sys
 from collections import defaultdict
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-import replay_lib as R  # noqa: E402
-
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
+import replay_lib as R  # noqa: E402
+from trade_filter import is_market_quiet  # noqa: E402
 
 # ---- proposed gate thresholds (edit here, not in the logic) -----------------
 MIN_TRADES = 100          # strictly post-gate closed trades
@@ -76,6 +77,26 @@ Z_ALPHA = 1.96            # two-sided 5%
 Z_POWER = 0.8416          # 80% power
 MC_PATHS = 6000           # Monte Carlo paths per scenario
 KILL_FLOORS = (20, 30, 40, 50)   # $ drawdown floors whose touch probability is reported
+DEFAULT_SPREAD = 0.25
+DEFAULT_SEED = 2026
+DEFAULT_BOOT = 5000
+MIN_ANALYSIS_TRADES = 10   # below this, the statistical report does not score the book
+
+# These require human evidence; neither the dashboard nor the report signs them off.
+NON_DATA_GATES = (
+    "Contract and cost: verify $10 per +100 points at 0.10 lot, minimum volume <= 0.10, "
+    "median spread <= 3.5 points and M15 parity (tools/xm_quote_report.py).",
+    "LIVE order path smoke-tested, including position-id reconciliation, restart, "
+    "spread guard, filling mode and uncertain order results.",
+    "An order executor can run where MT5 runs, with the real-account lock verified.",
+    "XM spread profile and commission/swap measured across sessions; use the measured cost.",
+    "Demo soak: 5–10 real-path round trips, no orphaned or duplicate positions, "
+    "position-id reconciliation and simulator-versus-demo fill/slippage parity reviewed.",
+    "Same-feed parity: a forward run on DATA_SOURCE=MT5 shows comparable signal flow.",
+    "Kill switches tested, including equity floor, stale-feed alarm, max spread and HALT flatten; "
+    "remove HALT only after the position is confirmed closed.",
+    "Micro-live caps agreed in writing: 0.10 lot, weekday-only and max $15 / 3 SLs per day.",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -180,11 +201,12 @@ def monte_carlo(xs, horizon, B, rng, floors=()):
 
 
 def latency_stress(pg, bars, spread):
-    """Re-walk the post-gate trades on the M5 log with the fill a fraction of the NEXT bar
-    after the signal bar (0 = the simulator's fill at the signal-bar close, 1 = the next bar's
-    close). SL/TP keep their ATR distances from the delayed fill price, as the live order
-    would. An M5 walk is coarse (SL-first on ambiguous bars, TIME marked at 240 min), so read
-    the rows RELATIVE to each other, not against the ledger."""
+    """Coarsely re-walk on M15 bars with a hypothetical price between the signal
+    close and the next bar close (0 = signal close, 1 = next close). These are
+    price interpolations, not measurements of execution latency. SL/TP retain
+    their ATR distances. Ambiguous bars resolve SL-first; TIME marks at 240 min.
+    Read rows relative to each other, not against actual broker fills.
+    """
     dts = [b["dt"] for b in bars]
     rows = []
     for frac in (0.0, 0.2, 0.5, 1.0):
@@ -221,45 +243,227 @@ def line(label, ts, spread):
 
 
 # --------------------------------------------------------------------------- #
+def load_readiness_data(trades_path, log_path):
+    """Read the evidence conservatively; never silently discard malformed rows.
+
+    replay_lib's permissive loaders are useful for exploration, but silently
+    skipping a losing trade or a bad bar could make a go-live gate look better.
+    """
+    def read_rows(path, required):
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            if (not reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames)
+                    or not required.issubset(reader.fieldnames)):
+                raise ValueError(f"{os.path.basename(path)} has a missing or invalid header")
+            rows = list(reader)
+            if any(None in row or any(value is None for value in row.values()) for row in rows):
+                raise ValueError(f"{os.path.basename(path)} contains incomplete or extra fields")
+            return rows
+
+    trade_rows = read_rows(trades_path, {
+        "Trade_Num", "Trade_Type", "Entry_Time", "Exit_Time", "Entry_Price",
+        "Stop_Loss", "Take_Profit", "ATR_At_Entry", "Exit_Reason", "Profit",
+    })
+    log_rows = read_rows(log_path, {"Timestamp", "Open", "High", "Low", "Close"})
+    trades = R.load_trades(trades_path)
+    bars = R.load_bars(log_path)
+    if len(trades) != len(trade_rows):
+        raise ValueError("trades.csv contains unparseable rows or changed while being read")
+    if len(bars) != len(log_rows):
+        raise ValueError("forward_test_log.csv contains unparseable rows or changed while being read")
+
+    try:
+        numbers = [int(str(t["num"]).replace(",", "")) for t in trades]
+    except (TypeError, ValueError):
+        raise ValueError("trades.csv has invalid trade numbers") from None
+    if any(n <= 0 for n in numbers) or len(set(numbers)) != len(numbers):
+        raise ValueError("trades.csv has missing or duplicate trade numbers")
+    for t in trades:
+        values = (t["entry"], t["sl"], t["tp"], t["atr"], t["profit"])
+        if (any(v is None or not math.isfinite(v) for v in values)
+                or t["atr"] <= 0 or min(t["entry"], t["sl"], t["tp"]) <= 0
+                or t["sl"] == t["entry"] or t["xt"] <= t["et"]
+                or t["reason"] not in ("TP", "SL")):
+            raise ValueError(f"trades.csv has invalid values for trade {t['num']}")
+    last = None
+    for row in log_rows:
+        dt = R.parse_ts(row.get("Timestamp"))
+        values = [R.fnum(row.get(k)) for k in ("Open", "High", "Low", "Close")]
+        if (dt is None or dt.minute % 15 or dt.second
+                or (last is not None and dt <= last)
+                or any(v is None or not math.isfinite(v) for v in values)):
+            raise ValueError("forward_test_log.csv has invalid, duplicate, or unordered M15 bars")
+        o, h, low, c = values
+        if low > min(o, c) or h < max(o, c) or low <= 0:
+            raise ValueError("forward_test_log.csv has invalid OHLC values")
+        last = dt
+    return trades, bars
+
+
 def feed_report(bars):
-    """Gaps > FEED_GAP_FLAG_MIN between consecutive logged M15 bars + slot coverage."""
+    """Open-market missing M15 runs, using the same midpoint as check_data.py.
+
+    Scheduled CME closures split runs rather than becoming 75-minute or weekend
+    outages. Each run's duration includes the normal 15-minute bar interval, so
+    five consecutive missing open-market bars make a 90-minute gap.
+    """
     if not bars:
         return [], 0, 0, 0
-    gaps = []
-    for a, b in zip(bars, bars[1:]):
-        m = (b["dt"] - a["dt"]).total_seconds() / 60
-        if m > FEED_GAP_FLAG_MIN:
-            gaps.append((a["dt"], b["dt"], m))
     have = {b["dt"].replace(second=0) for b in bars}
+    step = timedelta(minutes=15)
     t, end = bars[0]["dt"].replace(second=0), bars[-1]["dt"]
     expected = missing = 0
+    gaps, run = [], []
+
+    def finish_run():
+        if run:
+            minutes = (len(run) + 1) * 15
+            gaps.append((run[0] - step, run[-1] + step, minutes))
+            run.clear()
+
     while t <= end:
-        expected += 1
-        missing += t not in have
-        t += timedelta(minutes=15)
+        mid_utc = (t - timedelta(minutes=7)).replace(tzinfo=timezone.utc)
+        if not is_market_quiet(mid_utc):
+            expected += 1
+            if t not in have:
+                missing += 1
+                run.append(t)
+            else:
+                finish_run()
+        else:
+            finish_run()
+        t += step
+    finish_run()
     return gaps, expected - missing, expected, missing
+
+
+def evaluate_data_gates(trades, bars, spread=DEFAULT_SPREAD,
+                        seed=DEFAULT_SEED, boot=DEFAULT_BOOT):
+    """Single source of truth for the CLI and dashboard's six data gates.
+
+    A gate's `ok` is True, False, or None (not enough evidence to evaluate).
+    The short-sample report never infers an edge from fewer than ten trades.
+    Passing these gates is not authorization to trade real money.
+    """
+    if not math.isfinite(spread) or spread < 0 or boot <= 0:
+        raise ValueError("spread must be finite and non-negative, and boot must be positive")
+    pg = [t for t in trades if t["et"] >= R.GATES_DEPLOY]
+    n = len(pg)
+    gaps, have, expected, missing = feed_report(bars)
+    rng = random.Random(seed)
+    b_iid, b_day, by_day = [], [], defaultdict(list)
+    p_day = None
+    if n >= MIN_ANALYSIS_TRADES:
+        nets = [t["profit"] - spread for t in pg]
+        b_iid = boot_iid(nets, boot, rng)
+        for t, net in zip(pg, nets):
+            by_day[t["xt"].date()].append(net)
+        b_day = boot_days(by_day, boot, rng)
+        p_day = sum(1 for x in b_day if x > 0) / len(b_day)
+
+    too_small = f"Requires at least {MIN_ANALYSIS_TRADES} post-gate trades for the report."
+    gates = [{"key": "sample", "label": f"sample: >= {MIN_TRADES} post-gate trades",
+              "ok": n >= MIN_TRADES, "value": str(n),
+              "note": f"Entries on or after {R.GATES_DEPLOY:%Y-%m-%d} UTC."}]
+    gates.append({"key": "edge", "label": f"edge: by-day bootstrap P(net/trade > 0) >= {MIN_P_EDGE:.0%}",
+                  "ok": p_day >= MIN_P_EDGE if p_day is not None else None,
+                  "value": f"{p_day:.1%}" if p_day is not None else "—",
+                  "note": f"{boot:,} bootstrap samples; seed {seed}." if p_day is not None else too_small})
+    mean_gross = st.mean(t["profit"] for t in pg) if n >= MIN_ANALYSIS_TRADES else None
+    cover = mean_gross / spread if mean_gross is not None and spread > 0 else None
+    gates.append({"key": "cost", "label": f"cost: break-even spread >= {MIN_SPREAD_COVER:.1f}x assumed",
+                  "ok": (cover >= MIN_SPREAD_COVER if cover is not None else
+                         False if spread == 0 else None),
+                  "value": f"{cover:.2f}x" if cover is not None else "—",
+                  "note": (f"Gross mean ${mean_gross:+.2f} / assumed ${spread:.2f} per trade."
+                           if cover is not None else "Cannot pass with zero assumed cost."
+                           if spread == 0 else too_small)})
+    k_drop = max(3, math.ceil(TOP_FRAC * n))
+    without_top = (sum(t["profit"] - spread for t in pg)
+                   - sum(sorted((t["profit"] - spread for t in pg), reverse=True)[:k_drop])
+                   if n >= MIN_ANALYSIS_TRADES else None)
+    gates.append({"key": "fragility", "label": f"fragility: net > 0 without the best {k_drop} trades",
+                  "ok": without_top > 0 if without_top is not None else None,
+                  "value": f"${without_top:+.2f}" if without_top is not None else "—",
+                  "note": "Best 5% of trades, at least three, removed." if without_top is not None else too_small})
+    recent = sorted(pg, key=lambda t: t["xt"])[-RECENT_N:]
+    recent_net = (sum(t["profit"] - spread for t in recent)
+                  if n >= MIN_ANALYSIS_TRADES else None)
+    gates.append({"key": "recent", "label": f"recent form: last {RECENT_N} closed trades net >= 0",
+                  "ok": recent_net >= 0 if recent_net is not None else None,
+                  "value": f"${recent_net:+.2f}" if recent_net is not None else "—",
+                  "note": f"{len(recent)} available trades, net of assumed cost." if recent_net is not None else too_small})
+    cutoff = bars[-1]["dt"] - timedelta(days=GAP_WINDOW_DAYS) if bars else None
+    recent_gaps = [g for g in gaps if cutoff is not None and g[1] >= cutoff]
+    worst = max((g[2] for g in recent_gaps), default=0)
+    enough_bars = len(bars) >= 2 and have >= 2
+    covers_trades = True
+    if enough_bars and pg:
+        first_entry = min(t["et"] for t in pg)
+        last_entry = max(t["et"] for t in pg)
+        start_needed = max(first_entry, cutoff)
+        covers_trades = (bars[0]["dt"] <= start_needed + timedelta(minutes=15)
+                         and bars[-1]["dt"] >= last_entry - timedelta(minutes=15))
+    feed_known = enough_bars and covers_trades
+    feed_ok = False if worst > MAX_GAP_MIN else True if feed_known else None
+    if not enough_bars:
+        feed_note = "At least two open-market bars are required."
+    elif not covers_trades:
+        feed_note = "Log does not span the recent post-gate trade window; coverage is incomplete."
+    else:
+        feed_note = "Scheduled market closures excluded; current feed freshness is checked separately."
+    gates.append({"key": "feed", "label": f"feed: no open-market gap > {MAX_GAP_MIN} min in the last {GAP_WINDOW_DAYS} days of the log",
+                  "ok": feed_ok, "value": f"worst {worst} min" if enough_bars else "—",
+                  "note": feed_note})
+    return {"gates": gates, "post_gate": pg, "bootstrap_iid": b_iid,
+            "bootstrap_day": b_day, "by_day": by_day, "rng": rng,
+            "feed_report": (gaps, have, expected, missing)}
+
+
+def print_gates(gates):
+    print("\n== 8. GATES (proposed thresholds - constants at the top of this file) ==")
+    for gate in gates:
+        result = "PASS" if gate["ok"] is True else "FAIL" if gate["ok"] is False else "UNKNOWN"
+        print(f"  [{result}] {gate['label']:72s} {gate['value']}")
+    passed = sum(g["ok"] is True for g in gates)
+    print(f"\n  DATA GATES: {passed}/{len(gates)} pass. ", end="")
+    if passed != len(gates):
+        print("NOT READY - keep forward-testing; see failing or unknown gates above.")
+    else:
+        print("Data gates pass; this is necessary, not sufficient (checklist below).")
+    print("\n  NON-DATA GATES (manual evidence and sign-off required; see docs/EXECUTION-PLAN.md):")
+    for item in NON_DATA_GATES:
+        print(f"    [ ] {item}")
+    return 0 if passed == len(gates) else 1
 
 
 def main():
     ap = argparse.ArgumentParser(description="US100Cash M15 live-readiness evidence + gates")
-    ap.add_argument("--spread", type=float, default=0.25,
+    ap.add_argument("--spread", type=float, default=DEFAULT_SPREAD,
                     help="round-trip $/trade at 0.10 lot on US100Cash. Default 0.25 "
                          "(2.5 index points x $0.10/pt). 0 = gross.")
-    ap.add_argument("--seed", type=int, default=2026)
-    ap.add_argument("--boot", type=int, default=5000, help="bootstrap iterations")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ap.add_argument("--boot", type=int, default=DEFAULT_BOOT, help="bootstrap iterations")
     ap.add_argument("--horizon", type=int, default=100, help="Monte Carlo trades per path")
     ap.add_argument("--root", default=ROOT)
     a = ap.parse_args()
     sp = a.spread
-    rng = random.Random(a.seed)
+    if not math.isfinite(sp) or sp < 0 or a.boot <= 0 or a.horizon <= 0:
+        ap.error("spread must be finite and non-negative; boot and horizon must be positive")
 
-    trades = R.load_trades(os.path.join(a.root, "trades.csv"))
-    bars = R.load_bars(os.path.join(a.root, "forward_test_log.csv"))
-    pg = [t for t in trades if t["et"] >= R.GATES_DEPLOY]
-    n = len(pg)
-    if n < 10:
-        print(f"live_readiness: only {n} post-gate trades - nothing meaningful to say yet")
+    try:
+        trades, bars = load_readiness_data(os.path.join(a.root, "trades.csv"),
+                                           os.path.join(a.root, "forward_test_log.csv"))
+        evidence = evaluate_data_gates(trades, bars, sp, a.seed, a.boot)
+    except (OSError, ValueError, csv.Error) as exc:
+        print(f"live_readiness: evidence unavailable or invalid: {exc}")
         return 1
+    pg = evidence["post_gate"]
+    n = len(pg)
+    if n < MIN_ANALYSIS_TRADES:
+        print(f"live_readiness: only {n} post-gate trades - nothing meaningful to say yet")
+        return print_gates(evidence["gates"])
+    rng = evidence["rng"]
 
     nets = [t["profit"] - sp for t in pg]
     gross = [t["profit"] for t in pg]
@@ -284,11 +488,9 @@ def main():
     print(line("post-gate", pg, sp))
     print(f"  net/trade {mu:+.3f}  sd {sd:.2f}  se {se:.3f}  t {tstat:+.2f}  "
           f"one-sided p~{1 - norm_cdf(tstat):.2f}  95% CI [{mu - 1.997 * se:+.2f}, {mu + 1.997 * se:+.2f}]")
-    b_iid = boot_iid(nets, a.boot, rng)
-    by_day = defaultdict(list)
-    for t, x in zip(pg, nets):
-        by_day[t["xt"].date()].append(x)
-    b_day = boot_days(by_day, a.boot, rng)
+    b_iid = evidence["bootstrap_iid"]
+    b_day = evidence["bootstrap_day"]
+    by_day = evidence["by_day"]
     p_iid = sum(1 for x in b_iid if x > 0) / len(b_iid)
     p_day = sum(1 for x in b_day if x > 0) / len(b_day)
     print(f"  bootstrap P(net/trade > 0): iid {100 * p_iid:.0f}% | by calendar day ({len(by_day)} days) {100 * p_day:.0f}%"
@@ -412,66 +614,33 @@ def main():
         print(f"  {label:34s} " + " ".join(f"{100 * tch[f]:6.0f}%" for f in KILL_FLOORS))
 
     # ---- 6. LATENCY --------------------------------------------------------
-    print("\n== 6. LATENCY STRESS: does a late fill kill the edge? (M5 re-walk, coarse - compare rows) ==")
+    print("\n== 6. FILL-PRICE STRESS: coarse M15 re-walk, not measured broker latency ==")
     for frac, nn, w_, l_, tot_ in latency_stress(pg, bars, sp):
-        lab = {0.0: "fill at signal-bar close (simulator)", 0.2: "fill ~1 min later",
-               0.5: "fill ~2.5 min later", 1.0: "fill 5 min later (next bar close)"}[frac]
-        print(f"  {lab:38s} n={nn} {w_}W/{l_}L/{nn - w_ - l_}T  net {tot_:+7.2f}  net/trade {tot_ / nn:+.3f}")
+        lab = {0.0: "signal-bar close (simulator)", 0.2: "20% toward next bar close",
+               0.5: "50% toward next bar close", 1.0: "next M15 bar close"}[frac]
+        per_trade = f"{tot_ / nn:+.3f}" if nn else "n/a"
+        print(f"  {lab:38s} n={nn} {w_}W/{l_}L/{nn - w_ - l_}T  net {tot_:+7.2f}  net/trade {per_trade}")
 
     # ---- 7. OPERATIONS -----------------------------------------------------
     print("\n== 7. OPERATIONS: price-log health ==")
-    gaps, have, expected, missing = feed_report(bars)
-    print(f"  {have} of {expected} expected M5 slots present ({100 * have / expected:.1f}%), {missing} missing "
-          f"(same count as check_data), {bars[0]['dt']:%m-%d %H:%M} -> {bars[-1]['dt']:%m-%d %H:%M}")
-    if gaps:
-        for s, e, m in gaps:
-            print(f"  gap > {FEED_GAP_FLAG_MIN} min: {s:%m-%d %H:%M} -> {e:%m-%d %H:%M}  ({m:.0f} min = {m / 60:.1f} h)")
+    gaps, have, expected, missing = evidence["feed_report"]
+    if bars and expected:
+        print(f"  {have} of {expected} expected open-market M15 slots present "
+              f"({100 * have / expected:.1f}%), {missing} missing "
+              f"(same midpoint schedule as check_data), "
+              f"{bars[0]['dt']:%m-%d %H:%M} -> {bars[-1]['dt']:%m-%d %H:%M}")
+        flagged = [gap for gap in gaps if gap[2] > FEED_GAP_FLAG_MIN]
+        if flagged:
+            for start, end, minutes in flagged:
+                print(f"  open-market gap > {FEED_GAP_FLAG_MIN} min: "
+                      f"{start:%m-%d %H:%M} -> {end:%m-%d %H:%M} ({minutes:.0f} min)")
+        else:
+            print(f"  no open-market missing run > {FEED_GAP_FLAG_MIN} min")
     else:
-        print(f"  no gap > {FEED_GAP_FLAG_MIN} min")
-    cutoff = bars[-1]["dt"] - timedelta(days=GAP_WINDOW_DAYS)
-    recent_gaps = [g for g in gaps if g[1] >= cutoff]
-    worst = max((g[2] for g in recent_gaps), default=0.0)
+        print("  no open-market M15 log coverage available")
 
     # ---- 8. GATES ----------------------------------------------------------
-    print("\n== 8. GATES (proposed thresholds - constants at the top of this file) ==")
-    k_drop = max(3, math.ceil(TOP_FRAC * n))
-    without_top = total - sum(ranked[:k_drop])
-    recent = sorted(pg, key=lambda t: t["xt"])[-RECENT_N:]
-    recent_net = sum(t["profit"] for t in recent) - sp * len(recent)
-    cover = (g_mean / sp) if sp else 0.0      # no cost assumed => the cost gate cannot pass
-    gates = [
-        (f"sample: >= {MIN_TRADES} post-gate trades", n >= MIN_TRADES, f"{n}"),
-        (f"edge: by-day bootstrap P(net/trade>0) >= {MIN_P_EDGE:.0%}", p_day >= MIN_P_EDGE, f"{p_day:.0%}"),
-        (f"cost: break-even spread >= {MIN_SPREAD_COVER:.1f}x assumed", cover >= MIN_SPREAD_COVER,
-         f"{cover:.1f}x (${g_mean:.2f} vs ${sp:.2f})" if sp else "cannot pass: gross mode"),
-        (f"fragility: net > 0 without the best {k_drop} trades", without_top > 0, f"{without_top:+.2f}"),
-        (f"recent form: last {RECENT_N} closed trades net >= 0", recent_net >= 0, f"{recent_net:+.2f}"),
-        (f"feed: no gap > {MAX_GAP_MIN} min in the last {GAP_WINDOW_DAYS} days of the log", worst <= MAX_GAP_MIN,
-         f"worst {worst:.0f} min"),
-    ]
-    for label, ok, val in gates:
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label:62s} {val}")
-    npass = sum(1 for _, ok, _ in gates if ok)
-    print(f"\n  DATA GATES: {npass}/{len(gates)} pass.", end=" ")
-    if npass < len(gates):
-        print("NOT READY - keep forward-testing; see the failing gates above.")
-    else:
-        print("Data gates pass; this is necessary, not sufficient (checklist below).")
-
-    print("\n  NON-DATA GATES (cannot be computed from the CSVs - sign each off by hand;")
-    print("  details and evidence in docs/REVIEW-2026-10-01.md sections 6-7;\n    python3 tools/live_path_probe.py reproduces the order-path findings):")
-    for item in (
-        "LIVE order path fixed + smoke-tested (close detection by position id, restart reconciliation,"
-        " spread guard, filling mode, None-result handling)",
-        "an order executor that can run where MT5 runs (the Linux engine cannot import MetaTrader5)",
-        "XM spread profile measured (Asia/London/NY/weekend) + commission/swap confirmed -> new --spread",
-        "demo-account run through the real order path; sim-vs-demo trade parity reviewed",
-        "same-feed parity: a forward run on DATA_SOURCE=MT5 shows comparable signal flow",
-        "kill switches: equity floor, max spread, stale-feed alarm, manual halt - all tested",
-        "micro-live caps agreed in writing (size, max loss, weekday-only or not)",
-    ):
-        print(f"    [ ] {item}")
-    return 0 if npass == len(gates) else 1
+    return print_gates(evidence["gates"])
 
 
 if __name__ == "__main__":

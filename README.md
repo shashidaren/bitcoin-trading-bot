@@ -2,7 +2,7 @@
 
 Automated intraday structural floor/ceiling rejection trading system for XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles, deployed on Linux (`/opt/nasdaq`) alongside a Wine MetaTrader 5 sidecar stack.
 
-> Start every session at `docs/HANDOFF.md`. For server install, service layout, and troubleshooting, see `docs/NASDAQ-OPS.md`.
+> Start every session at `docs/EXECUTION-PLAN.md`, then check `docs/HANDOFF.md`. For server install, service layout, and troubleshooting, see `docs/NASDAQ-OPS.md`.
 
 ---
 
@@ -15,7 +15,7 @@ Automated intraday structural floor/ceiling rejection trading system for XM's **
 | **MT5 Candle + Warm-Up Sidecar** | `tools/mt5_feed.py` | Wine Python (`mt5feed-nasdaq`) | Publishes closed `US100Cash` `M15` bars (`mt5_last_candle.json`) + 250-bar startup history (`mt5_warmup_candles.json`) so EMA200 is warm immediately |
 | **MT5 Quote & Shadow Logger** | `tools/mt5_quotes.py` | Wine Python (`mt5quotes-nasdaq`) | Strictly read-only logger recording live bid/ask spreads, contract specs, and 12,000 backfilled `M15` candles (`xm_data/candles_m15.csv`) |
 | **MT5 Order Executor Sidecar** | `tools/mt5_executor.py` | Wine Python (`mt5exec-nasdaq`) | Dormant (`MT5_EXEC_ENABLED=0`) and demo-locked (`MT5_EXEC_ALLOW_REAL=0`) by default; bridges Linux `LIVE` intents to MT5 via `/opt/nasdaq/mt5_bridge/` |
-| **Web Dashboard** | `dashboard.py` + `pressure.py` | Linux Python (`:6001`) | Read-only Flask UI showing live `US100Cash` `M15` funnel, net-of-spread P&L (`$0.25`/trade at `0.10` lot), and 60-bar (15h) tape pressure |
+| **Web Dashboard** | `dashboard.py` + `pressure.py` | Linux Python (`:6001`) | Read-only Flask UI showing the `US100Cash` M15 funnel, 60-bar tape pressure, and `/readiness`: current feed/heartbeat, shared data gates and an unsigned manual checklist |
 | **Feed Diagnosis** | `feed_health.py` + `tools/feed_doctor.py` | Linux Python | Classifies every "no fresh M15 bar" cause (missing file / unreadable / schema / foreign symbol / frozen candle / clock skew), reads the sidecar heartbeat (`mt5_feed_health.json`), and proves whether MT5 itself is alive via the quote-logger witness |
 | **Autosync & Safe Deploy** | `tools/autosync.sh` | Cron (`root`, every 15m) | Commits live data, pulls upstream merges gated by `tools/smoke_test.py`, runs `check_data.py` + `handoff_check.py` + `xm_quote_report.py` |
 
@@ -41,7 +41,7 @@ Automated intraday structural floor/ceiling rejection trading system for XM's **
 # 1. Full offline regression suite (engine, filter, dashboard, feed, quotes, executor, autosync)
 python3 tools/smoke_test.py
 
-# 2. LIVE execution safety probe (direct MetaTrader5 + Linux Wine mt5_bridge)
+# 2. Offline LIVE execution safety probe (fake MT5 + temporary bridge; no orders)
 python3 tools/live_path_probe.py
 
 # 3. Feed triage (reason + sidecar heartbeat + independent quote-logger witness)
@@ -54,7 +54,22 @@ python3 tools/handoff_check.py
 # 5. XM US100Cash quote/spread/cost/parity report & 12,000-bar M15 historical backtest
 python3 tools/xm_quote_report.py
 python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
+
+# 6. Readiness regression suite (install Flask to run the dashboard-specific tests)
+python3 -m unittest discover -s tests -v
 ```
+
+The Readiness page and `tools/live_readiness.py` share the same post-gate data calculations. Fewer than ten trades leaves statistical results **UNKNOWN**; passing all six data gates is necessary but not sufficient for real-money trading. Current feed/heartbeat health, recent engine/log snapshots and the manually signed contract, cost, demo-soak and kill-switch checks remain separate requirements.
+
+For a read-only local dashboard using the checked-in snapshot (no MT5 connection or orders):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install flask
+NASDAQ_DATA_DIR="$PWD" .venv/bin/python dashboard.py  # then open http://localhost:6001/readiness
+```
+
+The local checkout does not contain the live MT5 feed, so a missing-feed verdict here does not describe the VPS. `/healthz` is dashboard-process liveness only, not a trading or feed-health check.
 
 ## Server Operations (`/opt/nasdaq`)
 
