@@ -133,7 +133,9 @@ if [ "$NEED_MERGE" = "1" ]; then
     else
         CODE_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- '*.py' | grep -c . || true)
         CORE_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- engine.py trade_filter.py | grep -c . || true)
-        DASH_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- dashboard.py pressure.py | grep -c . || true)
+        # Restart the dashboard when any module it imports changes; otherwise
+        # readiness/feed calculations can remain stale after a successful deploy.
+        DASH_CHANGED=$(git diff --name-only HEAD "$REMOTE_SHA" -- dashboard.py pressure.py feed_health.py trade_filter.py tools/live_readiness.py tools/replay_lib.py | grep -c . || true)
         SVC=$(detect_service 'engine\.py' "$ENGINE_SERVICE" || true)
         PRE_MERGE=$(git rev-parse HEAD)
 
