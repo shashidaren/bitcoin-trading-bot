@@ -83,6 +83,10 @@ HTML_TEMPLATE = """
                 class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
                 Journal (event log)
             </button>
+            <button id="tab-readiness" onclick="switchTab('readiness')"
+                class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
+                Readiness
+            </button>
         </nav>
 
         <div id="panel-dashboard" class="tab-panel">
@@ -443,6 +447,134 @@ HTML_TEMPLATE = """
             {% endif %}
         </div>
 
+        <!-- Readiness panel -->
+        <div id="panel-readiness" class="tab-panel hidden">
+            <div class="flex justify-between items-start md:items-center gap-3 mb-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-slate-100">Go / No-Go Readiness</h2>
+                    <p class="text-xs text-slate-400">
+                        Live-readiness picture for {{ status.symbol or 'US100Cash' }} M15.
+                        Data gates are computed from the ledger and feed; the non-data checklist
+                        is signed off by hand (docs/EXECUTION-PLAN.md). Full numbers:
+                        <code>python3 tools/live_readiness.py --spread 0.25</code>.
+                    </p>
+                </div>
+                <span class="text-xs px-2.5 py-1 rounded-full
+                    {{ 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40' if readiness.ok else 'bg-rose-900/40 text-rose-300 border border-rose-700/40' if readiness.ok == False else 'bg-slate-900/40 text-slate-400 border border-slate-700/40' }}">
+                    {{ readiness.verdict }}
+                </span>
+            </div>
+
+            {% if readiness.error %}
+            <div role="status" class="bg-rose-950/60 border border-rose-700/60 text-rose-100 rounded-lg px-4 py-3 mb-5 text-sm">
+                <p class="font-semibold">Readiness could not be computed.</p>
+                <p class="text-rose-200/90">{{ readiness.error }}</p>
+            </div>
+            {% endif %}
+
+            <!-- Feed + verdict strip -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <p class="text-xs text-slate-400">M15 Feed</p>
+                    <p class="text-2xl font-bold
+                        {{ 'text-emerald-400' if feed.ok else 'text-rose-400' }}">
+                        {% if feed.ok %}OK{% else %}{{ feed.reason or 'PROBLEM' }}{% endif %}
+                    </p>
+                    <p class="text-xs text-slate-500 mt-1">{{ feed.detail or 'no feed data' }}</p>
+                </div>
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <p class="text-xs text-slate-400">Equity (0.10 lot)</p>
+                    <p class="text-2xl font-bold text-cyan-400">${{ "%.2f"|format(status.equity or 0) }}</p>
+                    <p class="text-xs text-slate-500 mt-1">{{ status.total_trades }} closed · {{ status.wins }}W/{{ status.losses }}L</p>
+                </div>
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <p class="text-xs text-slate-400">Daily circuit breaker</p>
+                    <p class="text-2xl font-bold
+                        {{ 'text-rose-400' if (status.daily_losses or 0) >= (status.max_daily_losses or 3) else 'text-slate-200' }}">
+                        {{ status.daily_losses or 0 }} / {{ status.max_daily_losses or 3 }}
+                        {% if (status.daily_losses or 0) >= (status.max_daily_losses or 3) %}
+                        <span class="text-xs bg-rose-900/60 text-rose-300 px-2 py-0.5 rounded ml-1 font-semibold">HALTED</span>
+                        {% endif %}
+                    </p>
+                    <p class="text-xs text-slate-500 mt-1">SLs today (max {{ status.max_daily_losses or 3 }})</p>
+                </div>
+            </div>
+
+            <!-- Data gates -->
+            <div class="bg-slate-800 p-5 rounded-xl border border-slate-700 mb-6">
+                <h3 class="text-sm font-semibold text-slate-100 mb-3">Data Gates (live_readiness.py)</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm text-slate-300">
+                        <thead class="bg-slate-900/50 text-slate-400 uppercase text-xs sticky top-0">
+                            <tr>
+                                <th class="px-3 py-3">Gate</th>
+                                <th class="px-3 py-3">Result</th>
+                                <th class="px-3 py-3 text-right">Value</th>
+                                <th class="px-3 py-3 text-slate-500">Note</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            {% for gate in readiness.gates %}
+                            <tr class="hover:bg-slate-700/40">
+                                <td class="px-3 py-2 font-mono text-xs">{{ gate.label }}</td>
+                                <td class="px-3 py-2">
+                                    <span class="px-2 py-0.5 rounded text-xs
+                                        {{ 'bg-emerald-900/50 text-emerald-400' if gate.ok else 'bg-rose-900/50 text-rose-400' }}">
+                                        {{ 'PASS' if gate.ok else 'FAIL' }}
+                                    </span>
+                                </td>
+                                <td class="px-3 py-2 font-mono text-xs text-right">{{ gate.value }}</td>
+                                <td class="px-3 py-2 text-xs text-slate-500">{{ gate.note }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <p class="mt-3 text-xs text-slate-500">
+                    {{ readiness.gates_passed }}/{{ readiness.gates_total }} data gates pass.
+                    {% if readiness.gates_passed == readiness.gates_total and readiness.gates_total > 0 %}
+                    Data gates pass — necessary, not sufficient. See the non-data checklist below.
+                    {% elif readiness.gates_total > 0 %}
+                    Not ready on data alone — keep forward-testing; see the failing gates above.
+                    {% else %}
+                    Insufficient data to score the gates yet (need post-gate closed trades).
+                    {% endif %}
+                </p>
+            </div>
+
+            <!-- Non-data checklist -->
+            <div class="bg-slate-800 p-5 rounded-xl border border-slate-700 mb-6">
+                <h3 class="text-sm font-semibold text-slate-100 mb-3">Non-Data Gates (sign off by hand)</h3>
+                <ul class="space-y-2 text-sm">
+                    {% for item in readiness.non_data %}
+                    <li class="flex items-start gap-3">
+                        <span class="text-xs text-slate-500 mt-0.5">[ ]</span>
+                        <span class="text-slate-300">{{ item }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+                <p class="mt-3 text-xs text-slate-500">
+                    Details and evidence in docs/REVIEW-2026-10-01.md §6-7;
+                    <code>python3 tools/live_path_probe.py</code> reproduces the order-path findings.
+                </p>
+            </div>
+
+            <!-- Evidence commands -->
+            <div class="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+                <h3 class="text-xs font-semibold text-slate-400 uppercase mb-2 tracking-wider">Evidence commands</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono text-slate-300">
+                    <div>python3 tools/live_readiness.py --spread 0.25</div>
+                    <div>python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25</div>
+                    <div>python3 tools/feed_doctor.py</div>
+                    <div>python3 tools/check_data.py</div>
+                    <div>python3 tools/handoff_check.py</div>
+                    <div>python3 tools/live_path_probe.py</div>
+                    <div>python3 tools/smoke_test.py</div>
+                    <div>python3 tools/handoff_check.py --update</div>
+                </div>
+            </div>
+        </div>
+
     </div>
 </body>
 </html>
@@ -553,6 +685,113 @@ def index():
             journal_error = f"could not read journal: {e}"
     journal = list(reversed(journal))[:100]
 
+    # ---- Readiness tab computation ---------------------------------------
+    readiness_error = None
+    readiness_ok = None          # True = ready, False = not ready, None = insufficient data
+    readiness_verdict = "INSUFFICIENT DATA"
+    readiness_gates = []
+    readiness_non_data = [
+        "LIVE order path fixed + smoke-tested (close detection by position id, restart reconciliation, "
+        "spread guard, filling mode, None-result handling)",
+        "an order executor that can run where MT5 runs (the Linux engine cannot import MetaTrader5)",
+        "XM spread profile measured (Asia/London/NY/weekend) + commission/swap confirmed -> new --spread",
+        "demo-account run through the real order path; sim-vs-demo trade parity reviewed",
+        "same-feed parity: a forward run on DATA_SOURCE=MT5 shows comparable signal flow",
+        "kill switches: equity floor, max spread, stale-feed alarm, manual halt - all tested",
+        "micro-live caps agreed in writing (size, max loss, weekday-only or not)",
+    ]
+
+    try:
+        feed_block = (status or {}).get("feed") or {}
+        feed_ok = bool(feed_block.get("ok")) or feed_block.get("reason") == feed_health.REASON_OK
+        total_trades = int(status.get("total_trades") or 0)
+        wins = int(status.get("wins") or 0)
+        losses = int(status.get("losses") or 0)
+        daily_losses = int(status.get("daily_losses") or 0)
+        max_daily_losses = int(status.get("max_daily_losses") or 3)
+        equity = float(status.get("equity") or 0)
+        win_rate = float(status.get("win_rate") or 0)
+
+        # Lightweight data gates computed from what the dashboard already has.
+        # These mirror tools/live_readiness.py §8 but stay read-only and cheap.
+        gates = []
+
+        # Gate 1: sample — enough post-gate closed trades to speak (progressive threshold).
+        sample_ok = total_trades >= 10
+        gates.append({
+            "label": "sample: >= 10 closed trades (forward-test evidence)",
+            "ok": sample_ok,
+            "value": str(total_trades),
+            "note": "live_readiness requires >= 100 post-gate trades for a go/no-go",
+        })
+
+        # Gate 2: edge — win rate vs the 1:2 R:R breakeven (33.3%) only when there is data.
+        be_wr = 33.3
+        edge_ok = total_trades > 0 and win_rate >= be_wr
+        gates.append({
+            "label": "edge: win rate >= 1:2 breakeven (~33.3%)",
+            "ok": edge_ok,
+            "value": f"{win_rate:.1f}% ({wins}W/{losses}L)",
+            "note": "bootstrap P(net/trade>0) >= 90% is scored by live_readiness.py",
+        })
+
+        # Gate 3: cost — equity above the $200 day-0 ledger means net-positive so far.
+        cost_ok = total_trades == 0 or equity > 200.0
+        gates.append({
+            "label": "cost: equity above $200.00 day-0 ledger",
+            "ok": cost_ok,
+            "value": f"${equity:,.2f}",
+            "note": "assumed $0.25/trade; break-even cover >= 2.0x scored by live_readiness.py",
+        })
+
+        # Gate 4: recent form — daily circuit breaker not tripped.
+        recent_ok = daily_losses < max_daily_losses
+        gates.append({
+            "label": "recent form: daily loss circuit breaker open",
+            "ok": recent_ok,
+            "value": f"{daily_losses}/{max_daily_losses} SLs",
+            "note": "$15/day max loss; 3-SL daily circuit breaker",
+        })
+
+        # Gate 5: feed — M15 feed healthy enough to trade.
+        feed_ok_gate = bool(feed_ok)
+        gates.append({
+            "label": "feed: M15 feed fresh and usable",
+            "ok": feed_ok_gate,
+            "value": "OK" if feed_ok else (feed_block.get("reason") or "PROBLEM"),
+            "note": feed_block.get("detail") or "no feed data",
+        })
+
+        # Gate 6: data integrity — trades.csv agree with status.json (already verified in index).
+        data_ok = bool(status_counts_match) if ledger_stats["total_trades"] else True
+        gates.append({
+            "label": "data: status.json agrees with trades.csv",
+            "ok": data_ok,
+            "value": "agree" if data_ok else "drift",
+            "note": "run python3 tools/check_data.py and handoff_check.py",
+        })
+
+        readiness_gates = gates
+        passed = sum(1 for g in gates if g["ok"])
+        readiness_gates_passed = passed
+        readiness_gates_total = len(gates)
+
+        if total_trades == 0:
+            readiness_ok = None
+            readiness_verdict = "INSUFFICIENT DATA"
+        elif not feed_ok_gate:
+            readiness_ok = False
+            readiness_verdict = "NOT READY — FEED"
+        elif not all(g["ok"] for g in gates):
+            readiness_ok = False
+            readiness_verdict = "NOT READY"
+        else:
+            readiness_ok = True
+            readiness_verdict = "DATA GATES PASS"
+
+    except Exception as exc:  # never let the readiness tab break the dashboard
+        readiness_error = f"readiness computation failed: {type(exc).__name__}: {exc}"
+
     return render_template_string(
         HTML_TEMPLATE,
         rows=recent_rows,
@@ -565,6 +804,15 @@ def index():
         feed=feed_banner(status),
         journal=journal,
         journal_error=journal_error,
+        readiness={
+            "ok": readiness_ok,
+            "verdict": readiness_verdict,
+            "error": readiness_error,
+            "gates": readiness_gates,
+            "gates_passed": readiness_gates_passed,
+            "gates_total": readiness_gates_total,
+            "non_data": readiness_non_data,
+        },
     )
 
 
