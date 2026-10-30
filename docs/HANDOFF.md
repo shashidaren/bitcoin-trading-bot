@@ -3,8 +3,8 @@
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-30 04:00 |
-| data_collection | 4738 |
+| as_of_utc | 2026-10-30 09:00 |
+| data_collection | 4760 |
 | closed_trades | 1 |
 | wins_losses | 1W/0L |
 | win_rate_pct | 100.0 |
@@ -13,8 +13,8 @@
 | live_era_trades | 1 |
 | live_era_net_usd | +22.45 |
 | log_covered_trades | 1 |
-| log_bars | 311 |
-| log_last_bar_utc | 2026-10-30 04:00 |
+| log_bars | 319 |
+| log_last_bar_utc | 2026-10-30 09:00 |
 | skip_rows | 0 |
 | open_trade | none |
 | spread_usd_per_trade | 0.25 |
@@ -27,7 +27,7 @@
 This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on **15-minute (`M15`)** candles under **`/opt/nasdaq`** (cutover date **2026-10-24**; all legacy data discarded).
 
 - **Day-0 Nasdaq ledger:** Root `trades.csv`, `forward_test_log.csv`, `skipped_trades.csv`, and `status.json` start clean at **$200.00** equity (`0W/0L`, `symbol: "US100Cash"`, `timeframe: "M15"`).
-- **Execution mode:** `TRADING_MODE = "FORWARD_TEST"` and `DATA_SOURCE = "MT5"` by default. Both the direct `MetaTrader5` path and the Linux Wine atomic file-bridge (`tools/mt5_executor.py` via `/opt/nasdaq/mt5_bridge/`) are implemented and verified (`11/11` checks clean in `tools/live_path_probe.py`), with `MT5_EXEC_ENABLED=0` and `MT5_EXEC_ALLOW_REAL=0` locked off until Stage B demo validation (`docs/START-LEVER1.md`) completes.
+- **Execution mode:** `TRADING_MODE = "FORWARD_TEST"` and `DATA_SOURCE = "MT5"` by default. Both the direct `MetaTrader5` path and the Linux Wine atomic file-bridge (`tools/mt5_executor.py` via `/opt/nasdaq/mt5_bridge/`) are implemented. `tools/live_path_probe.py` reports `11/11` checks against **fake MT5 in temporary directories**, not a broker demo. `MT5_EXEC_ENABLED=0` and `MT5_EXEC_ALLOW_REAL=0` remain locked off until the preceding phases and demo validation (`docs/START-LEVER1.md`) complete.
 
 ---
 
@@ -83,9 +83,11 @@ This repository auto-trades XM's **Nasdaq-100 Cash Index CFD (`US100Cash`)** on 
 
 ## 5. Immediate Next Operational Milestones
 
-1. **Keep the `/opt/nasdaq` stack healthy** (`docs/NASDAQ-OPS.md`): `mt5feed-nasdaq`, `mt5quotes-nasdaq`, `mt5exec-nasdaq` (Wine, `WINEPREFIX=/root/.mt5`) plus `nasdaq-engine` / `nasdaq-dashboard`; run `tools/check_data.py` + `tools/xm_quote_report.py --quiet` after any restart.
-2. **Verify `xm_data/symbol_spec.json` and 12,000-bar backfill:** Once `mt5quotes-nasdaq` runs its first cycle against the logged-in XM terminal, `xm_data/candles_m15.csv` will immediately hold ~6 months of XM `US100Cash` M15 history. Run `tools/backtest.py` and `tools/xm_quote_report.py` right away!
-3. **Complete Stage B Demo Soak (`docs/START-LEVER1.md`):** Keep `MT5_EXEC_ALLOW_REAL=0`, enable `MT5_EXEC_ENABLED=1` and `TRADING_MODE=LIVE` on an XM **demo** account, and verify 5–10 live round-trips match `trades.csv` and `status.json`.
+Follow `docs/EXECUTION-PLAN.md` in order; do not move to demo execution or real money while Phase 1 is blocked.
+
+1. **Verify the live VPS and investigate the forward-log gaps:** Run the §6 ladder on `/opt/nasdaq` and compare missing October 30 open-market M15 slots against the MT5 feed, engine and journal. The checked-in snapshot is not a live-feed health check. Never rewrite the forward log to make a gate pass.
+2. **Keep accumulating forward-test evidence:** Once Phase 1 is complete, keep `mt5feed-nasdaq` and `nasdaq-engine` healthy and work toward 100 post-gate closed trades. Use the XM historical backtest for context, not as a substitute for forward-test evidence.
+3. **Later, perform the demo soak:** Only after the preceding phases, follow `docs/START-LEVER1.md` on an XM **demo** account, keep `MT5_EXEC_ALLOW_REAL=0`, and verify 5–10 actual demo round-trips plus position reconciliation and HALT flatten. The offline fake-MT5 probe is not that soak.
 
 ---
 

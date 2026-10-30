@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 import csv
 import json
+import math
 import os
 import time
-from flask import Flask, render_template_string
+from datetime import datetime, timezone
+from functools import lru_cache
+
+from flask import Flask, render_template_string, request
 
 import feed_health
 import pressure as tape_pressure
+from tools import live_readiness
+from trade_filter import MAX_DAILY_LOSS_USD, is_market_quiet
 
 app = Flask(__name__)
 
@@ -20,45 +26,183 @@ MT5_FEED_HEALTH_FILE = os.getenv("MT5_FEED_HEALTH_FILE", os.path.join(DATA_DIR, 
 
 
 def feed_banner(status, health_path=None, feed_path=None, now_epoch=None):
-    """Read-only feed verdict for the dashboard header.
-
-    Shows WHY there is no fresh M15 bar (missing file / foreign symbol / frozen
-    candle / silent sidecar) instead of only that the funnel is idle.
-    """
+    """Diagnose the actual feed now; an old status.json OK is never a fallback."""
     health_path = health_path or MT5_FEED_HEALTH_FILE
     feed_path = feed_path or MT5_FEED_FILE
     now = time.time() if now_epoch is None else float(now_epoch)
-    block = (status or {}).get("feed") or {}
-    health = feed_health.diagnose_sidecar_health(health_path, now)
-    diag = feed_health.diagnose_feed_file(feed_path, expected_symbol=(status or {}).get("symbol"),
-                                          now_epoch=now)
-    reason = diag.get("reason")
-    ok = bool(diag.get("ok")) or block.get("reason") == feed_health.REASON_OK
+    health_error = None
+    try:
+        health = feed_health.diagnose_sidecar_health(health_path, now)
+        sidecar = feed_health.summarize_sidecar(health)
+    except (TypeError, ValueError, OverflowError) as exc:
+        health = {"present": False, "fresh": False}
+        sidecar = ""
+        health_error = f"heartbeat data is invalid: {type(exc).__name__}"
+    try:
+        diag = feed_health.diagnose_feed_file(feed_path, expected_symbol="US100Cash", now_epoch=now)
+    except (TypeError, ValueError, OverflowError) as exc:
+        diag = {"ok": False, "reason": feed_health.REASON_SCHEMA, "exists": os.path.exists(feed_path),
+                "detail": f"feed data is invalid: {type(exc).__name__}"}
+    rates = diag.get("rates") or []
+    if diag.get("usable") and rates:
+        r = rates[0]
+        values = [r[k] for k in ("open", "high", "low", "close")]
+        if (not all(math.isfinite(value) for value in values) or min(values) <= 0
+                or r["high"] < max(r["open"], r["close"])
+                or r["low"] > min(r["open"], r["close"]) or r["tick_volume"] < 0):
+            diag.update(ok=False, reason=feed_health.REASON_SCHEMA, detail="Feed OHLC/volume is invalid.")
+        elif (feed_health.normalize_symbol(diag.get("symbol")) != "US100CASH"
+              or str(diag.get("timeframe") or "").upper() != "M15"):
+            diag.update(ok=False, reason=feed_health.REASON_SCHEMA,
+                        detail="Feed must be explicitly tagged US100Cash M15.")
+    # A forming bar is not a closed M15 candle, even if its open time is plausible.
+    if diag.get("ok") and diag["candle_open_ts"] + feed_health.CANDLE_SECONDS > now:
+        diag.update(ok=False, reason=feed_health.REASON_FUTURE,
+                    detail="The reported M15 bar has not closed yet; check feed clock/offset.")
+    quiet = is_market_quiet(datetime.fromtimestamp(now, tz=timezone.utc))
+    heartbeat_in_future = False
+    if health.get("present"):
+        try:
+            heartbeat_in_future = os.path.getmtime(health_path) > now + 60
+        except OSError:
+            heartbeat_in_future = True
+    sidecar_ok = (health.get("present") and health.get("fresh") and not heartbeat_in_future
+                  and health.get("status") == "OK" and health.get("terminal_connected") is True
+                  and feed_health.normalize_symbol(health.get("symbol")) == "US100CASH")
 
-    def _mins(seconds):
+    if diag.get("ok") and sidecar_ok:
+        level = "OK"
+    elif diag.get("reason") in feed_health.STRUCTURAL_REASONS:
+        level = "BROKEN"
+    elif quiet and diag.get("reason") == feed_health.REASON_OLD:
+        level = "MARKET QUIET"
+    elif diag.get("ok"):
+        level = "DEGRADED"
+    else:
+        level = "STALE"
+
+    def mins(seconds):
         return "n/a" if seconds is None else (f"{seconds / 60:.0f} min" if seconds >= 90
                                               else f"{seconds:.0f}s")
 
     lines = []
     if diag.get("exists"):
         lines.append(f"last closed M15 bar: {diag.get('candle_open_utc')} UTC open "
-                     f"({_mins(diag.get('candle_age_s'))} old), file written "
-                     f"{_mins(diag.get('file_age_s'))} ago")
+                     f"({mins(diag.get('candle_age_s'))} old), file written "
+                     f"{mins(diag.get('file_age_s'))} ago")
     else:
         lines.append(f"{os.path.basename(feed_path)} missing - the mt5feed sidecar is not publishing")
-    sidecar = feed_health.summarize_sidecar(health)
-    if sidecar:
-        lines.append(sidecar)
-    else:
-        lines.append("no mt5feed heartbeat yet (mt5_feed_health.json)")
-
+    lines.append(health_error or sidecar or "no mt5feed heartbeat (mt5_feed_health.json)")
+    if heartbeat_in_future:
+        lines.append("heartbeat file timestamp is in the future; check clocks and shared storage.")
+    if quiet:
+        lines.append("CME market-quiet window; a quiet market is not proof of a healthy feed.")
     return {
-        "ok": ok,
-        "reason": reason,
-        "detail": diag.get("detail") or block.get("detail"),
-        "frozen_since_utc": diag.get("frozen_since_utc") or block.get("frozen_since_utc"),
+        "ok": level == "OK",
+        "level": level,
+        "reason": diag.get("reason"),
+        "detail": diag.get("detail"),
+        "frozen_since_utc": diag.get("frozen_since_utc"),
         "lines": lines,
     }
+
+
+def _file_signature(path):
+    stat = os.stat(path)
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+@lru_cache(maxsize=8)
+def _cached_evidence(trades_path, trades_signature, log_path, log_signature):
+    """Avoid repeating the bootstrap on every five-second dashboard refresh."""
+    trades, bars = live_readiness.load_readiness_data(trades_path, log_path)
+    if (_file_signature(trades_path) != trades_signature or
+            _file_signature(log_path) != log_signature):
+        raise ValueError("evidence changed while being read; retry the refresh")
+    evidence = live_readiness.evaluate_data_gates(trades, bars)
+    if (_file_signature(trades_path) != trades_signature or
+            _file_signature(log_path) != log_signature):
+        raise ValueError("evidence changed during calculation; retry the refresh")
+    return trades, bars, evidence
+
+
+def readiness_snapshot(status, status_available, feed, now_epoch=None):
+    """Build a fail-closed, read-only snapshot without authorizing LIVE trading."""
+    now = time.time() if now_epoch is None else float(now_epoch)
+    result = {
+        "ok": False, "verdict": "NOT READY — EVIDENCE UNAVAILABLE", "error": None,
+        "gates": [], "gates_passed": 0, "gates_total": 0,
+        "non_data": live_readiness.NON_DATA_GATES, "stats": None,
+        "min_trades": live_readiness.MIN_TRADES, "spread": live_readiness.DEFAULT_SPREAD,
+        "snapshot_issues": [], "last_bar": None,
+    }
+    try:
+        trades, bars, evidence = _cached_evidence(
+            TRADES_FILE_PATH, _file_signature(TRADES_FILE_PATH),
+            LOG_FILE_PATH, _file_signature(LOG_FILE_PATH))
+        pg = evidence["post_gate"]
+        wins = sum(t["profit"] > 0 for t in pg)
+        losses = sum(t["profit"] < 0 for t in pg)
+        result["stats"] = {
+            "closed": len(trades), "post_gate": len(pg), "wins": wins, "losses": losses,
+            "flat": len(pg) - wins - losses, "win_rate": 100 * wins / len(pg) if pg else None,
+            "net": sum(t["profit"] - live_readiness.DEFAULT_SPREAD for t in pg),
+        }
+        result["gates"] = evidence["gates"]
+        result["gates_total"] = len(evidence["gates"])
+        result["gates_passed"] = sum(g["ok"] is True for g in evidence["gates"])
+        result["last_bar"] = bars[-1]["dt"].strftime("%Y-%m-%d %H:%M UTC") if bars else None
+
+        def fresh(dt):
+            if dt is None:
+                return False
+            age = now - dt.replace(tzinfo=timezone.utc).timestamp()
+            return -60 <= age <= 20 * 60
+
+        issues = result["snapshot_issues"]
+        if not bars or not fresh(bars[-1]["dt"]):
+            issues.append("The latest logged M15 bar is missing or more than 20 minutes old; "
+                          "check the engine and market hours.")
+        if not status_available:
+            issues.append("status.json is missing or unreadable; engine balance and risk state are unknown.")
+        else:
+            if not fresh(tape_pressure.parse_ts(status.get("last_update"))):
+                issues.append("The engine status timestamp is missing or more than 20 minutes old.")
+            if status.get("symbol") != "US100Cash":
+                issues.append("The engine status does not identify US100Cash.")
+            if status["daily_losses"] >= status["max_daily_losses"]:
+                issues.append("The reported daily stop-loss circuit breaker is halted.")
+            today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+            daily_pnl = sum(t["profit"] for t in trades if t["xt"].date() == today)
+            if daily_pnl <= -MAX_DAILY_LOSS_USD:
+                issues.append(f"The ledger's UTC-day P/L (${daily_pnl:+.2f}) trips the "
+                              f"${MAX_DAILY_LOSS_USD:.2f} daily loss limit.")
+            ledger_wins = sum(t["reason"] == "TP" for t in trades)
+            ledger_losses = sum(t["reason"] == "SL" for t in trades)
+            for key, expected in (("total_trades", len(trades)),
+                                  ("wins", ledger_wins), ("losses", ledger_losses)):
+                try:
+                    if int(status.get(key)) != expected:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    issues.append("status.json trade counters do not match the ledger.")
+                    break
+
+        if not feed["ok"]:
+            result["verdict"] = "NOT READY — FEED"
+        elif issues:
+            result["verdict"] = "NOT READY — SNAPSHOT"
+        elif result["gates_passed"] != result["gates_total"]:
+            result["verdict"] = "NOT READY — DATA GATES"
+        else:
+            result["ok"] = True
+            result["verdict"] = "DATA GATES PASS — MANUAL REVIEW REQUIRED"
+    except (OSError, ValueError, csv.Error) as exc:
+        result["error"] = f"Evidence unavailable or invalid: {exc}"
+    except Exception as exc:
+        # Read-only UI must fail closed rather than hide a broken computation.
+        result["error"] = f"Readiness computation failed: {type(exc).__name__}: {exc}"
+    return result
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -68,28 +212,29 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nasdaq-100 (US100Cash) Trading Engine Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>.hidden { display: none !important; }</style>
     <meta http-equiv="refresh" content="5">
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans p-6">
     <div class="max-w-7xl mx-auto">
 
         <!-- Tab navigation -->
-        <nav class="flex gap-2 mb-6 border-b border-slate-700 pb-2">
-            <button id="tab-dashboard" onclick="switchTab('dashboard')"
-                class="tab-btn active bg-cyan-600 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-md">
+        <nav aria-label="Dashboard sections" class="flex flex-wrap gap-2 mb-6 border-b border-slate-700 pb-2">
+            <a id="tab-dashboard" href="/" {% if active_tab == 'dashboard' %}aria-current="page"{% endif %}
+                class="px-4 py-2 rounded-lg text-sm font-semibold {{ 'bg-cyan-600 text-white shadow-md' if active_tab == 'dashboard' else 'text-slate-400 hover:text-slate-300' }}">
                 NDX Dashboard
-            </button>
-            <button id="tab-journal" onclick="switchTab('journal')"
-                class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
+            </a>
+            <a id="tab-journal" href="/journal" {% if active_tab == 'journal' %}aria-current="page"{% endif %}
+                class="px-4 py-2 rounded-lg text-sm font-semibold {{ 'bg-cyan-600 text-white shadow-md' if active_tab == 'journal' else 'text-slate-400 hover:text-slate-300' }}">
                 Journal (event log)
-            </button>
-            <button id="tab-readiness" onclick="switchTab('readiness')"
-                class="tab-btn text-slate-400 hover:text-slate-300 px-4 py-2 rounded-lg text-sm font-semibold">
+            </a>
+            <a id="tab-readiness" href="/readiness" {% if active_tab == 'readiness' %}aria-current="page"{% endif %}
+                class="px-4 py-2 rounded-lg text-sm font-semibold {{ 'bg-cyan-600 text-white shadow-md' if active_tab == 'readiness' else 'text-slate-400 hover:text-slate-300' }}">
                 Readiness
-            </button>
+            </a>
         </nav>
 
-        <div id="panel-dashboard" class="tab-panel">
+        <div id="panel-dashboard" class="tab-panel{% if active_tab != 'dashboard' %} hidden{% endif %}">
 
             <!-- Header -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 border-b border-slate-800 pb-4 gap-4">
@@ -101,18 +246,20 @@ HTML_TEMPLATE = """
             </div>
             <div class="flex items-center gap-4">
                 <div class="bg-slate-800 px-4 py-2 rounded-xl border border-slate-700 text-right">
-                    <span class="text-xs text-slate-400 block">Daily SLs (Max {{ status.max_daily_losses or 3 }})</span>
-                    <span class="text-xl font-bold {{ 'text-rose-400' if (status.daily_losses or 0) >= (status.max_daily_losses or 3) else 'text-slate-200' }}">
-                        {{ status.daily_losses or 0 }} / {{ status.max_daily_losses or 3 }}
-                        {% if (status.daily_losses or 0) >= (status.max_daily_losses or 3) %}
+                    <span class="text-xs text-slate-400 block">Daily SLs</span>
+                    <span class="text-xl font-bold {{ 'text-rose-400' if status_available and status.daily_losses >= status.max_daily_losses else 'text-slate-200' }}">
+                        {% if status_available %}
+                        {{ status.daily_losses }} / {{ status.max_daily_losses }}
+                        {% if status.daily_losses >= status.max_daily_losses %}
                         <span class="text-xs bg-rose-900/60 text-rose-300 px-2 py-0.5 rounded ml-1 font-semibold">HALTED</span>
                         {% endif %}
+                        {% else %}Unavailable{% endif %}
                     </span>
                 </div>
                 <div class="bg-slate-800 px-5 py-3 rounded-xl border border-slate-700 text-right">
                     <span class="text-xs text-slate-400 block">Engine Ledger Balance</span>
-                    <span class="text-3xl font-semibold {{ 'text-emerald-400' if status.equity >= 200 else 'text-rose-400' }}">
-                        ${{ "%.2f"|format(status.equity) }}
+                    <span class="text-3xl font-semibold {{ 'text-emerald-400' if status_available and status.equity >= 200 else 'text-slate-400' }}">
+                        {% if status_available %}${{ "%.2f"|format(status.equity) }}{% else %}Unavailable{% endif %}
                     </span>
                     <span class="text-[10px] text-slate-500 block">0.10 lot US100Cash ($0.10/pt)</span>
                 </div>
@@ -121,7 +268,7 @@ HTML_TEMPLATE = """
 
         {% if feed and not feed.ok %}
         <div role="status" class="bg-rose-950/60 border border-rose-700/60 text-rose-100 rounded-lg px-4 py-3 mb-5 text-sm">
-            <p class="font-semibold">M15 feed problem: {{ feed.reason }}</p>
+            <p class="font-semibold">M15 feed: {{ feed.level }} ({{ feed.reason }})</p>
             <p class="text-rose-200/90">{{ feed.detail }}</p>
             <ul class="mt-1 text-xs text-rose-300/80 list-disc list-inside">
                 {% for line in feed.lines %}<li>{{ line }}</li>{% endfor %}
@@ -130,6 +277,11 @@ HTML_TEMPLATE = """
         </div>
         {% endif %}
 
+        {% if not status_available %}
+        <div role="status" class="bg-amber-950/60 border border-amber-700/60 text-amber-200 rounded-lg px-4 py-3 mb-5 text-sm">
+            Engine status is unavailable or invalid. Risk state, balance and status-derived counters are not verified.
+        </div>
+        {% endif %}
         {% if trade_stats_warning %}
         <div role="status" class="bg-amber-950/60 border border-amber-700/60 text-amber-200 rounded-lg px-4 py-3 mb-5 text-sm">
             {{ trade_stats_warning }}
@@ -396,7 +548,7 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Journal panel -->
-        <div id="panel-journal" class="tab-panel hidden">
+        <div id="panel-journal" class="tab-panel{% if active_tab != 'journal' %} hidden{% endif %}">
             <div class="flex justify-between items-start md:items-center gap-3 mb-4">
                 <div>
                     <h2 class="text-lg font-semibold text-slate-100">Event Journal</h2>
@@ -448,15 +600,15 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- Readiness panel -->
-        <div id="panel-readiness" class="tab-panel hidden">
+        <div id="panel-readiness" class="tab-panel{% if active_tab != 'readiness' %} hidden{% endif %}">
             <div class="flex justify-between items-start md:items-center gap-3 mb-4">
                 <div>
                     <h2 class="text-lg font-semibold text-slate-100">Go / No-Go Readiness</h2>
                     <p class="text-xs text-slate-400">
-                        Live-readiness picture for {{ status.symbol or 'US100Cash' }} M15.
-                        Data gates are computed from the ledger and feed; the non-data checklist
-                        is signed off by hand (docs/EXECUTION-PLAN.md). Full numbers:
-                        <code>python3 tools/live_readiness.py --spread 0.25</code>.
+                        US100Cash M15 · Forward-test evidence at ${{ "%.2f"|format(readiness.spread) }} assumed cost per trade.
+                        The six data gates use the same calculations as
+                        <code>python3 tools/live_readiness.py --spread {{ "%.2f"|format(readiness.spread) }}</code>.
+                        Passing them never authorizes real-money trading by itself.
                     </p>
                 </div>
                 <span class="text-xs px-2.5 py-1 rounded-full
@@ -471,32 +623,44 @@ HTML_TEMPLATE = """
                 <p class="text-rose-200/90">{{ readiness.error }}</p>
             </div>
             {% endif %}
+            {% if readiness.snapshot_issues %}
+            <div role="status" class="bg-amber-950/50 border border-amber-700/60 text-amber-200 rounded-lg px-4 py-3 mb-5 text-sm">
+                <p class="font-semibold">Snapshot needs attention</p>
+                <ul class="list-disc list-inside mt-1 text-xs">
+                    {% for issue in readiness.snapshot_issues %}<li>{{ issue }}</li>{% endfor %}
+                </ul>
+            </div>
+            {% endif %}
 
             <!-- Feed + verdict strip -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
                 <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                    <p class="text-xs text-slate-400">M15 Feed</p>
-                    <p class="text-2xl font-bold
-                        {{ 'text-emerald-400' if feed.ok else 'text-rose-400' }}">
-                        {% if feed.ok %}OK{% else %}{{ feed.reason or 'PROBLEM' }}{% endif %}
-                    </p>
-                    <p class="text-xs text-slate-500 mt-1">{{ feed.detail or 'no feed data' }}</p>
+                    <p class="text-xs text-slate-400">M15 feed · checked now</p>
+                    <p class="text-xl font-bold mt-1 {{ 'text-emerald-400' if feed.ok else 'text-rose-400' }}">{{ feed.level }}</p>
+                    <p class="text-xs text-slate-400 mt-1">{{ feed.reason }} · {{ feed.detail or 'no feed data' }}</p>
+                    <p class="text-xs text-slate-500 mt-1">{{ feed.lines[-1] }}</p>
                 </div>
                 <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                    <p class="text-xs text-slate-400">Equity (0.10 lot)</p>
-                    <p class="text-2xl font-bold text-cyan-400">${{ "%.2f"|format(status.equity or 0) }}</p>
-                    <p class="text-xs text-slate-500 mt-1">{{ status.total_trades }} closed · {{ status.wins }}W/{{ status.losses }}L</p>
+                    <p class="text-xs text-slate-400">Post-gate closed trades</p>
+                    {% if readiness.stats %}
+                    <p class="text-2xl font-bold text-cyan-400 mt-1">{{ readiness.stats.post_gate }} <span class="text-sm text-slate-500">/ {{ readiness.min_trades }} minimum</span></p>
+                    <p class="text-xs text-slate-400 mt-1">{{ readiness.stats.wins }}W / {{ readiness.stats.losses }}L{% if readiness.stats.flat %} / {{ readiness.stats.flat }} flat{% endif %}{% if readiness.stats.win_rate is not none %} · {{ "%.1f"|format(readiness.stats.win_rate) }}% wins{% endif %} · {{ readiness.stats.closed }} total closed</p>
+                    <p class="text-xs text-slate-500 mt-1">${{ "%+.2f"|format(readiness.stats.net) }} post-gate, after assumed cost</p>
+                    {% else %}<p class="text-slate-400 mt-1">Unavailable</p>{% endif %}
                 </div>
                 <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                    <p class="text-xs text-slate-400">Daily circuit breaker</p>
-                    <p class="text-2xl font-bold
-                        {{ 'text-rose-400' if (status.daily_losses or 0) >= (status.max_daily_losses or 3) else 'text-slate-200' }}">
-                        {{ status.daily_losses or 0 }} / {{ status.max_daily_losses or 3 }}
-                        {% if (status.daily_losses or 0) >= (status.max_daily_losses or 3) %}
-                        <span class="text-xs bg-rose-900/60 text-rose-300 px-2 py-0.5 rounded ml-1 font-semibold">HALTED</span>
-                        {% endif %}
-                    </p>
-                    <p class="text-xs text-slate-500 mt-1">SLs today (max {{ status.max_daily_losses or 3 }})</p>
+                    <p class="text-xs text-slate-400">Engine ledger · gross</p>
+                    {% if status_available %}
+                    <p class="text-2xl font-bold text-slate-100 mt-1">${{ "%.2f"|format(status.equity) }}</p>
+                    <p class="text-xs text-slate-500 mt-1">Status updated {{ status.last_update or 'unknown' }} UTC</p>
+                    {% else %}<p class="text-slate-400 mt-1">Unavailable</p>{% endif %}
+                </div>
+                <div class="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                    <p class="text-xs text-slate-400">Last logged M15 bar</p>
+                    <p class="text-lg font-bold text-slate-100 mt-1">{{ readiness.last_bar or 'Unavailable' }}</p>
+                    {% if status_available %}
+                    <p class="text-xs text-slate-500 mt-1">Reported daily SLs: {{ status.daily_losses or 0 }} / {{ status.max_daily_losses or 3 }}{% if (status.daily_losses or 0) >= (status.max_daily_losses or 3) %} · HALTED{% endif %}</p>
+                    {% else %}<p class="text-xs text-slate-500 mt-1">Daily circuit breaker state unknown</p>{% endif %}
                 </div>
             </div>
 
@@ -515,12 +679,12 @@ HTML_TEMPLATE = """
                         </thead>
                         <tbody class="divide-y divide-slate-700">
                             {% for gate in readiness.gates %}
-                            <tr class="hover:bg-slate-700/40">
+                            <tr data-gate="{{ gate.key }}" class="hover:bg-slate-700/40">
                                 <td class="px-3 py-2 font-mono text-xs">{{ gate.label }}</td>
                                 <td class="px-3 py-2">
                                     <span class="px-2 py-0.5 rounded text-xs
-                                        {{ 'bg-emerald-900/50 text-emerald-400' if gate.ok else 'bg-rose-900/50 text-rose-400' }}">
-                                        {{ 'PASS' if gate.ok else 'FAIL' }}
+                                        {{ 'bg-slate-700 text-slate-300' if gate.ok is none else 'bg-emerald-900/50 text-emerald-400' if gate.ok else 'bg-rose-900/50 text-rose-400' }}">
+                                        {{ 'UNKNOWN' if gate.ok is none else 'PASS' if gate.ok else 'FAIL' }}
                                     </span>
                                 </td>
                                 <td class="px-3 py-2 font-mono text-xs text-right">{{ gate.value }}</td>
@@ -531,13 +695,15 @@ HTML_TEMPLATE = """
                     </table>
                 </div>
                 <p class="mt-3 text-xs text-slate-500">
+                    {% if readiness.gates_total > 0 %}
                     {{ readiness.gates_passed }}/{{ readiness.gates_total }} data gates pass.
-                    {% if readiness.gates_passed == readiness.gates_total and readiness.gates_total > 0 %}
-                    Data gates pass — necessary, not sufficient. See the non-data checklist below.
-                    {% elif readiness.gates_total > 0 %}
-                    Not ready on data alone — keep forward-testing; see the failing gates above.
+                    {% if readiness.gates_passed == readiness.gates_total %}
+                    Necessary, not sufficient — see the manual checklist below.
                     {% else %}
-                    Insufficient data to score the gates yet (need post-gate closed trades).
+                    Not ready on data alone; UNKNOWN means the evidence is insufficient, not a pass.
+                    {% endif %}
+                    {% else %}
+                    Gate results unavailable; fix the evidence error above before drawing a conclusion.
                     {% endif %}
                 </p>
             </div>
@@ -554,8 +720,9 @@ HTML_TEMPLATE = """
                     {% endfor %}
                 </ul>
                 <p class="mt-3 text-xs text-slate-500">
-                    Details and evidence in docs/REVIEW-2026-10-01.md §6-7;
-                    <code>python3 tools/live_path_probe.py</code> reproduces the order-path findings.
+                    These items are not automatically checked or signed off here. Record evidence and sign-off
+                    separately using docs/EXECUTION-PLAN.md and docs/START-LEVER1.md.
+                    The execution-path probe uses fake MT5; it does not replace a demo soak.
                 </p>
             </div>
 
@@ -563,7 +730,7 @@ HTML_TEMPLATE = """
             <div class="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
                 <h3 class="text-xs font-semibold text-slate-400 uppercase mb-2 tracking-wider">Evidence commands</h3>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono text-slate-300">
-                    <div>python3 tools/live_readiness.py --spread 0.25</div>
+                    <div>python3 tools/live_readiness.py --spread {{ "%.2f"|format(readiness.spread) }}</div>
                     <div>python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25</div>
                     <div>python3 tools/feed_doctor.py</div>
                     <div>python3 tools/check_data.py</div>
@@ -578,36 +745,12 @@ HTML_TEMPLATE = """
     </div>
 </body>
 </html>
-<script>
-    var TAB_STORAGE_KEY = 'nasdaq-dashboard-tab';
-    (function () {
-        var saved = localStorage.getItem(TAB_STORAGE_KEY);
-        if (saved) switchTab(saved);
-    })();
-
-    function switchTab(tab) {
-        document.querySelectorAll('.tab-panel').forEach(function (p) {
-            p.classList.add('hidden');
-        });
-        document.querySelectorAll('.tab-btn').forEach(function (b) {
-            b.classList.remove('bg-cyan-600', 'text-white', 'shadow-md');
-            b.classList.add('text-slate-400');
-        });
-        var panel = document.getElementById('panel-' + tab);
-        if (!panel) return;
-        panel.classList.remove('hidden');
-        var btn = document.getElementById('tab-' + tab);
-        if (btn) {
-            btn.classList.remove('text-slate-400');
-            btn.classList.add('bg-cyan-600', 'text-white', 'shadow-md');
-        }
-        localStorage.setItem(TAB_STORAGE_KEY, tab);
-    }
-</script>
 """
 
 
 @app.route("/")
+@app.route("/journal")
+@app.route("/readiness")
 def index():
     status = {
         "symbol": "US100Cash",
@@ -632,12 +775,34 @@ def index():
         "funnel": {},
     }
 
-    if os.path.isfile(STATUS_FILE_PATH):
-        try:
-            with open(STATUS_FILE_PATH) as f:
-                status.update(json.load(f))
-        except Exception:
-            pass
+    status_available = False
+    try:
+        with open(STATUS_FILE_PATH, encoding="utf-8") as f:
+            payload = json.load(f)
+        required = {"symbol", "equity", "total_trades", "wins", "losses",
+                    "daily_losses", "max_daily_losses", "last_update"}
+        if not isinstance(payload, dict) or not required.issubset(payload):
+            raise ValueError("status.json is missing required fields")
+        for key in ("equity", "win_rate", "entry_price", "stop_loss", "take_profit",
+                    "rsi", "ema_fast", "ema_slow", "atr"):
+            if payload.get(key) is not None:
+                payload[key] = float(payload[key])
+                if not (-1e100 < payload[key] < 1e100):
+                    raise ValueError("invalid numeric status value")
+        for key in ("total_trades", "wins", "losses", "daily_losses", "max_daily_losses"):
+            payload[key] = int(payload[key])
+            if payload[key] < 0:
+                raise ValueError("negative status count")
+        if (payload["equity"] is None or not isinstance(payload["symbol"], str)
+                or payload["max_daily_losses"] == 0 or not isinstance(payload.get("funnel", {}), dict)):
+            raise ValueError("invalid status balance, symbol, risk or funnel state")
+        status.update(payload)
+        status_available = True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    # The regular dashboard may replace displayed counts with the ledger below;
+    # readiness must compare the original engine snapshot, not those replacements.
+    status_for_readiness = dict(status)
 
     ledger_stats = tape_pressure.trade_summary(tape_pressure.read_rows(TRADES_FILE_PATH))
     trade_stats_warning = None
@@ -685,135 +850,31 @@ def index():
             journal_error = f"could not read journal: {e}"
     journal = list(reversed(journal))[:100]
 
-    # ---- Readiness tab computation ---------------------------------------
-    readiness_error = None
-    readiness_ok = None          # True = ready, False = not ready, None = insufficient data
-    readiness_verdict = "INSUFFICIENT DATA"
-    readiness_gates = []
-    readiness_non_data = [
-        "LIVE order path fixed + smoke-tested (close detection by position id, restart reconciliation, "
-        "spread guard, filling mode, None-result handling)",
-        "an order executor that can run where MT5 runs (the Linux engine cannot import MetaTrader5)",
-        "XM spread profile measured (Asia/London/NY/weekend) + commission/swap confirmed -> new --spread",
-        "demo-account run through the real order path; sim-vs-demo trade parity reviewed",
-        "same-feed parity: a forward run on DATA_SOURCE=MT5 shows comparable signal flow",
-        "kill switches: equity floor, max spread, stale-feed alarm, manual halt - all tested",
-        "micro-live caps agreed in writing (size, max loss, weekday-only or not)",
-    ]
-
-    try:
-        feed_block = (status or {}).get("feed") or {}
-        feed_ok = bool(feed_block.get("ok")) or feed_block.get("reason") == feed_health.REASON_OK
-        total_trades = int(status.get("total_trades") or 0)
-        wins = int(status.get("wins") or 0)
-        losses = int(status.get("losses") or 0)
-        daily_losses = int(status.get("daily_losses") or 0)
-        max_daily_losses = int(status.get("max_daily_losses") or 3)
-        equity = float(status.get("equity") or 0)
-        win_rate = float(status.get("win_rate") or 0)
-
-        # Lightweight data gates computed from what the dashboard already has.
-        # These mirror tools/live_readiness.py §8 but stay read-only and cheap.
-        gates = []
-
-        # Gate 1: sample — enough post-gate closed trades to speak (progressive threshold).
-        sample_ok = total_trades >= 10
-        gates.append({
-            "label": "sample: >= 10 closed trades (forward-test evidence)",
-            "ok": sample_ok,
-            "value": str(total_trades),
-            "note": "live_readiness requires >= 100 post-gate trades for a go/no-go",
-        })
-
-        # Gate 2: edge — win rate vs the 1:2 R:R breakeven (33.3%) only when there is data.
-        be_wr = 33.3
-        edge_ok = total_trades > 0 and win_rate >= be_wr
-        gates.append({
-            "label": "edge: win rate >= 1:2 breakeven (~33.3%)",
-            "ok": edge_ok,
-            "value": f"{win_rate:.1f}% ({wins}W/{losses}L)",
-            "note": "bootstrap P(net/trade>0) >= 90% is scored by live_readiness.py",
-        })
-
-        # Gate 3: cost — equity above the $200 day-0 ledger means net-positive so far.
-        cost_ok = total_trades == 0 or equity > 200.0
-        gates.append({
-            "label": "cost: equity above $200.00 day-0 ledger",
-            "ok": cost_ok,
-            "value": f"${equity:,.2f}",
-            "note": "assumed $0.25/trade; break-even cover >= 2.0x scored by live_readiness.py",
-        })
-
-        # Gate 4: recent form — daily circuit breaker not tripped.
-        recent_ok = daily_losses < max_daily_losses
-        gates.append({
-            "label": "recent form: daily loss circuit breaker open",
-            "ok": recent_ok,
-            "value": f"{daily_losses}/{max_daily_losses} SLs",
-            "note": "$15/day max loss; 3-SL daily circuit breaker",
-        })
-
-        # Gate 5: feed — M15 feed healthy enough to trade.
-        feed_ok_gate = bool(feed_ok)
-        gates.append({
-            "label": "feed: M15 feed fresh and usable",
-            "ok": feed_ok_gate,
-            "value": "OK" if feed_ok else (feed_block.get("reason") or "PROBLEM"),
-            "note": feed_block.get("detail") or "no feed data",
-        })
-
-        # Gate 6: data integrity — trades.csv agree with status.json (already verified in index).
-        data_ok = bool(status_counts_match) if ledger_stats["total_trades"] else True
-        gates.append({
-            "label": "data: status.json agrees with trades.csv",
-            "ok": data_ok,
-            "value": "agree" if data_ok else "drift",
-            "note": "run python3 tools/check_data.py and handoff_check.py",
-        })
-
-        readiness_gates = gates
-        passed = sum(1 for g in gates if g["ok"])
-        readiness_gates_passed = passed
-        readiness_gates_total = len(gates)
-
-        if total_trades == 0:
-            readiness_ok = None
-            readiness_verdict = "INSUFFICIENT DATA"
-        elif not feed_ok_gate:
-            readiness_ok = False
-            readiness_verdict = "NOT READY — FEED"
-        elif not all(g["ok"] for g in gates):
-            readiness_ok = False
-            readiness_verdict = "NOT READY"
-        else:
-            readiness_ok = True
-            readiness_verdict = "DATA GATES PASS"
-
-    except Exception as exc:  # never let the readiness tab break the dashboard
-        readiness_error = f"readiness computation failed: {type(exc).__name__}: {exc}"
-
+    feed = feed_banner(status_for_readiness)
+    readiness = readiness_snapshot(status_for_readiness, status_available, feed)
+    active_tab = request.path.strip("/") or "dashboard"
     return render_template_string(
         HTML_TEMPLATE,
+        active_tab=active_tab,
         rows=recent_rows,
         status=status,
+        status_available=status_available,
         total=total_rows,
         funnel=funnel,
         pressure=pressure_read,
         location=location_read,
         trade_stats_warning=trade_stats_warning,
-        feed=feed_banner(status),
+        feed=feed,
         journal=journal,
         journal_error=journal_error,
-        readiness={
-            "ok": readiness_ok,
-            "verdict": readiness_verdict,
-            "error": readiness_error,
-            "gates": readiness_gates,
-            "gates_passed": readiness_gates_passed,
-            "gates_total": readiness_gates_total,
-            "non_data": readiness_non_data,
-        },
+        readiness=readiness,
     )
+
+
+@app.route("/healthz")
+def healthz():
+    # Liveness only: feed and trading readiness are deliberately not implied.
+    return {"status": "ok", "scope": "dashboard process only"}
 
 
 if __name__ == "__main__":

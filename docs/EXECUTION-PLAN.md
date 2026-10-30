@@ -1,8 +1,10 @@
 # Execution Plan — Nasdaq-100 (`US100Cash`) M15 Bot
 
-**Branch:** `arena/940811db-nasdaq-trading-bot` (fixed for this session)
-**Reviewed:** 2026-10-30 (local UTC)
-**Status:** FORWARD_TEST, 1 closed trade (1W/0L), equity $222.70, feed OK in `status.json`
+**Branch:** `arena/5616f46c-nasdaq-trading-bot` (fixed for this session; use the active branch in future sessions)
+**Reviewed:** 2026-10-30 (UTC)
+**Status:** Phase 1 in progress; live-server feed verification and missing-candle investigation are outstanding.
+
+The checked-in snapshot is **not live telemetry**: as of `status.json` at 2026-10-30 09:00 UTC it records FORWARD_TEST, one closed trade (1W/0L) and a gross engine ledger of $222.70. A historical `feed: OK` in that file does not prove the feed is currently healthy.
 
 Every prompt in this session should follow this plan. Work is ordered: **stabilize → evidence → soak → gates → live**. Do not skip a phase.
 
@@ -15,11 +17,20 @@ Goal: make the repo self-describing and the dashboard show a trustworthy readine
 | # | Task | Command / Artifact | Acceptance |
 |---|------|-------------------|------------|
 | 1.1 | Refresh HANDOFF snapshot | `python3 tools/handoff_check.py --update` | `docs/HANDOFF.md` snapshot block matches live data (no `[ drift ]` / `[ STALE ]`) |
-| 1.2 | Run full verification ladder | `tools/feed_doctor.py`, `tools/check_data.py`, `tools/smoke_test.py`, `tools/live_path_probe.py` | 0 failures; warnings only where explained (CME maintenance break gaps) |
-| 1.3 | Add **Readiness** tab to dashboard | `dashboard.py` — new nav tab + panel | Tab renders feed verdict, data-gate pass/fail, trade stats, readiness verdict, non-data checklist |
-| 1.4 | Commit + push | `git commit` / `git push origin arena/940811db-nasdaq-trading-bot` | Working tree clean, branch ahead of `main` by plan commits |
+| 1.2 | Run full verification ladder | `tools/feed_doctor.py`, `tools/check_data.py`, `tools/smoke_test.py`, `tools/live_path_probe.py` | 0 failures; all warnings investigated, including any CME maintenance-boundary gaps |
+| 1.3 | Verify **Readiness** tab | `dashboard.py` — nav tab + `/readiness` panel | Tab renders the current feed verdict, the same six data gates as `live_readiness.py`, trade stats, readiness verdict and an unsigned non-data checklist |
+| 1.4 | Commit + push | `git commit` / `git push origin arena/5616f46c-nasdaq-trading-bot` | Working tree clean; work remains on the active development branch |
 
-**Definition of done for Phase 1:** `python3 tools/check_data.py` exits 0, `tools/handoff_check.py` reports no problems, dashboard loads on `:6001` with a working Readiness tab.
+**Definition of done for Phase 1:** `python3 tools/check_data.py` exits 0 with its warnings investigated, `tools/handoff_check.py` reports no problems, the offline tests and execution probe pass, the dashboard loads on `:6001` with a working Readiness tab, and `tools/feed_doctor.py` is verified on the actual MT5 host.
+
+### Phase 1 verification notes — checkout snapshot, 2026-10-30
+
+- The HANDOFF snapshot has been refreshed. `check_data.py` exits 0 but reports **16 missing open-market M15 slots**. Four are 21:00 UTC bars adjacent to the daily maintenance break; **12 occurred during open-market hours on October 30** (04:45–05:00, 06:00–07:00, 07:30–08:00 and 08:30–08:45 UTC). All 16 missing slots are present in the checked-in XM candle backfill. Their absence from the engine's forward log is **not yet explained**; investigate the engine/feed/journals on the VPS. Do not edit or backfill the forward ledger to hide the gaps.
+- `feed_doctor.py` returns `FILE_MISSING` in this isolated development checkout because there is no local MT5 feed/heartbeat. This does **not** establish the VPS feed's present state; rerun the doctor and verification ladder on `/opt/nasdaq`.
+- The offline smoke suite and `live_path_probe.py` exercise temporary files and **fake MT5**, not a real XM demo or live account. Passing them does not complete the execution soak.
+- The checked-in ledger has **1/100** post-gate trades. `live_readiness.py --spread 0.25` currently shows **0/6** data gates passing: the sample and the 90-minute open-market gap fail; four statistical gates remain unknown. The dashboard also checks current feed/heartbeat and snapshot freshness independently.
+
+The Readiness page and CLI deliberately fail closed on missing/malformed evidence. Scheduled closures split gap runs, but missing open-market candles remain visible. `UNKNOWN` is not `PASS`; even 6/6 data gates passing does not replace the manual contract/cost, demo-soak and kill-switch sign-offs.
 
 ---
 

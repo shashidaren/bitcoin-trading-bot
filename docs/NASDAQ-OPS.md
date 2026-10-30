@@ -1,6 +1,6 @@
 # NASDAQ-OPS — `/opt/nasdaq` Operations Runbook (`US100Cash` M15)
 
-Day-to-day install, service, and triage reference for the XM **Nasdaq-100 Cash Index CFD (`US100Cash`)** `M15` bot on the Linux VPS. Start every session at `docs/HANDOFF.md`; this page is the operational "how", not the strategy spec.
+Day-to-day install, service, and triage reference for the XM **Nasdaq-100 Cash Index CFD (`US100Cash`)** `M15` bot on the Linux VPS. Start every session at `docs/EXECUTION-PLAN.md` and check `docs/HANDOFF.md`; this page is the operational "how", not the strategy spec.
 
 - **Root:** `/opt/nasdaq` (code, CSVs, `xm_data/`, `mt5_bridge/`, `venv/`)
 - **Runtime split:** Linux `venv` python for `engine.py` / `dashboard.py`; **Wine** python (`C:/Python312/python.exe`, `WINEPREFIX=/root/.mt5`) for the three MT5 sidecars
@@ -72,7 +72,7 @@ Then confirm the bot identity is current (`git config user.name` should print `n
 | Systemd Unit | Template | Runtime | Role | Health |
 |---|---|---|---|---|
 | `nasdaq-engine` | `deploy/nasdaq-engine.service` | `/opt/nasdaq/venv/bin/python` | `engine.py` — closed `M15` evaluation + `FORWARD_TEST`/`LIVE` | `journalctl -u nasdaq-engine -f` |
-| `nasdaq-dashboard` | `deploy/nasdaq-dashboard.service` | `/opt/nasdaq/venv/bin/python` | `dashboard.py` on `0.0.0.0:6001` | `curl -s localhost:6001/healthz` |
+| `nasdaq-dashboard` | `deploy/nasdaq-dashboard.service` | `/opt/nasdaq/venv/bin/python` | `dashboard.py` on `0.0.0.0:6001` | `curl -s localhost:6001/healthz` (process liveness only); open `/readiness` for evidence and feed status |
 | `mt5feed-nasdaq` | `deploy/mt5feed.service` | Wine (`/root/.mt5`) | `tools/mt5_feed.py` → `mt5_last_candle.json` + 250-bar `mt5_warmup_candles.json` + heartbeat `mt5_feed_health.json` | `python3 tools/feed_doctor.py` → `OK` |
 | `mt5quotes-nasdaq` | `deploy/mt5quotes.service` | Wine (`/root/.mt5`) | read-only `tools/mt5_quotes.py` → `xm_data/` + 12,000-bar `candles_m15.csv` | `xm_quote_report.py --quiet` |
 | `mt5exec-nasdaq` | `deploy/mt5exec.service` | Wine (`/root/.mt5`) | `tools/mt5_executor.py` bridge (`MT5_EXEC_ENABLED=0` dormant) | `mt5_bridge/result.json` |
@@ -88,8 +88,9 @@ cd /opt/nasdaq
 python3 tools/feed_doctor.py           # WHY is the M15 feed stale? (reason + heartbeat + witness)
 python3 tools/check_data.py            # CSV integrity + freshness (market-hours aware)
 python3 tools/handoff_check.py         # docs/HANDOFF.md snapshot vs live data
-python3 tools/smoke_test.py            # offline regression suite (engine/filter/sidecars/units)
-python3 tools/live_path_probe.py       # 11/11 execution-path checks (no orders sent)
+python3 tools/smoke_test.py            # offline regression suite (uses venv Flask for dashboard tests if available)
+python3 tools/live_path_probe.py       # 11/11 execution-path checks against fake MT5 (no orders sent)
+/opt/nasdaq/venv/bin/python -m unittest discover -s tests -v  # shared gates + Flask dashboard
 python3 tools/xm_quote_report.py       # spread, contract spec, M15 parity, blackout map
 python3 tools/backtest.py xm_data/candles_m15.csv --spread 0.25
 ```

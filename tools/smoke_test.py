@@ -32,6 +32,8 @@ Scenarios:
   R) Feed diagnosis (feed_health.py + tools/feed_doctor.py) -> reason taxonomy (missing/unreadable/schema/
                                                     foreign-symbol/future/frozen), freeze-instant alerts that
                                                     survive an engine restart, counter-reset forensics
+  S) Readiness report + dashboard              -> shared gates, fail-closed evidence and feed, deep links
+                                                    (Flask-specific tests require Flask to be installed)
 
 Usage: python3 tools/smoke_test.py
 """
@@ -770,9 +772,9 @@ check("O: pressure.py is read-only and mirrors engine US100Cash M15 constants",
       and abs(pressure.MAX_BELOW_EMA_ATR - engine.MAX_BELOW_EMA_ATR) < 1e-9)
 
 dash_src = open(os.path.join(ROOT, "dashboard.py"), encoding="utf-8").read()
-check("O: dashboard.py serves US100Cash M15 on /opt/nasdaq (port 6001) and defines TAB_STORAGE_KEY",
-      "US100Cash" in dash_src and "TAB_STORAGE_KEY" in dash_src
-      and "/opt/nasdaq" in dash_src and "port=6001" in dash_src)
+check("O: dashboard.py serves US100Cash M15 on /opt/nasdaq (port 6001) with a readiness deep link",
+      "US100Cash" in dash_src and '@app.route("/readiness")' in dash_src
+      and 'href="/readiness"' in dash_src and "/opt/nasdaq" in dash_src and "port=6001" in dash_src)
 
 check("O: dashboard.py reads the feed verdict + sidecar heartbeat and renders a reason banner",
       "feed_health" in dash_src and "def feed_banner(" in dash_src
@@ -785,6 +787,11 @@ check("O: autosync.sh targets /opt/nasdaq and uses static mt5quotes-nasdaq STALE
       "/opt/nasdaq" in auto_src
       and "systemctl status mt5quotes-nasdaq" in auto_src
       and "XM quote logger stopped writing - check: systemctl status mt5quotes-nasdaq" in auto_src)
+_dash_change_line = next((line for line in auto_src.splitlines() if "DASH_CHANGED=$(git diff" in line), "")
+check("O: autosync restarts the dashboard when imported readiness/feed modules change",
+      all(path in _dash_change_line for path in ("dashboard.py", "pressure.py", "feed_health.py",
+                                                  "trade_filter.py", "tools/live_readiness.py",
+                                                  "tools/replay_lib.py")))
 check("O: autosync.sh pins git user.name to 'nasdaq-autosync' (a pre-rename clone cannot leak the old identity)",
       'git config user.name "nasdaq-autosync"' in auto_src
       and "git config user.name  >/dev/null 2>&1 ||" not in auto_src)
@@ -1210,6 +1217,9 @@ with open(_hp, "w", encoding="utf-8") as fh:
                "terminal_connected": False, "tick_age_s": 5400.0, "server_offset_s": None,
                "last_error": "terminal tick is 90 min old", "reconnects": 2,
                "updated_at": "2026-10-26 15:15:00"}, fh)
+# The diagnosis uses the file mtime, not the JSON timestamp. Anchor the fixture
+# to the same synthetic clock so this remains deterministic after October 2026.
+os.utime(_hp, (_now_r - 180, _now_r - 180))
 health_r = FH.diagnose_sidecar_health(_hp, now_epoch=_now_r)
 _sum = FH.summarize_sidecar(health_r)
 check("R: heartbeat detected as present but NOT fresh (120s rule)",
@@ -1304,6 +1314,30 @@ check("R: feed_doctor --json is machine-readable for autosync/alerting", _json_o
 shutil.rmtree(tmp_r, ignore_errors=True)
 
 # ==============================================================================
+# Scenario S: shared readiness gates + Flask dashboard (no trading APIs)
+# ==============================================================================
+print("\nScenario S: readiness data gates + dashboard fail-closed regression tests")
+# Autosync invokes system python, while Flask is usually installed in the
+# dashboard venv. Prefer any available interpreter that can exercise the UI.
+_test_python = sys.executable
+for candidate in (sys.executable, os.path.join(ROOT, "venv", "bin", "python"),
+                  os.path.join(ROOT, ".venv", "bin", "python")):
+    if os.path.isfile(candidate):
+        has_flask = subprocess.run([candidate, "-c", "import flask"],
+                                   capture_output=True, timeout=15).returncode == 0
+        if has_flask:
+            _test_python = candidate
+            break
+_readiness_tests = subprocess.run(
+    [_test_python, "-m", "unittest", "discover", "-s", "tests"],
+    cwd=ROOT, capture_output=True, text=True, timeout=120)
+check("S: readiness regression suite passes", _readiness_tests.returncode == 0,
+      (_readiness_tests.stderr or _readiness_tests.stdout).strip()[-400:])
+if "skipped=" in _readiness_tests.stderr:
+    print("  [info] Flask is unavailable; dashboard route tests were skipped. "
+          "Install Flask and rerun this suite before dashboard deployment.")
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 print("\n" + "=" * 66)
@@ -1312,5 +1346,5 @@ if FAILURES:
     for f in FAILURES:
         print(f"  - {f}")
     sys.exit(1)
-print("ALL SMOKE TEST SCENARIOS (A-R) PASSED FOR US100Cash M15 (/opt/nasdaq)")
+print("ALL SMOKE TEST SCENARIOS (A-S) PASSED FOR US100Cash M15 (/opt/nasdaq)")
 sys.exit(0)
