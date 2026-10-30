@@ -795,6 +795,13 @@ check("O: autosync restarts the dashboard when imported readiness/feed modules c
 check("O: autosync.sh pins git user.name to 'nasdaq-autosync' (a pre-rename clone cannot leak the old identity)",
       'git config user.name "nasdaq-autosync"' in auto_src
       and "git config user.name  >/dev/null 2>&1 ||" not in auto_src)
+_auto_code_lines = [line for line in auto_src.splitlines() if not line.lstrip().startswith("#")]
+check("O: autosync rollback preserves live data - no git reset --hard, soft-reset + verified data commits",
+      not any("reset --hard" in line for line in _auto_code_lines)
+      and "git reset --soft" in auto_src
+      and "commit_live_data" in auto_src
+      and "verify_data_preserved" in auto_src
+      and "refs/autosync/pre-deploy" in auto_src)
 
 # ==============================================================================
 # Scenario P: tools/mt5_executor.py + LIVE bridge + deploy/*.service audit
@@ -1271,6 +1278,10 @@ _q_now = datetime.now(timezone.utc)
 with open(os.path.join(inc, "xm_data", f"quotes-{_q_now:%Y-%m-%d}.csv"), "w", newline="") as fh:
     fh.write("ts_utc,bid,ask,spread,spread_min,spread_max,n_ok,n_bad,tick_age_s,srv_offset_s,flags\n")
     fh.write(f"{_q_now:%Y-%m-%d %H:%M:%S},29300.0,29302.9,2.9,2.9,2.9,6,0,1.0,7200,\n")
+_bar_close_r = _q_now - timedelta(minutes=21)
+with open(os.path.join(inc, "xm_data", "candles_m15.csv"), "w", newline="") as fh:
+    fh.write("bar_close_utc,open,high,low,close,tick_volume,spread_pts,time_srv,offset_s\n")
+    fh.write(f"{_bar_close_r:%Y-%m-%d %H:%M:%S},29300.0,29330.0,29290.0,29320.0,450,290,0,7200\n")
 _doc_broken = subprocess.run([sys.executable, os.path.join(HERE, "feed_doctor.py"),
                               "--data-dir", inc, "--journal", os.path.join(inc, "journal.csv"),
                               "--assume-open"], cwd=ROOT, capture_output=True, text=True, timeout=60)
@@ -1282,6 +1293,8 @@ check("R: feed_doctor proves MT5 is fine when the quote logger is still recordin
 check("R: feed_doctor flags the 890 -> 20 min counter reset in the journal",
       "counter reset" in _doc_broken.stdout)
 check("R: feed_doctor never raises a traceback", "Traceback" not in _doc_broken.stderr)
+check("R: feed_doctor witness treats bar_close_utc as a CLOSE time (21 min old, not 6)",
+      "closed 21 min ago" in _doc_broken.stdout)
 
 _healthy = os.path.join(tmp_r, "healthy")
 os.makedirs(os.path.join(_healthy, "xm_data"), exist_ok=True)
