@@ -3,18 +3,18 @@
 <!-- HANDOFF-SNAPSHOT machine-checked by tools/handoff_check.py; refresh with --update -->
 | key | value |
 |---|---|
-| as_of_utc | 2026-10-24 15:59 |
-| data_collection | 4214 |
-| closed_trades | 0 |
-| wins_losses | 0W/0L |
-| win_rate_pct | 0.0 |
-| engine_ledger_usd | 200.00 |
-| true_equity_usd | 200.00 |
-| live_era_trades | 0 |
-| live_era_net_usd | +0.00 |
-| log_covered_trades | 0 |
-| log_bars | 0 |
-| log_last_bar_utc | none |
+| as_of_utc | 2026-10-30 04:00 |
+| data_collection | 4738 |
+| closed_trades | 1 |
+| wins_losses | 1W/0L |
+| win_rate_pct | 100.0 |
+| engine_ledger_usd | 222.70 |
+| true_equity_usd | 222.70 |
+| live_era_trades | 1 |
+| live_era_net_usd | +22.45 |
+| log_covered_trades | 1 |
+| log_bars | 311 |
+| log_last_bar_utc | 2026-10-30 04:00 |
 | skip_rows | 0 |
 | open_trade | none |
 | spread_usd_per_trade | 0.25 |
