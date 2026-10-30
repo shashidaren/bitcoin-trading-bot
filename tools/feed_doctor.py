@@ -64,10 +64,21 @@ def _last_csv_row(path):
         return None
 
 
+def _csv_header(path):
+    """First line of a CSV as a list of column names, or None."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+        return first.split(",") if first else None
+    except OSError:
+        return None
+
+
 def witness_quotes(xm_dir, now_epoch):
     """Independent evidence from the read-only quote logger (different service, same login)."""
     out = {"quotes_file": None, "quotes_age_s": None, "quotes_tick_age_s": None,
            "candles_file": None, "last_bar_close_age_s": None, "last_bar_open_utc": None,
+           "last_bar_close_utc": None,
            "last_quote_utc": None, "server_offset_s": None}
     if not os.path.isdir(xm_dir):
         return out
@@ -92,15 +103,33 @@ def witness_quotes(xm_dir, now_epoch):
     cpath = os.path.join(xm_dir, "candles_m15.csv")
     if os.path.isfile(cpath):
         out["candles_file"] = cpath
+        # The logger's schema (tools/mt5_quotes.py CANDLE_FIELDS) keys each row by
+        # bar_CLOSE_utc. Treating that value as an open time and adding another
+        # CANDLE_SECONDS understates the bar age by exactly one bar (15 min), so a
+        # witness bar that closed e.g. 21 min ago was reported as "closed 6 min
+        # ago" and could wrongly prove MT5 alive. Resolve the timestamp column
+        # from the header and fail closed (age unknown) on an unknown schema.
+        header = _csv_header(cpath)
         row = _last_csv_row(cpath)
-        if row and len(row) >= 1:
-            out["last_bar_open_utc"] = row[0]
+        ts_idx, ts_is_close = 0, True
+        if header:
+            if "bar_close_utc" in header:
+                ts_idx, ts_is_close = header.index("bar_close_utc"), True
+            elif "bar_open_utc" in header:
+                ts_idx, ts_is_close = header.index("bar_open_utc"), False
+            else:
+                row = None            # unknown schema: do not guess a timestamp
+        if row and len(row) > ts_idx:
             try:
-                bar_open = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(
+                ts = datetime.strptime(row[ts_idx], "%Y-%m-%d %H:%M:%S").replace(
                     tzinfo=timezone.utc).timestamp()
-                out["last_bar_close_age_s"] = max(0.0, now_epoch - (bar_open + FH.CANDLE_SECONDS))
             except ValueError:
-                pass
+                ts = None             # e.g. header-only file: no bar to report
+            if ts is not None:
+                bar_close = ts if ts_is_close else ts + FH.CANDLE_SECONDS
+                out["last_bar_close_utc"] = FH.utc_str(bar_close)
+                out["last_bar_open_utc"] = FH.utc_str(bar_close - FH.CANDLE_SECONDS)
+                out["last_bar_close_age_s"] = max(0.0, now_epoch - bar_close)
     return out
 
 
@@ -239,7 +268,8 @@ def _print_detail(report):
     print(f"witness     : {w['quotes_file']}")
     print(f"  last quote: {w['last_quote_utc']} ({_fmt_minutes(w['quotes_age_s'])} ago)"
           f"  tick_age={w['quotes_tick_age_s']}  srv_offset={w['server_offset_s']}")
-    print(f"  last bar  : {w['last_bar_open_utc']} (closed {_fmt_minutes(w['last_bar_close_age_s'])} ago)"
+    print(f"  last bar  : open {w['last_bar_open_utc']} close {w['last_bar_close_utc']}"
+          f" (closed {_fmt_minutes(w['last_bar_close_age_s'])} ago)"
           f"  file={w['candles_file']}")
     print()
     events = report["journal"]["feed_alerts"]
